@@ -1,6 +1,6 @@
 # k6 Module Resolution Freeze: Init vs. VU Execution Deep Dive
 
-> **k6 version**: v0.55.0 (commit ddc3b0b1d2, go 1.21, toolchain go1.21.13)
+> **k6 version**: v0.55.0 (commit ddc3b0b1d2; go.mod minimum: go 1.21, toolchain go1.21.13; binary built with go1.22.2)
 >
 > This document provides a comprehensive, code-backed investigation into k6's module resolution
 > behavior during VU execution versus initialization. Every claim cites the exact source file and
@@ -14,7 +14,7 @@
 2. [The Module Resolution Freeze Mechanism](#2-the-module-resolution-freeze-mechanism)
 3. [Relative Specifier Resolution Across Call Sites](#3-relative-specifier-resolution-across-call-sites)
 4. [Empirical Demonstrations (Real k6 Runs)](#4-empirical-demonstrations-real-k6-runs)
-5. [The open() Parallel — Analogous Freeze for Files](#5-the-open-parallel--analogous-freeze-for-files)
+5. [The open() Parallel - Analogous Freeze for Files](#5-the-open-parallel---analogous-freeze-for-files)
 6. [Summary and Practical Guidance](#6-summary-and-practical-guidance)
 
 ---
@@ -136,7 +136,7 @@ type moduleVUImpl struct {
 Once `state != nil`, the `requireImpl.require()` method's init-context guard fires:
 
 ```go
-// Source: js/bundle.go:424-428
+// Source: js/bundle.go:424-429
 func (r *requireImpl) require(specifier string) (*sobek.Object, error) {
     if !r.inInitContext() {
         return nil, fmt.Errorf(cantBeUsedOutsideInitContextMsg, "require")
@@ -206,7 +206,7 @@ func (mr *ModuleResolver) Lock() {
 }
 ```
 
-Note the GoDoc comment explicitly states this is "the same approach used for opening file operations" — a parallel we explore in [Section 5](#5-the-open-parallel--analogous-freeze-for-files).
+Note the GoDoc comment explicitly states this is "the same approach used for opening file operations" — a parallel we explore in [Section 5](#5-the-open-parallel---analogous-freeze-for-files).
 
 ### 2.3 How the Cache Determines "Already Resolved" vs. "New"
 
@@ -286,7 +286,7 @@ k6 has **two distinct protection layers** that prevent module loading at differe
 
 #### Layer 1: Init Context Guard (VU Execution Block)
 
-**Where**: `js/bundle.go:424-428`
+**Where**: `js/bundle.go:424-429`
 
 **When it fires**: During **VU execution** (when the `export default function()` body runs). At this point, `vu.state != nil`.
 
@@ -327,7 +327,9 @@ the module "<specifier>" was not previously resolved during initialization (__VU
 
 ```mermaid
 flowchart TD
-    A["require(specifier) or import specifier"] --> B{"requireImpl.require():<br/>vu.state == nil?"}
+    A1["require(specifier)"] --> B{"requireImpl.require():<br/>vu.state == nil?"}
+    A2["import specifier<br/>(ESM — top-level only)"] --> D
+
     B -- "No (VU executing)" --> C["ERROR: the 'require' function is<br/>only available in the init stage"]
     B -- "Yes (init context)" --> D{"Starts with 'k6/' or is 'k6'?"}
     D -- Yes --> E{"In cache?<br/>(mr.cache[arg])"}
@@ -348,6 +350,8 @@ flowchart TD
     style I fill:#51cf66,color:#000
     style M fill:#51cf66,color:#000
 ```
+
+> **Note**: ESM `import` statements bypass `requireImpl.require()` entirely and enter the resolver directly via `sobekModuleResolver()` → `resolve()` (see [Section 3.1](#31-esm-import-sobekmoduleresolver--reversepath)). Since `import` is syntactically required at the top level, it always executes during init and never encounters the init-context guard (Layer 1).
 
 ---
 
@@ -628,7 +632,7 @@ for more information
 executor=shared-iterations scenario=default source=stacktrace
 ```
 
-**Analysis**: This is **Layer 1** (the init-context guard) in action. The `requireImpl.require()` method at `js/bundle.go:424-428` checks `r.inInitContext()`, which returns `vu.state == nil`. During VU execution, `vu.state` has been set to a non-nil value (at `js/runner.go:247`), so the check fails immediately. The error message is the verbatim `cantBeUsedOutsideInitContextMsg` constant from `js/initcontext.go:15-16`.
+**Analysis**: This is **Layer 1** (the init-context guard) in action. The `requireImpl.require()` method at `js/bundle.go:424-429` checks `r.inInitContext()`, which returns `vu.state == nil`. During VU execution, `vu.state` has been set to a non-nil value (at `js/runner.go:247`), so the check fails immediately. The error message is the verbatim `cantBeUsedOutsideInitContextMsg` constant from `js/initcontext.go:15-16`.
 
 Note: the resolver lock (Layer 2) is never even consulted — Layer 1 blocks the call before it reaches the resolver.
 
@@ -937,7 +941,7 @@ INFO[0000] VU 2 md5=4244876f0e645154912e413dcbb89c36          source=console
 
 ---
 
-## 5. The open() Parallel — Analogous Freeze for Files
+## 5. The open() Parallel - Analogous Freeze for Files
 
 The module resolution freeze is not an isolated mechanism — it follows a pattern used throughout k6. The `open()` function, which reads files from disk, implements an analogous freeze.
 
@@ -969,9 +973,10 @@ When a VU tries to `open()` a file that was never opened during bundle init, the
 func readFile(fileSystem fsext.Fs, filename string) (data []byte, err error) {
     defer func() {
         if errors.Is(err, fsext.ErrPathNeverRequestedBefore) {
+            // loading different files per VU is not supported, so all files should are going
+            // to be used inside the scenario should be opened during the init step (without any conditions)
             err = fmt.Errorf(
-                "open() can't be used with files that weren't previously opened "+
-                "during initialization (__VU==0), path: %q",
+                "open() can't be used with files that weren't previously opened during initialization (__VU==0), path: %q",
                 filename,
             )
         }
