@@ -7,7 +7,7 @@
 | **Repository** | `go.k6.io/k6` |
 | **Branch** | `k6_ddc3b0b1d23c` |
 | **Go Version** | 1.21 (toolchain go1.21.13, per `go.mod:3-5`) |
-| **Primary File Under Analysis** | `lib/netext/httpext/tracer.go` (385 lines) |
+| **Primary File Under Analysis** | `lib/netext/httpext/tracer.go` (384 lines) |
 | **Document Type** | Technical Investigation & Q&A Analysis |
 
 ---
@@ -655,6 +655,15 @@ wroteRequest := atomic.LoadInt64(&t.wroteRequest)
 gotFirstResponseByte := atomic.LoadInt64(&t.gotFirstResponseByte)
 ```
 
+**Note on non-atomic reads at line 323:** The `Blocked` calculation at `tracer.go:323` reads `t.gotConn` and `t.getConn` using plain (non-atomic) field access:
+
+```go
+// Source: tracer.go:323
+if t.gotConn != 0 && t.getConn != 0 && t.gotConn > t.getConn {
+```
+
+This asymmetry with the atomic reads at lines 332-338 is intentional and safe. Both `t.getConn` (written by `GetConn()` at line 188) and `t.gotConn` (written by `GotConn()` at line 261) use plain writes — not atomic stores — because `GetConn` is always the first callback and `GotConn` fires during the HTTP round trip before it returns. By the time `Done()` is called, both writes have completed with a happens-before guarantee from the HTTP round trip's return. In contrast, the fields read atomically at lines 332-338 (`connectStart`, `connectDone`, etc.) are written by callbacks that use atomic CAS/Swap/Store and could theoretically fire late (after the round trip returns) for cancelled requests — hence they require atomic reads.
+
 ### Correctness Review of All 8 Callback Handlers
 
 | # | Handler | Line | Operation | Safety Analysis |
@@ -874,7 +883,7 @@ Every observed behavior traces to intentional design or defensive handling:
 
 | Issue | Go Issue | Status | Referenced In |
 |-------|----------|--------|--------------|
-| HTTP/2 `GotConn.Reused` false-negative | [golang/go#27753](https://github.com/golang/go/issues/27753) | Open/Tracked | `tracer.go:279-283` comment |
+| HTTP/2 `GotConn.Reused` false-negative | [golang/go#27753](https://github.com/golang/go/issues/27753) | Open/Tracked | External research (behavior described at `tracer.go:279-283`, issue not cited by number in source) |
 | Windows timer resolution (`time.Now()`) | [golang/go#8687](https://github.com/golang/go/issues/8687) | Known | `tracer_test.go:35` comment |
 | Windows timer resolution (sleep) | [golang/go#41087](https://github.com/golang/go/issues/41087) | Known | `tracer_test.go:36` comment |
 | httptrace/persistConn race condition | [golang/go#59310](https://github.com/golang/go/issues/59310) | Open/Tracked | External research |
@@ -963,7 +972,7 @@ The comment at lines 327-331 acknowledges that httptrace callbacks can fire **af
 // well (or use global Tracer locking) so we can avoid data races.
 ```
 
-All timestamp reads in `Done()` use `atomic.LoadInt64` (lines 332-338) to prevent data races. This means metrics are **best-effort snapshots**, not transactional reads. The test at `tracer_test.go:257-292` (`TestCancelledRequest`) validates this with 200 parallel cancellations.
+The 7 timestamp reads at lines 332-338 use `atomic.LoadInt64` to prevent data races with late-firing callbacks. This means metrics are **best-effort snapshots**, not transactional reads. Note that the `Blocked` calculation at line 323 reads `t.gotConn` and `t.getConn` using plain (non-atomic) access — this is safe because both fields are written with plain writes during the round trip's normal callback sequence (before `Done()` is called), unlike the other timestamp fields which may be written by concurrently-firing atomic operations. See [Observation 6 — Late-callback awareness](#3-late-callback-awareness) for a detailed explanation of this asymmetry. The test at `tracer_test.go:257-292` (`TestCancelledRequest`) validates the atomic safety with 200 parallel cancellations.
 
 ### Supplementary D: HTTP/2 Enabled by Default
 
