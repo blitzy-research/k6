@@ -213,7 +213,7 @@ iteration). The `MustNewMetric()` calls panic on failure because a
 misregistered built-in metric is a programming error, not a runtime
 condition.
 
-### Metric Definition (`metrics/metric.go` — 120 lines)
+### Metric Definition (`metrics/metric.go` — 146 lines)
 
 This file defines the `Metric` and `Submetric` structs — the core data
 types that represent every metric in k6.
@@ -242,7 +242,7 @@ types that represent every metric in k6.
 - **`ParseMetricName(name)`** (line 90): Parses metric name expressions
   of the form `metric_name{tag_key:tag_value,...}` into the base name and
   a tag list. Used when resolving threshold targets.
-  Source: `metrics/metric.go:90-120`
+  Source: `metrics/metric.go:90-146`
 
 **Why this design:** Separating the metric definition (`Metric`) from the
 accumulation logic (`Sink`) and the type enum (`MetricType`) keeps each
@@ -251,7 +251,7 @@ target tag-filtered slices of data without duplicating the entire pipeline
 — each submetric simply gets its own sink that receives matching samples
 during ingestion.
 
-### Metric Type Enum (`metrics/metric_type.go` — 95 lines)
+### Metric Type Enum (`metrics/metric_type.go` — 122 lines)
 
 This file defines the `MetricType` enumeration — the four possible kinds
 of metric in k6:
