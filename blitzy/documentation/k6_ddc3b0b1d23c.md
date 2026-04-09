@@ -349,7 +349,7 @@ The `getIterationRunner()` function at `lib/executor/helpers.go:104-141` returns
 
 This means a VU that has *already started* an iteration will **always complete that iteration** before the executor detects the context cancellation. If the script's VU function performs a long HTTP request, the VU will appear to run past the deadline.
 
-> Source: `lib/executor/helpers.go:107-139` (the `runIter` closure checks `ctx.Done()` after `vu.RunOnce()` returns)
+> Source: `lib/executor/helpers.go:107-140` (the `runIter` closure checks `ctx.Done()` after `vu.RunOnce()` returns)
 
 #### Cause 2: Fast-Path Atomic Read in `runLoopsIfPossible`
 
@@ -472,17 +472,19 @@ For step-based scheduling (used in `getRawExecutionSteps`), k6 uses a more sophi
 
 Defined at `lib/execution_segment.go:579-588`, this method uses pre-computed offset arrays to distribute VUs across segments in a round-robin-like fashion:
 
-```
-ScaleInt64(value):
-    whole = (value / lcd) × len(offsets)
-    remainder = value % lcd
-    for each offset in offsets:
-        if offset >= remainder: break
-        whole++
-    return whole
+```go
+func (essw *ExecutionSegmentSequenceWrapper) ScaleInt64(segmentIndex int, value int64) int64 {
+    start := essw.offsets[segmentIndex][0]
+    offsets := essw.offsets[segmentIndex][1:]
+    result := (value / essw.lcd) * int64(len(offsets))
+    for gi, i := 0, start; i < value%essw.lcd; gi, i = gi+1, i+offsets[gi] {
+        result++
+    }
+    return result
+}
 ```
 
-Where `lcd` is the Least Common Denominator of the segment sequence, and `offsets` are pre-computed positions that define which global VU indices belong to this segment.
+Where `lcd` is the Least Common Denominator of the segment sequence, `offsets` are pre-computed gap sizes between consecutive positions belonging to this segment, and `start` is the first position within an LCD-sized chunk that belongs to this segment. The loop uses **cumulative position tracking**: starting from `start`, it advances by `offsets[gi]` at each step (accumulating gaps), counting how many segment-owned positions fall below `value % lcd`.
 
 > Source: `lib/execution_segment.go:579-588`
 
@@ -625,23 +627,40 @@ sequenceDiagram
 
 **Critical Observation: `iterateSteps()` is single-threaded.**
 
-The `iterateSteps()` function at `lib/executor/ramping_vus.go:622-645` processes **both** step arrays in a **single goroutine** using a merge-sort-like interleaving:
+The `iterateSteps()` function at `lib/executor/ramping_vus.go:622-645` processes **both** step arrays in a **single goroutine** using a merge-sort-like interleaving. The loop iterates only while `rawSteps` remain (remaining graceful steps are handled separately by `runRemainingGracefulSteps()`):
 
 ```go
-for i != len(rs.executor.rawSteps) || j != len(rs.executor.gracefulSteps) {
-    if j == len(rs.executor.gracefulSteps) || 
-       (i != len(rs.executor.rawSteps) && g.TimeOffset > r.TimeOffset) {
-        // Process raw step
-        handleNewScheduledVUs(r.PlannedVUs)
-        i++
-    } else {
-        // Process graceful step
-        handleNewMaxAllowedVUs(g.PlannedVUs)
-        j++
+func (rs *rampingVUsRunState) iterateSteps(
+    ctx context.Context,
+    handleNewMaxAllowedVUs, handleNewScheduledVUs func(lib.ExecutionStep),
+) (handledGracefulSteps int) {
+    wait := waiter(ctx, rs.started)
+    i, j := 0, 0
+    for i != len(rs.executor.rawSteps) {
+        r, g := rs.executor.rawSteps[i], rs.executor.gracefulSteps[j]
+        if g.TimeOffset < r.TimeOffset {
+            if wait(g.TimeOffset) {
+                break
+            }
+            handleNewMaxAllowedVUs(g)
+            j++
+        } else {
+            if wait(r.TimeOffset) {
+                break
+            }
+            handleNewScheduledVUs(r)
+            i++
+        }
     }
-    // ... waiter() calls for timing
+    return j
 }
 ```
+
+Key implementation details:
+- **Loop condition**: `for i != len(rs.executor.rawSteps)` — only `rawSteps` exhaustion terminates the loop. Remaining graceful steps are handled by `runRemainingGracefulSteps()`.
+- **Comparison**: `g.TimeOffset < r.TimeOffset` — graceful steps are processed first when their offset is **strictly less than** the raw step offset. When offsets are **equal**, the `else` branch fires, processing the **raw step** first.
+- **Handler arguments**: Full `lib.ExecutionStep` structs (containing both `TimeOffset` and `PlannedVUs`) are passed to handlers, not just the `PlannedVUs` field.
+- **Early exit**: `if wait(offset) { break }` before each handler call — if the context is cancelled while waiting for the step's timestamp, the loop breaks immediately. This is the mechanism through which Ctrl+C interrupts step processing.
 
 The two handlers are called **within the same `for` loop iteration** — they are **never invoked concurrently**. At any given moment, exactly one handler is executing.
 
@@ -761,9 +780,11 @@ getVU():
 returnVU(initVU):
     1. executionState.ReturnVU(initVU, false)                 // return to buffer
     2. atomic.AddInt64(&activeVUsCount, -1)                   // decrement local counter
-    3. executionState.ModCurrentlyActiveVUsCount(-1)          // update global counter
-    4. wg.Done()                                              // mark goroutine complete
+    3. wg.Done()                                              // mark goroutine complete
+    4. executionState.ModCurrentlyActiveVUsCount(-1)          // update global counter
 ```
+
+Note the ordering of steps 3 and 4: `wg.Done()` is called **before** `ModCurrentlyActiveVUsCount(-1)`. This is significant because `Run()` defers `runState.wg.Wait()` (line 540), so `Run()` can return as soon as all VU goroutines call `wg.Done()` — potentially before the global active VU counter is decremented. This means the scheduler may observe a briefly non-zero active VU count even after `Run()` has returned.
 
 Each `vuHandle` is initialized with both closures at lines 612–614. The `getVU` is stored as `vh.getVU` and `returnVU` is stored as `vh.returnVU`.
 
