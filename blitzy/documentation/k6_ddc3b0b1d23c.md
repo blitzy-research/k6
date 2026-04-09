@@ -148,7 +148,7 @@ produces the pass/fail summary.
 
 ## 2.2 Metric Registration
 
-**Files:** `metrics/registry.go`, `metrics/builtin.go`
+**Files:** `metrics/registry.go`, `metrics/builtin.go`, `metrics/metric.go`, `metrics/metric_type.go`
 
 ### The Registry (`metrics/registry.go` — 118 lines)
 
@@ -212,6 +212,76 @@ and sinks, k6 avoids type-checking overhead in the hot path (every VU
 iteration). The `MustNewMetric()` calls panic on failure because a
 misregistered built-in metric is a programming error, not a runtime
 condition.
+
+### Metric Definition (`metrics/metric.go` — 120 lines)
+
+This file defines the `Metric` and `Submetric` structs — the core data
+types that represent every metric in k6.
+
+- **`Metric` struct** (line 12): Holds the metric's identity (`Name`,
+  `Type`, `Contains`), its accumulation state (`Sink`), threshold
+  configuration (`Thresholds`), observation status (`Observed`), and any
+  filtered sub-views (`Submetrics`). Every metric created by the registry
+  is an instance of this struct.
+  Source: `metrics/metric.go:12-26`
+
+- **`Submetric` struct** (line 29): Represents a filtered subset of a
+  parent metric, created when a threshold targets a tag selector such as
+  `http_req_duration{expected_response:true}`. Each submetric holds a
+  `Tags` filter, a back-reference to its `Parent` metric, and its own
+  `Metric` instance (with its own independent `Sink`).
+  Source: `metrics/metric.go:29-36`
+
+- **`AddSubmetric(keyValues)`** (line 40): Parses a comma-separated
+  `key:value` string, constructs a tag set, deduplicates against existing
+  submetrics, and creates a new `Submetric` with its own sink via
+  `registry.newMetric()`. Called during threshold initialization in the
+  `MetricsEngine`.
+  Source: `metrics/metric.go:40-82`
+
+- **`ParseMetricName(name)`** (line 90): Parses metric name expressions
+  of the form `metric_name{tag_key:tag_value,...}` into the base name and
+  a tag list. Used when resolving threshold targets.
+  Source: `metrics/metric.go:90-120`
+
+**Why this design:** Separating the metric definition (`Metric`) from the
+accumulation logic (`Sink`) and the type enum (`MetricType`) keeps each
+concern in its own file. The `Submetric` mechanism allows thresholds to
+target tag-filtered slices of data without duplicating the entire pipeline
+— each submetric simply gets its own sink that receives matching samples
+during ingestion.
+
+### Metric Type Enum (`metrics/metric_type.go` — 95 lines)
+
+This file defines the `MetricType` enumeration — the four possible kinds
+of metric in k6:
+
+```go
+const (
+    Counter = MetricType(iota) // A counter that sums its data points
+    Gauge                      // A gauge that displays the latest value
+    Trend                      // A trend, min/max/avg/med are interesting
+    Rate                       // A rate, displays % of values that aren't 0
+)
+```
+
+Source: `metrics/metric_type.go:9-14`
+
+The `MetricType` determines which `Sink` implementation is bound to a
+metric at creation time (via `NewSink()` in `metrics/sink.go:26`). It
+also provides JSON and text serialization methods (`MarshalJSON`,
+`MarshalText`, `UnmarshalText`) so that metric types can be represented
+as human-readable strings (`"counter"`, `"gauge"`, `"trend"`, `"rate"`)
+in API responses and configuration files.
+
+Source: `metrics/metric_type.go:6` (`type MetricType int`),
+`metrics/metric_type.go:31-53` (serialization methods)
+
+**Why this design:** Using an `iota`-based integer enum with explicit
+string serialization methods is idiomatic Go. It gives compile-time type
+safety (you cannot accidentally assign a `Gauge` where a `Counter` is
+expected in the `NewSink` switch) while still supporting JSON round-trips
+for the k6 REST API and cloud output.
 
 ## 2.3 Sample Emission from VUs
 
@@ -669,16 +739,18 @@ metrics.Samples([]metrics.Sample{
             Metric: builtinMetrics.IterationDuration,  // Trend
             Tags:   ctm.Tags,
         },
-        Time:  endTime,
-        Value: metrics.D(endTime.Sub(startTime)),      // duration in ms
+        Time:     endTime,
+        Metadata: ctm.Metadata,
+        Value:    metrics.D(endTime.Sub(startTime)),   // duration in ms
     },
     {
         TimeSeries: metrics.TimeSeries{
             Metric: builtinMetrics.Iterations,          // Counter
             Tags:   ctm.Tags,
         },
-        Time:  endTime,
-        Value: 1,                                       // one iteration completed
+        Time:     endTime,
+        Metadata: ctm.Metadata,
+        Value:    1,                                    // one iteration completed
     },
 })
 ```
