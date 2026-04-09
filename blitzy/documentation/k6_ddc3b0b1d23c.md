@@ -822,12 +822,12 @@ Every possible state transition path must result in the VU being returned. Let's
 ```
 running → gracefulStop() → toGracefulStop
     → loop detects toGracefulStop in slow path
-    → cancel() called (line 225)
+    → cancel() called (line 227)
     → DeactivateCallback fires → returnVU()
     → state set to stopped
 ```
 
-The `cancel()` call at line 225 of `runLoopsIfPossible()` cancels the VU's context. This triggers the `DeactivateCallback` set during `Activate()`, which calls `returnVU()`.
+The `cancel()` call at line 227 of `runLoopsIfPossible()` cancels the VU's context. This triggers the `DeactivateCallback` set during `Activate()`, which calls `returnVU()`.
 
 > Source: `lib/executor/vu_handle.go:223-230`
 
