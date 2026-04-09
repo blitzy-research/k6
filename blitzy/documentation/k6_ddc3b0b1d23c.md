@@ -155,7 +155,7 @@ After the banner, k6 displays:
 
 #### 3. Checks Section (when applicable)
 
-If your script uses `check()`, the summary shows each check name with pass/fail counts. The formatting uses: (`Source: js/summary.js`, lines 20–24)
+If your script uses `check()`, the summary shows each check name with pass/fail counts. The formatting uses: (`Source: js/summary.js`, lines 20–23)
 - `✓` (`succMark`) for successful checks
 - `✗` (`failMark`) for failed checks
 - `█` (`groupPrefix`) for group headers
@@ -180,7 +180,7 @@ During execution, k6 shows a progress bar with VU count, iteration count, and el
 
 Below is a representative example of what the console output looks like when running a script against `https://test.k6.io` with a single VU for one iteration. All standard HTTP metrics are shown:
 
-```
+```text
           /\      |‾‾| /‾‾/   /‾‾/
      /\  /  \     |  |/  /   /  /
     /  \/    \    |     (   /   ‾‾\
@@ -387,23 +387,23 @@ The `tls_version` system tag captures the TLS version negotiated during the hand
 Each metric type has a corresponding "sink" that accumulates sample values and produces the summary statistics. The `Format()` method on each sink returns the exact keys that appear in the summary and threshold evaluation. (`Source: metrics/sink.go`)
 
 **CounterSink** (`Source: metrics/sink.go`, lines 64–69):
-```
-{"count": <sum_of_all_values>, "rate": <count / time_in_seconds>}
+```json
+{"count": "<sum_of_all_values>", "rate": "<count / time_in_seconds>"}
 ```
 
 **GaugeSink** (`Source: metrics/sink.go`, lines 94–96):
-```
-{"value": <latest_value>}
+```json
+{"value": "<latest_value>"}
 ```
 
 **TrendSink** (`Source: metrics/sink.go`, lines 188–198):
-```
-{"min": <minimum>, "max": <maximum>, "avg": <mean>, "med": <median>, "p(90)": <90th_percentile>, "p(95)": <95th_percentile>}
+```json
+{"min": "<minimum>", "max": "<maximum>", "avg": "<mean>", "med": "<median>", "p(90)": "<90th_percentile>", "p(95)": "<95th_percentile>"}
 ```
 
 **RateSink** (`Source: metrics/sink.go`, lines 218–224):
-```
-{"rate": <trues / total>}
+```json
+{"rate": "<trues / total>"}
 ```
 
 **Note on percentile calculation:** TrendSink calculates percentiles using linear interpolation between adjacent sorted values. If the percentile index falls exactly on a value, that value is returned; otherwise, a linear interpolation between the floor and ceiling values is computed. (`Source: metrics/sink.go`, lines 136–157, the `P()` method)
@@ -546,7 +546,7 @@ k6 supports an optional JSON configuration file. (`Source: cmd/root.go`, line 17
 
 k6 assembles its final configuration by layering sources in a specific order. Later sources override earlier ones. (`Source: cmd/config.go`, lines 189–216, `getConsolidatedConfig()`)
 
-```
+```text
 CLI flags  >  Environment Variables  >  Runner/Script Options  >  Config File  >  CLI Defaults
 (highest)                                                                        (lowest)
 ```
@@ -555,7 +555,7 @@ CLI flags  >  Environment Variables  >  Runner/Script Options  >  Config File  >
 
 ### Environment Variables
 
-k6 recognizes the following environment variables. These are read from the process environment and applied during configuration consolidation.
+k6 recognizes the following key environment variables for test configuration and runtime behavior. These are read from the process environment and applied during configuration consolidation. In addition, several global flags have environment variable equivalents handled in `cmd/state/state.go` (lines 163–185): `K6_CONFIG`, `K6_LOG_OUTPUT`, `K6_LOG_FORMAT`, `K6_NO_COLOR`, `NO_COLOR` (see [no-color.org](https://no-color.org/)), and `K6_PROFILING_ENABLED`.
 
 **From `cmd/config.go`** (lines 42–59, `Config` struct with `envconfig` tags):
 
@@ -576,7 +576,7 @@ k6 recognizes the following environment variables. These are read from the proce
 | `K6_NO_THRESHOLDS` | Disable threshold evaluation (`true`/`false`) | `--no-thresholds` |
 | `K6_NO_SUMMARY` | Disable end-of-test summary (`true`/`false`) | `--no-summary` |
 | `K6_SUMMARY_EXPORT` | Path for JSON summary export | `--summary-export` |
-| `SSLKEYLOGFILE` | Path for TLS key log file (for debugging TLS) | _(no direct flag)_ |
+| `SSLKEYLOGFILE` | Path for TLS key log file (for debugging TLS). ⚠️ **Security warning:** Enables logging of TLS session keys to disk. These keys can be used to decrypt captured HTTPS traffic. Use only for debugging in non-production environments and delete the log file afterward. | _(no direct flag)_ |
 | `K6_TRACES_OUTPUT` | Traces output destination | `--traces-output` |
 
 ### In-Script Options
@@ -676,7 +676,7 @@ The `handleSummaryResult()` function handles special paths `stdout` and `stderr`
 k6 uses the Sobek JavaScript engine (a Go-native ES6+ runtime, formerly known as Goja) to parse and compile your script. If the script contains invalid JavaScript syntax, Sobek will report a syntax error during the loading phase. This happens within the `js/` package's bundle loading before any VU code is executed.
 
 **Example error for invalid syntax:**
-```
+```text
 ERRO[0000] Error parsing script: file:///script.js: Line 3:1 Unexpected token )
 ```
 
@@ -698,7 +698,7 @@ Threshold expressions (e.g., `p(95)<500`, `rate<0.01`) are validated when the te
 
 **BNF Grammar** (`Source: metrics/thresholds_parser.go`, lines 58–70):
 
-```
+```text
 assertion           -> aggregation_method whitespace* operator whitespace* float
 aggregation_method  -> trend | rate | gauge | counter
 counter             -> "count" | "rate"
@@ -759,9 +759,9 @@ When validation or threshold evaluation fails, k6 uses specific exit codes:
 
 | Condition | Exit Code | Source |
 |-----------|-----------|--------|
-| Invalid configuration | `exitcodes.InvalidConfig` | `cmd/config.go`, line 256 |
-| Thresholds crossed | `exitcodes.ThresholdsHaveFailed` | `cmd/run.go`, lines 255–259 |
-| External abort (Ctrl+C) | `exitcodes.ExternalAbort` | `cmd/run.go`, line 354 |
+| Invalid configuration | `exitcodes.InvalidConfig` (104) | `cmd/config.go`, line 256 |
+| Thresholds crossed | `exitcodes.ThresholdsHaveFailed` (99) | `cmd/run.go`, lines 255–259 |
+| External abort (Ctrl+C) | `exitcodes.ExternalAbort` (105) | `cmd/run.go`, line 354 |
 
 **Threshold evaluation at runtime:** After the test completes, k6 finalizes all thresholds. If any threshold is breached, k6 sets the error to include `exitcodes.ThresholdsHaveFailed` and reports which metrics crossed their thresholds. (`Source: cmd/run.go`, lines 250–259)
 
