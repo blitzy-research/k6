@@ -3,7 +3,7 @@
 | Property | Value |
 |----------|-------|
 | **k6 Version** | v0.55.0 (`lib/consts/consts.go` line 12: `const Version = "0.55.0"`) |
-| **Go Toolchain** | go1.21.13 (`go.mod` line 4: `toolchain go1.21.13`) |
+| **Go Toolchain** | go1.21.13 (`go.mod` line 5: `toolchain go1.21.13`) |
 | **Go Module Path** | `go.k6.io/k6` (`go.mod` line 1) |
 | **Branch/Commit** | `k6_ddc3b0b1d23c` / `ddc3b0b1d2` |
 
@@ -107,7 +107,7 @@ type RampingVUsConfig struct {
 
 The default `GracefulRampDown` is 30 seconds (line 52).
 
-**`Run()`** (lines 491–559) creates a `vuHandles` array sized to `maxVUs`, runs `runLoopsIfPossible` on each handle in a new goroutine (line 543), and then iterates through raw and graceful execution steps using two handler strategies:
+**`Run()`** (lines 491–560) creates a `vuHandles` array sized to `maxVUs`, runs `runLoopsIfPossible` on each handle in a new goroutine (line 543), and then iterates through raw and graceful execution steps using two handler strategies:
 
 - **`scheduledVUsHandlerStrategy()`** (lines 679–690): Calls `start()` when scaling up (line 684) and `gracefulStop()` when scaling down (line 687).
 - **`maxAllowedVUsHandlerStrategy()`** (lines 668–677): Calls `hardStop()` when the graceful ramp-down period expires (line 673).
@@ -253,6 +253,8 @@ time="2026-04-09T22:34:46Z" level=error msg="test run was aborted because k6 rec
 - The error propagation message shows the abort reason: `"test run was aborted because k6 received a 'interrupt' signal"`.
 - The final error message at `level=error` is printed as k6 exits.
 
+The graceful shutdown behavior evidenced in this output — specifically whether active VUs are allowed to finish their current iteration — is analyzed in detail in **Section 3** below.
+
 ---
 
 ## 3. Graceful Shutdown: Do Active VUs Finish Their Current Iteration?
@@ -269,7 +271,7 @@ time="2026-04-09T22:34:46Z" level=error msg="test run was aborted because k6 rec
 
 3. **`hardStop()`** at lines 165–181: In contrast, `hardStop()` **immediately** cancels the context via `vh.cancel()` at line 178. This interrupts the currently executing iteration mid-flight.
 
-4. **`getIterationRunner()`** at `helpers.go` lines 107–141: After `vu.RunOnce()` returns, it checks `ctx.Done()` (line 114). If the context is cancelled (hard stop), it counts the iteration as interrupted via `executionState.AddInterruptedIterations(1)` (line 117). If the context is still valid (graceful stop completed naturally), it counts as a full iteration via `executionState.AddFullIterations(1)` (line 137).
+4. **`getIterationRunner()`** at `helpers.go` lines 107–141: After `vu.RunOnce()` returns, it checks `ctx.Done()` (lines 114–115). If the context is cancelled (hard stop), it counts the iteration as interrupted via `executionState.AddInterruptedIterations(1)` (line 117). If the context is still valid (graceful stop completed naturally), it counts as a full iteration via `executionState.AddFullIterations(1)` (line 137).
 
 Source: `lib/executor/vu_handle.go` lines 147–163, 185–230; `lib/executor/helpers.go` lines 107–141
 
@@ -344,13 +346,15 @@ time="2026-04-09T22:37:02Z" level=debug msg="The test run was interrupted, retur
 - The error code is gRPC code 2 (`Canceled`), which triggers `isRegularClosing()` to return true.
 - The end-of-test summary shows **0 complete and 2 interrupted iterations**, meaning both VUs had their iterations interrupted mid-flight.
 
+The exact `grpc_streams_msgs_received` message count from this experiment is reported in **Section 5** below.
+
 ---
 
 ## 5. gRPC Messages Received in Final Metrics Summary
 
 ### 5.1 Source Code Analysis
 
-The **`grpc_streams_msgs_received`** metric is defined in `js/modules/k6/grpc/metrics.go` lines 25–26:
+The **`grpc_streams_msgs_received`** metric is defined in `js/modules/k6/grpc/metrics.go` lines 25–27:
 
 ```go
 if m.StreamsMessagesReceived, err = registry.NewMetric(
@@ -378,7 +382,7 @@ func (s *stream) queueMessage(msg interface{}) {
 }
 ```
 
-Source: `js/modules/k6/grpc/metrics.go` lines 25–26; `js/modules/k6/grpc/stream.go` lines 149–159
+Source: `js/modules/k6/grpc/metrics.go` lines 25–27; `js/modules/k6/grpc/stream.go` lines 149–159
 
 ### 5.2 Runtime Evidence
 
@@ -662,7 +666,7 @@ func MapSeries(series metrics.TimeSeries, suffix string) []*prompb.Label {
 }
 ```
 
-**Metric type → suffix mapping** at `vendor/.../remotewrite/remotewrite.go` lines 328–367 (`convertToPbSeries`):
+**Metric type → suffix mapping** at `vendor/.../remotewrite/remotewrite.go` lines 328–367 (`MapPrompb()`):
 
 | k6 Metric Type | Suffix | Resulting Prometheus Name |
 |----------------|--------|--------------------------|
@@ -722,7 +726,7 @@ time="2026-04-09T22:37:13Z" level=debug msg="Converted samples to Prometheus Tim
 time="2026-04-09T22:37:13Z" level=debug msg="Successful flushed time series to remote write endpoint" nts=4 output="Prometheus remote write" took="524.737µs"
 ```
 
-**Conclusion:** The Prometheus remote write output maintains metric name integrity by applying the naming convention: `k6_` prefix + metric name + optional type-specific suffix. The output description confirms the default endpoint `http://localhost:9090/api/v1/write`. The naming convention is implemented in `MapSeries()` at `prometheus.go` lines 39–52, with suffixes determined by the metric type mapping in `convertToPbSeries()` at `remotewrite.go` lines 328–367.
+**Conclusion:** The Prometheus remote write output maintains metric name integrity by applying the naming convention: `k6_` prefix + metric name + optional type-specific suffix. The output description confirms the default endpoint `http://localhost:9090/api/v1/write`. The naming convention is implemented in `MapSeries()` at `prometheus.go` lines 39–52, with suffixes determined by the metric type mapping in `MapPrompb()` at `remotewrite.go` lines 328–367.
 
 **Example metric names generated by this convention:**
 
@@ -741,7 +745,7 @@ time="2026-04-09T22:37:13Z" level=debug msg="Successful flushed time series to r
 |-----------|---------|-------------|-------------|
 | `execution/scheduler.go` | `execution` | Scheduler struct, Init(), Run(), VU initialization | 22–32, 38–88, 162–197, 252–325, 381–413, 419–545 |
 | `lib/executor/vu_handle.go` | `executor` | VU state machine (5 states), gracefulStop(), hardStop(), runLoopsIfPossible() | 16–22, 24–55, 70–88, 90–113, 115–139, 147–163, 165–181, 185–264 |
-| `lib/executor/ramping_vus.go` | `executor` | RampingVUsConfig, getRawExecutionSteps(), Run(), handler strategies | 40–45, 52, 491–559, 668–690 |
+| `lib/executor/ramping_vus.go` | `executor` | RampingVUsConfig, getRawExecutionSteps(), Run(), handler strategies | 40–45, 52, 491–560, 668–690 |
 | `lib/executor/helpers.go` | `executor` | handleInterrupt(), getIterationRunner(), getDurationContexts() | 89–97, 104–141 |
 | `lib/executor/shared_iterations.go` | `executor` | SharedIterations Run(), dropped iterations emission | 167–275, 217–229 |
 | `lib/executor/per_vu_iterations.go` | `executor` | PerVUIterations Run(), per-VU dropped iterations emission | 135–245, 213–224 |
@@ -751,7 +755,7 @@ time="2026-04-09T22:37:13Z" level=debug msg="Successful flushed time series to r
 | `js/modules/k6/data/data.go` | `data` | RootModule, sharedArrays, NewModuleInstance(), get() | 18–24, 31–34, 53–58, 152–167 |
 | `js/modules/k6/data/share.go` | `data` | sharedArray, wrappedSharedArray, Get(), deepFreeze() | 10–12, 14–21, 23–34, 44–59 |
 | `vendor/.../remotewrite/prometheus.go` | `remotewrite` | MapSeries(), MapTagSet(), __name__ label construction | 39–52 |
-| `vendor/.../remotewrite/remotewrite.go` | `remotewrite` | Output struct, Description(), convertToPbSeries(), type→suffix mapping | 22–35, 76–78, 328–367 |
+| `vendor/.../remotewrite/remotewrite.go` | `remotewrite` | Output struct, Description(), MapPrompb(), type→suffix mapping | 22–35, 76–78, 316–368 |
 | `vendor/.../remotewrite/config.go` | `remotewrite` | defaultMetricPrefix, defaultServerURL | 21, 24 |
 | `api/v1/metric_routes.go` | `v1` | handleGetMetric(), handleGetMetrics() | 27–49 |
 | `api/v1/metric.go` | `v1` | NewMetric(), NullMetricType, NullValueType | 62–82 |
