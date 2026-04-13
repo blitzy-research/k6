@@ -19,15 +19,15 @@ Six distinct anomalous behaviors have been reported:
 
 | File Path | Role |
 |-----------|------|
-| `lib/executor/ramping_vus.go` (713 lines) | Primary executor: `Run()`, `iterateSteps()`, handler strategies, `rampingVUsRunState` |
-| `lib/executor/vu_handle.go` (265 lines) | VU lifecycle state machine: 5-state FSM, `start()`, `gracefulStop()`, `hardStop()`, `runLoopsIfPossible()` |
-| `lib/execution.go` (550 lines) | `ExecutionState`: VU buffer channel (`vus`), `GetPlannedVU()`, `ReturnVU()`, atomic counters |
-| `lib/execution_segment.go` (843 lines) | `ExecutionSegment`, `ExecutionSegmentSequenceWrapper`, `ExecutionTuple`, `SegmentedIndex`, `ScaleInt64()`, striping algorithm |
-| `lib/executor/helpers.go` (265 lines) | `getDurationContexts()`, `getIterationRunner()`, `getVUActivationParams()` |
+| `lib/executor/ramping_vus.go` (712 lines) | Primary executor: `Run()`, `iterateSteps()`, handler strategies, `rampingVUsRunState` |
+| `lib/executor/vu_handle.go` (264 lines) | VU lifecycle state machine: 5-state FSM, `start()`, `gracefulStop()`, `hardStop()`, `runLoopsIfPossible()` |
+| `lib/execution.go` (549 lines) | `ExecutionState`: VU buffer channel (`vus`), `GetPlannedVU()`, `ReturnVU()`, atomic counters |
+| `lib/execution_segment.go` (842 lines) | `ExecutionSegment`, `ExecutionSegmentSequenceWrapper`, `ExecutionTuple`, `SegmentedIndex`, `ScaleInt64()`, striping algorithm |
+| `lib/executor/helpers.go` (264 lines) | `getDurationContexts()`, `getIterationRunner()`, `getVUActivationParams()` |
 | `execution/scheduler.go` (570+ lines) | `Scheduler.Run()`, `runExecutor()`, context propagation from `globalCtx` → `runCtx` → `executorsRunCtx` |
-| `lib/executor/base_config.go` (148 lines) | `BaseConfig`, `DefaultGracefulStopValue` (30s), `GetGracefulStop()` |
-| `lib/runner.go` (102 lines) | `ActiveVU`, `InitializedVU`, `VUActivationParams` interfaces |
-| `lib/helpers.go` (95 lines) | `GetMaxPlannedVUs()`, `GetMaxPossibleVUs()`, `GetEndOffset()` |
+| `lib/executor/base_config.go` (147 lines) | `BaseConfig`, `DefaultGracefulStopValue` (30s), `GetGracefulStop()` |
+| `lib/runner.go` (101 lines) | `ActiveVU`, `InitializedVU`, `VUActivationParams` interfaces |
+| `lib/helpers.go` (94 lines) | `GetMaxPlannedVUs()`, `GetMaxPossibleVUs()`, `GetEndOffset()` |
 
 ### Test Files Analyzed for Behavioral Verification
 
@@ -56,7 +56,7 @@ const (
 
 ### State Transition Table
 
-The complete state transition table is documented in `vu_handle.go` lines 24–54. Here is the full table from the source comments:
+The complete state transition table is documented in `vu_handle.go` lines 24–54. Here is the full table from the source comments (corrected from source typo `toHardSTop` at line 48 to `toHardStop`):
 
 ```
 +-------+-----------------+-------------------+---------------------------------------------------+
@@ -487,7 +487,7 @@ func (es *ExecutionSegment) Scale(value int64) int64 {
     if es == nil {
         return value
     }
-    // round(value * to) - round(value * from)
+    // round(value * to - round(value * from))
     toValue := big.NewRat(value, 1)
     toValue.Mul(toValue, es.to)
 
@@ -499,7 +499,7 @@ func (es *ExecutionSegment) Scale(value int64) int64 {
 }
 ```
 
-This uses rounding-based arithmetic: `round(value × to) − round(value × from)`. The source comment at lines 257–263 explains the formula. This is **NOT sum-preserving** — each instance scales independently. With 3 instances and 10 VUs, the individual results can sum to more than 10 (e.g., 4 + 3 + 4 = 11).
+This uses rounding-based arithmetic: `round(value × to − round(value × from))`. The source comment at lines 257–263 explains the formula. This is **NOT sum-preserving** — each instance scales independently. With 3 instances and 10 VUs, the individual results can sum to more than 10 (e.g., 4 + 3 + 4 = 11).
 
 **Mechanism 2: `ExecutionSegmentSequenceWrapper.ScaleInt64()` — WITH a sequence**
 
