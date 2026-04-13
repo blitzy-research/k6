@@ -1,7 +1,7 @@
 # k6 Repository Exploratory Analysis
 
 > **Branch:** `k6_ddc3b0b1d23c`
-> **Date:** 2025
+> **Date:** April 2025
 > **Go Version:** 1.21.13 (toolchain `go1.21.13`, as specified in `go.mod` line 5)
 > **k6 Version:** v0.55.0 (from `lib/consts`)
 > **Module Path:** `go.k6.io/k6` (from `go.mod` line 1)
@@ -179,7 +179,7 @@ Key methods:
 
 #### `metrics/builtin.go` — Built-in Metric Definitions
 
-The `BuiltinMetrics` struct (lines 39–75) holds references to all 26 built-in metrics:
+The `BuiltinMetrics` struct (lines 39–75) holds references to all 25 built-in metrics:
 
 ```go
 type BuiltinMetrics struct {
@@ -543,7 +543,7 @@ The entire k6 binary is a Cobra CLI application. `cmd.Execute()` parses the comm
 This is the heart of `k6 run`. The function orchestrates the entire test lifecycle:
 
 1. **Creates the metrics registry:** `metrics.NewRegistry()` — an empty registry with an atlas root tag set
-2. **Registers built-in metrics:** `metrics.RegisterBuiltinMetrics(registry)` — registers all 26 built-in metrics. The `iterations` metric is registered at `builtin.go` line 82 as `registry.MustNewMetric(IterationsName, Counter)`. At this point, the `iterations` `*Metric` object exists in the registry with:
+2. **Registers built-in metrics:** `metrics.RegisterBuiltinMetrics(registry)` — registers all 25 built-in metrics. The `iterations` metric is registered at `builtin.go` line 82 as `registry.MustNewMetric(IterationsName, Counter)`. At this point, the `iterations` `*Metric` object exists in the registry with:
    - `Type: Counter`
    - `Contains: Default` (plain number)
    - `Sink: &CounterSink{Value: 0}` (freshly created by `NewSink(Counter)`)
@@ -726,8 +726,7 @@ After all iterations complete and all executors finish:
 
 ```mermaid
 graph TD
-    A["JS Script Execution<br/><code>js/runner.go RunOnce()</code>"] -->|"Emits Sample<br/>iterations=1"| B["VU Samples Channel<br/><code>lib/vu_state.go State.Samples</code>"]
-    B -->|"Writes to"| C["Central Samples Channel<br/><code>cmd/run.go samples chan</code>"]
+    A["JS Script Execution<br/><code>js/runner.go RunOnce()</code>"] -->|"Emits Sample<br/>iterations=1"| C["Central Samples Channel<br/><code>cmd/run.go samples chan</code><br/>(VUs write via <code>State.Samples</code> — same channel)"]
     C -->|"Read every 50ms"| D["Output Manager<br/><code>output/manager.go</code>"]
     D -->|"AddMetricSamples()"| E["OutputIngester<br/><code>metrics/engine/ingester.go</code>"]
     D -->|"AddMetricSamples()"| F["CSV / JSON / InfluxDB / Cloud<br/><code>output/*</code>"]
