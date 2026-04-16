@@ -553,7 +553,7 @@ This is verified in Section 6, Experiment 11.
 From `js/runner.go`:
 
 - **`newVU()` (lines 124–251)**: Instantiates the bundle for a non-zero VU. The shared bundle's `ModuleResolver` is already locked. Static imports succeed via cache hits. At lines 230–246, `vu.state = &lib.State{...}` is constructed; at line 247, `vu.moduleVUImpl.state = vu.state` propagates that pointer to the module-system VU adapter. **From this moment forward, `vu.state` is non-nil**, and the init-context gate (Layer 1) will reject any subsequent `require()` call.
-- **`Activate()` (lines 646–720)**: Transitions the VU from "initialized" to "active" by binding the run context. This is the boundary where the default function will start running; no new init-time code runs after this.
+- **`Activate()` (lines 646–721)**: Transitions the VU from "initialized" to "active" by binding the run context. This is the boundary where the default function will start running; no new init-time code runs after this.
 
 ### The parallel pattern for files
 
@@ -1304,7 +1304,7 @@ This is the file-I/O parallel to Experiment 11. The same architectural pattern �
 | `js/modules_vu.go` | 38–40 | `State()` returns `m.state` |
 | `js/runner.go` | 124–251 | `newVU()` — instantiates bundle, creates `vu.state` |
 | `js/runner.go` | 230–247 | Sets `vu.state = &lib.State{...}` and `vu.moduleVUImpl.state = vu.state` |
-| `js/runner.go` | 646–720 | `Activate()` — transitions VU to active |
+| `js/runner.go` | 646–721 | `Activate()` — transitions VU to active |
 | `loader/loader.go` | 47–82 | `Resolve()` — entry point for specifier → URL |
 | `loader/loader.go` | 84–112 | `resolveFilePath()` — handles `./`, `../`, `/`, absolute |
 | `loader/loader.go` | 114–117 | `Dir()` — parent directory helper |
