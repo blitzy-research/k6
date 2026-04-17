@@ -331,7 +331,7 @@ Every sample emitted by a VU carries a pointer to exactly one such `Metric` (via
 
 #### 2.1.3 The four `Sink` implementations
 
-`metrics/sink.go` defines the `Sink` interface (`Add`, `Format`, `IsEmpty`, `Drain`) and four concrete implementations. The `CounterSink` is central to this document — it is the sink used for `iterations`:
+`metrics/sink.go` defines the `Sink` interface (`Add`, `Format`, `IsEmpty`) and four concrete implementations. The `CounterSink` is central to this document — it is the sink used for `iterations`:
 
 ```go
 type CounterSink struct {
@@ -584,7 +584,7 @@ type Manager struct {
 const sendBatchToOutputsRate = 50 * time.Millisecond
 ```
 
-The critical method is `Start(samplesChan chan metrics.SampleContainer) (wait, stop func(), err error)` (line 42). After calling `Start()` on every output (aborting early on error) it spawns a goroutine shaped roughly like this:
+The critical method is `Start(samplesChan chan metrics.SampleContainer) (wait func(), finish func(error), err error)` (line 42). The second return value is typed `func(error)` (so the caller can report the test's final error) and is bound in `cmd/run.go:228` to a caller-side variable named `stopOutputs` — the informal "stop" label used elsewhere in this document refers to that caller binding. After calling `Start()` on every output (aborting early on error) it spawns a goroutine shaped roughly like this:
 
 ```go
 ticker := time.NewTicker(sendBatchToOutputsRate)
@@ -598,14 +598,13 @@ for {
         }
         buffer = append(buffer, sampleContainer)
     case <-ticker.C:
-        if len(buffer) == 0 { continue }
         sendToOutputs(buffer)
         buffer = make([]metrics.SampleContainer, 0, cap(buffer))
     }
 }
 ```
 
-`sendToOutputs` loops through `m.outputs` and calls `out.AddMetricSamples(buffer)` on each one. The buffer is handed to every output by reference, but because the outputs copy the slice into their own thread-safe buffers (see next subsection), no cross-output interference occurs.
+`sendToOutputs` loops through `m.outputs` and calls `out.AddMetricSamples(buffer)` on each one. The buffer is handed to every output by reference, but because the outputs copy the slice into their own thread-safe buffers (see next subsection), no cross-output interference occurs. Note that `sendToOutputs(buffer)` is invoked **unconditionally** on every 50 ms tick — the implementation does not short-circuit when `buffer` is empty, so idle ticks propagate an empty slice to every registered output. This keeps the producer path lock-free at the expense of a handful of no-op output calls during quiet periods.
 
 The channel close path is important: when `cmd/run.go` calls `close(samples)` (line 274), the `case sampleContainer, ok := <-samplesChan` receives `ok == false`, the buffer is flushed one last time, and the goroutine returns — which is how the `Manager.Start` `wait` return value resolves.
 
@@ -744,7 +743,7 @@ runIteration := getIterationRunner(si.executionState, si.logger)   // line 232
 handleVU := func(initVU lib.InitializedVU) {
     activeVU := initVU.Activate(...)
     for attemptedIters := range iterations {
-        if !runIteration(maxDurationCtx, activeVU) {   // line 261
+        if !runIteration(maxDurationCtx, activeVU) {   // line 259
             return   // interrupted
         }
     }
@@ -829,16 +828,16 @@ state := &lib.TestPreInitState{
     RuntimeOptions: runtimeOptions,
     Registry:       registry,
     BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-    Usage:          usage.New(),
-    Events:         event.NewEventSystem(100, gs.Logger),
+    Events:         gs.Events,
     LookupEnv: func(key string) (string, bool) {
-        val, ok := runtimeOptions.Env[key]
+        val, ok := gs.Env[key]
         return val, ok
     },
+    Usage: usage.New(),
 }
 ```
 
-After this five-line block every built-in metric exists as a `*metrics.Metric` with its sink, addressable through both `Registry.Get(name)` and the typed `state.BuiltinMetrics.Iterations` / `state.BuiltinMetrics.VUs` / etc. convenience pointers. These pointers propagate into the `Runner`, the `VU`s, the `Scheduler`, the `Dialer`, and ultimately to every sample emitted anywhere in the system.
+After this block every built-in metric exists as a `*metrics.Metric` with its sink, addressable through both `Registry.Get(name)` and the typed `state.BuiltinMetrics.Iterations` / `state.BuiltinMetrics.VUs` / etc. convenience pointers. These pointers propagate into the `Runner`, the `VU`s, the `Scheduler`, the `Dialer`, and ultimately to every sample emitted anywhere in the system.
 
 #### 2.6.2 `cmd/run.go` — pipeline wiring
 
@@ -873,7 +872,7 @@ type Dialer struct {
 }
 ```
 
-Every connection the dialer produces is wrapped in an internal `Conn` type (defined around line 68) whose `Read`/`Write` methods call `atomic.AddInt64(&c.Dialer.BytesRead, n)` / `atomic.AddInt64(&c.Dialer.BytesWritten, n)` before returning.
+Every connection the dialer produces is wrapped in an internal `Conn` type. Line 68 of `lib/netext/dialer.go` is the **instantiation** site (`conn = &Conn{conn, &d.BytesRead, &d.BytesWritten}`); the `Conn` struct itself is **defined at line 177** with `BytesRead, BytesWritten *int64` fields at line 180. Its `Read` and `Write` methods call `atomic.AddInt64(c.BytesRead, int64(n))` and `atomic.AddInt64(c.BytesWritten, int64(n))` respectively before returning — the `*int64` pointers inside `Conn` alias the atomic counters on the parent `Dialer`.
 
 The function `IOSamples(sampleTime, ctm, builtinMetrics)` (lines 74–99) then converts those counters into samples:
 
@@ -1032,7 +1031,7 @@ runIteration := getIterationRunner(si.executionState, si.logger)
 `Run` then spawns one goroutine per VU that repeatedly calls:
 
 ```go
-// line 261
+// line 259
 if !runIteration(maxDurationCtx, activeVU) {
     return
 }
@@ -1143,7 +1142,7 @@ func iterationSamples(startTime, endTime time.Time, ctm metrics.TagsAndMeta,
             },
             Time:     endTime,
             Metadata: ctm.Metadata,
-            Value:    1,                                     // line 898 — the "+1"
+            Value:    1,                                     // line 899 — the "+1"
         },
     }
 }
@@ -1173,14 +1172,13 @@ for {
         }
         buffer = append(buffer, sampleContainer)
     case <-ticker.C:
-        if len(buffer) == 0 { continue }
         sendToOutputs(buffer)
         buffer = make([]metrics.SampleContainer, 0, cap(buffer))
     }
 }
 ```
 
-Where `sendToOutputs(buf)` walks `m.outputs` and calls `out.AddMetricSamples(buf)` on every one. Because the `OutputIngester` was appended to `outputs` in Step 2 (at line 187 of `cmd/run.go`), it receives the batch along with every other output (JSON, cloud, stdout, etc.). Each output's `AddMetricSamples` is expected to copy the slice into its own thread-safe buffer so that `sendToOutputs` can reuse the slice without data races — the `OutputIngester` does this via the `SampleBuffer` helper from `output/helpers.go`.
+Where `sendToOutputs(buf)` walks `m.outputs` and calls `out.AddMetricSamples(buf)` on every one — and, as noted in §2.3.2, it does so on every 50 ms tick regardless of whether the buffer is empty. Because the `OutputIngester` was appended to `outputs` in Step 2 (at line 187 of `cmd/run.go`), it receives the batch along with every other output (JSON, cloud, stdout, etc.). Each output's `AddMetricSamples` is expected to copy the slice into its own thread-safe buffer so that `sendToOutputs` can reuse the slice without data races — the `OutputIngester` does this via the `SampleBuffer` helper from `output/helpers.go`.
 
 At this point our two samples (IterationDuration + Iterations) have been handed to the `OutputIngester`'s internal buffer. Nothing has yet been added to the `CounterSink`.
 
@@ -1314,7 +1312,7 @@ The solid arrows follow the `iterations` metric exclusively; the dashed arrows s
 
 Several non-obvious design decisions emerge from the trace in Section 3. Each of the bullets below is grounded in the source locations cited in Sections 2 and 3.
 
-- **Four metric types, four sinks.** `metrics/sink.go` defines a `Sink` interface (`Add`, `Format`, `IsEmpty`, `Drain`) and implements it four times — `CounterSink`, `GaugeSink`, `TrendSink`, `RateSink` — one for each `MetricType` (`Counter`, `Gauge`, `Trend`, `Rate`) in `metrics/metric_type.go`. `CounterSink` just sums (`c.Value += s.Value`). `GaugeSink` remembers the last value plus the running `Min`/`Max`. `TrendSink` appends raw observations and computes percentiles on demand via linear interpolation. `RateSink` stores `(Trues, Total)` and derives the rate as `Trues / Total`. Which sink is created is decided once in `NewSink(MetricType)` (lines 25–35) when the metric is registered, and the pointer never changes for the lifetime of the run.
+- **Four metric types, four sinks.** `metrics/sink.go` defines a `Sink` interface (`Add`, `Format`, `IsEmpty`) and implements it four times — `CounterSink`, `GaugeSink`, `TrendSink`, `RateSink` — one for each `MetricType` (`Counter`, `Gauge`, `Trend`, `Rate`) in `metrics/metric_type.go`. `CounterSink` just sums (`c.Value += s.Value`). `GaugeSink` remembers the last value plus the running `Min`/`Max`. `TrendSink` appends raw observations and computes percentiles on demand via linear interpolation. `RateSink` stores `(Trues, Total)` and derives the rate as `Trues / Total`. Which sink is created is decided once in `NewSink(MetricType)` (lines 25–35) when the metric is registered, and the pointer never changes for the lifetime of the run.
 
 - **25 built-in metrics, registered exactly once.** `metrics/builtin.go:RegisterBuiltinMetrics(registry)` is called *exactly once* per `k6 run` from `cmd/test_load.go:70`. It populates a `BuiltinMetrics` struct whose 25 fields cover VU lifecycle (`vus`, `vus_max`), iterations (`iterations`, `iteration_duration`, `dropped_iterations`), checks/groups (`checks`, `group_duration`), HTTP request phases (`http_reqs`, `http_req_blocked`, `http_req_connecting`, `http_req_tls_handshaking`, `http_req_sending`, `http_req_waiting`, `http_req_receiving`, `http_req_duration`, `http_req_failed`), WebSockets (`ws_sessions`, `ws_msgs_sent`, `ws_msgs_received`, `ws_ping`, `ws_connecting`, `ws_session_duration`), gRPC (`grpc_req_duration`), and raw network I/O (`data_sent`, `data_received`). **Note**: the AAP references "28 built-in metrics"; the authoritative count from the current source in `metrics/builtin.go` is **25** — use the code as truth.
 
@@ -1324,7 +1322,7 @@ Several non-obvious design decisions emerge from the trace in Section 3. Each of
 
 - **Double-counting of iterations is intentional and correct.** There are two independent iteration counters with different jobs:
   - `ExecutionState.fullIterationsCount` (atomic `*uint64`, `lib/execution.go:146`) is bumped by `executionState.AddFullIterations(1)` in `lib/executor/helpers.go:137`. It drives the progress bar, executor scheduling decisions (e.g. "have we finished all 1,000 iterations yet?"), and the `current iterations / planned iterations` display.
-  - The `iterations` **Counter metric** (`metrics/builtin.go:82`) is incremented via a `Sample{Value: 1}` pushed from `js/runner.go:iterationSamples()` (line 898) into the samples channel, eventually summed by `CounterSink.Add` in the ingester (Step 9 of Section 3). It drives the summary output, threshold evaluation, and any configured external output (JSON, cloud, etc.).
+  - The `iterations` **Counter metric** (`metrics/builtin.go:82`) is incremented via a `Sample{Value: 1}` pushed from `js/runner.go:iterationSamples()` (line 899) into the samples channel, eventually summed by `CounterSink.Add` in the ingester (Step 9 of Section 3). It drives the summary output, threshold evaluation, and any configured external output (JSON, cloud, etc.).
 
   The two counters are updated in two different call sites, in two different goroutines, reading the same iteration completion event — but they live in different places so that scheduling logic can read progress without acquiring the `MetricsEngine.MetricsLock`.
 
