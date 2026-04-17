@@ -2,9 +2,9 @@
 
 ## Environment
 
-- **k6**: built from source at this repository's commit — `k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)`
+- **k6**: built from source at this repository's commit — `k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)`
 - **OS**: Ubuntu 24.04.4 LTS (Noble Numbat)
-- **Go toolchain**: `go1.22.2` (installed via apt; `go.mod` declares `go 1.21` with `toolchain go1.21.13` as the minimum)
+- **Go toolchain**: `go1.21.13` (installed at `/usr/local/go`; matches `go.mod`'s `toolchain go1.21.13` directive and the `go 1.21` language version)
 - **Source tree**: `go.k6.io/k6` at branch `k6_ddc3b0b1d23c`
 - **Build command**: `go build -mod=vendor -o /tmp/k6 .`
 - **Common run flags used**: `--verbose --log-output=stdout` (enables DEBUG-level output via `cmd/root.go:197-258`; the default logrus `TextFormatter` is used, which in non-TTY mode emits lines in the `time="..." level=... msg="..."` long form — see `cmd/root.go:245-258` for formatter selection)
@@ -391,11 +391,11 @@ export default function () {
 - **`js/modules/k6/data/data.go:152-167` — `sharedArrays.get()` double-checked locking**:
   1. Acquires `RLock` — if `s.data[name]` exists, returns the existing `sharedArray` reference without invoking the user's constructor closure.
   2. Otherwise releases the `RLock`, acquires `Lock`, re-checks the map, and only then calls `getShareArrayFromCall()` which executes the user's closure **exactly once**. The result (a JS array) is marshaled element-by-element into `arr []string` and stored in the shared map.
-- **`js/modules/k6/data/share.go:11-13` — `sharedArray` struct**:
+- **`js/modules/k6/data/share.go:10-12` — `sharedArray` struct**:
   - Holds `arr []string` where each element is a JSON-encoded string (not a parsed JS object). This single `[]string` slice is the entire backing storage that the 5.2× savings rest on.
-- **`js/modules/k6/data/share.go:23-33` — `wrap()` per-VU wrapper**:
+- **`js/modules/k6/data/share.go:23-34` — `wrap()` per-VU wrapper**:
   - Builds a per-VU `wrappedSharedArray` that references the same underlying `sharedArray.arr` `[]string`. The slice header (pointer, length, capacity — 24 bytes) is copied per VU, but the backing array (the ~21 MB of JSON text) is shared.
-- **`js/modules/k6/data/share.go:45-59` — `Get(index)` transient parse**:
+- **`js/modules/k6/data/share.go:44-59` — `Get(index)` transient parse**:
   - On each element access, calls `JSON.parse(arr[index])` via the sobek runtime and deep-freezes the result. The parsed JS object therefore exists only transiently in one VU's sobek heap and becomes eligible for GC after the caller releases its reference.
 - **`js/modules/k6/data/share.go:36-43` — `Set()` / `SetLen()`**:
   - Both panic with `"SharedArray is immutable"`, confirming the array is strictly read-only — which is what allows safe cross-VU sharing without per-VU copies or per-access locking.
