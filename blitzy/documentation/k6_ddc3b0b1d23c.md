@@ -284,7 +284,8 @@ The rest of this section walks each layer file-by-file.
 | `metrics/builtin.go` | 25 name constants + `BuiltinMetrics` struct + `RegisterBuiltinMetrics(registry)` | Defines every built-in metric k6 ships with and the one-shot registration function called at startup. |
 | `metrics/registry.go` | `Registry`, `NewRegistry()`, `NewMetric(name, typ, vts...)`, `MustNewMetric(...)`, `All()`, `Get(name)`, `RootTagSet()` | The thread-safe central store of every `*Metric` object used throughout a test run. |
 | `metrics/units.go` | `D(time.Duration) float64`, `ToD(float64) time.Duration`, `B(bool) float64` | Helpers that normalise time values into milliseconds-as-float64 and booleans into 0/1 floats. |
-| `metrics/tags.go` | `TagSet`, `TagsAndMeta`, `SystemTagSet`, `EnabledTags` | Defines the immutable atlas-backed tag set used for sample tagging and submetric filtering. |
+| `metrics/tags.go` | `TagSet` (line 27), `TagsAndMeta` (line 169), `EnabledTags` (line 237) | Defines the immutable atlas-backed `TagSet` used for sample tagging and submetric filtering, the `TagsAndMeta` bundle that pairs indexed `Tags` with non-indexed `Metadata`, and the `EnabledTags` string→bool map used to record which tag names are allowed. |
+| `metrics/system_tag.go` | `SystemTag` (line 13), `SystemTagSet` (line 17), `DefaultSystemTagSet` (line 47), `NonIndexableSystemTags` (line 54), `ToSystemTagSet()`, `NewSystemTagSet()` | Defines the bit-flag enum of k6 built-in system tag names (`proto`, `status`, `method`, `url`, `name`, `group`, `check`, `error`, `scenario`, `vu`, `iter`, …) and the `SystemTagSet` bitmask type that records which system tags are enabled for the current test run. `DefaultSystemTagSet` is the out-of-the-box inclusion list; `NonIndexableSystemTags` (`iter`, `vu`) routes high-cardinality tags into `Metadata` instead of `Tags` via `TagsAndMeta.SetSystemTagOrMeta`. |
 
 #### 2.1.1 The `MetricType` and `ValueType` enums
 
@@ -1349,6 +1350,7 @@ Every claim in this document is grounded in one of the files below. All files ar
 - `metrics/registry.go`
 - `metrics/units.go`
 - `metrics/tags.go`
+- `metrics/system_tag.go`
 
 **Metrics Engine (`metrics/engine/` package)**
 
