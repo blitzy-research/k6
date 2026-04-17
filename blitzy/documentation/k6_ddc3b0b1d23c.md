@@ -7,7 +7,7 @@
 - **Go toolchain**: `go1.22.2` (installed via apt; `go.mod` declares `go 1.21` with `toolchain go1.21.13` as the minimum)
 - **Source tree**: `go.k6.io/k6` at branch `k6_ddc3b0b1d23c`
 - **Build command**: `go build -mod=vendor -o /tmp/k6 .`
-- **Common run flags used**: `--verbose --log-output=stdout --log-format=raw` (maximum log fidelity, no ANSI colouring)
+- **Common run flags used**: `--verbose --log-output=stdout` (enables DEBUG-level output via `cmd/root.go:197-258`; the default logrus `TextFormatter` is used, which in non-TTY mode emits lines in the `time="..." level=... msg="..."` long form — see `cmd/root.go:245-258` for formatter selection)
 
 ---
 
@@ -52,31 +52,41 @@ export default function () {
 **Command**:
 
 ```bash
-/tmp/k6 run --verbose --log-output=stdout --log-format=raw /tmp/test_ramping_sigint.js &
+/tmp/k6 run --verbose --log-output=stdout /tmp/test_ramping_sigint.js &
 # at t ≈ 6s, in a separate terminal:
 kill -SIGINT "$(pgrep -f test_ramping_sigint)"
 ```
 
-**Verbatim log sequence (post-signal)**:
+**Verbatim log sequence (post-signal)** — output rendered by logrus's default `TextFormatter` (the `time="..." level=... msg="..."` long form is emitted when stdout is not a TTY — see `cmd/root.go:197-258` for formatter selection):
 
 ```text
-INFO[0000] Stopping k6 in response to signal...          sig=interrupt
-DEBUG[0005] Metrics emission of VUs and VUsMax metrics stopped
-DEBUG[0005] Local execution scheduler finished successfully
-DEBUG[0005] Executor finished successfully               executor=ramping-vus scenario=default
-... iteration-completion messages ...
-ERRO[0005] test run was aborted because k6 received a 'interrupt' signal
+time="2026-04-17T00:20:20Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-04-17T00:20:20Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-04-17T00:20:20Z" level=debug msg="Executor finished successfully" executor=default startTime=0s type=ramping-vus
+time="2026-04-17T00:20:20Z" level=debug msg="teardown() is not defined or not exported, skipping!"
+time="2026-04-17T00:20:20Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+time="2026-04-17T00:20:20Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-04-17T00:20:20Z" level=debug msg="Stopping vus and vux_max metrics emission..." phase=execution-scheduler-init
+time="2026-04-17T00:20:20Z" level=debug msg="Releasing signal trap..."
+time="2026-04-17T00:20:20Z" level=debug msg="Waiting for metrics and traces processing to finish..."
+time="2026-04-17T00:20:20Z" level=debug msg="Metrics and traces processing finished!"
+time="2026-04-17T00:20:20Z" level=debug msg="Stopping outputs..."
+time="2026-04-17T00:20:20Z" level=debug msg="Generating the end-of-test summary..."
+time="2026-04-17T00:20:20Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-04-17T00:20:20Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
 **End-of-test summary**:
 
 ```text
-running (00m05.9s), 00/10 VUs, 14 complete and 10 interrupted iterations
-iterations..........: 14     2.36735/s
-iteration_duration..: avg=... min=...  ...
-vus.................: 9      min=5    max=9
-vus_max.............: 10     min=10   max=10
+running (0m06.0s), 00/10 VUs, 14 complete and 10 interrupted iterations
+iteration_duration...: avg=2s min=2s med=2s max=2s p(90)=2s p(95)=2s
+iterations...........: 14  2.344126/s
+vus..................: 9   min=5      max=9
+vus_max..............: 10  min=10     max=10
 ```
+
+**Evidence that in-flight iterations were allowed to finish**: The last progress-bar line printed before `SIGINT` was issued reads `running (0m05.0s), 09/10 VUs, 12 complete and 0 interrupted iterations` (captured verbatim from stdout at t = 5 s). The end-of-test summary, emitted after SIGINT triggered the graceful-stop path, reports `14 complete and 10 interrupted iterations`. The increase from 12 complete to 14 complete between SIGINT arrival and test teardown is direct evidence that **two additional in-flight iterations were allowed to finish their `sleep(2)` call** before the `gracefulRampDown: '5s'` deadline expired and the remaining 10 still-mid-iteration VUs were terminated and counted as `interrupted`.
 
 Exit code: `105`.
 
@@ -87,16 +97,16 @@ Exit code: `105`.
   - The first signal received is dispatched to `gracefulStopHandler(sig)`.
   - Any second signal triggers `onHardStop(sig)` and then `gs.OSExit(int(exitcodes.ExternalAbort))` (value **105**), so the process exits immediately after a second signal without waiting for the scheduler to unwind.
 - **`cmd/run.go:349-363` — handlers bound inside `cmdRun.run()`**:
-  - `gracefulStop` logs `"Stopping k6 in response to signal..."` at the DEBUG level (upgraded to INFO in the output formatter), then calls `runAbort(errext.WithAbortReasonIfNone(errext.WithExitCodeIfNone(fmt.Errorf("test run was aborted because k6 received a '%s' signal", sig), exitcodes.ExternalAbort), errext.AbortedByUser))` and invokes `lingerCancel()`. This is what propagates the exit code 105 and the `ERRO` log line `test run was aborted because k6 received a 'interrupt' signal`.
+  - `gracefulStop` logs `"Stopping k6 in response to signal..."` via `logger.WithField("sig", sig).Debug(...)` at the DEBUG level; it becomes visible on stdout because `--verbose` lowers the logger's minimum output level to DEBUG (logrus formatters do not rewrite or upgrade severity — the `level=debug` field is preserved in the output). `gracefulStop` then calls `runAbort(errext.WithAbortReasonIfNone(errext.WithExitCodeIfNone(fmt.Errorf("test run was aborted because k6 received a '%s' signal", sig), exitcodes.ExternalAbort), errext.AbortedByUser))` and invokes `lingerCancel()`. This is what propagates the exit code 105 and the `level=error` log line `test run was aborted because k6 received a 'interrupt' signal`.
   - `onHardStop` logs `"Aborting k6 in response to signal"` at ERROR level then calls `globalCancel()`.
 - **`lib/executor/vu_handle.go:147-163` — `gracefulStop()`**:
   - Transitions the VU handle state from `running` to `toGracefulStop`. Critically, it does **NOT** cancel the VU's iteration context; the current `runIter(ctx, vu)` call inside `runLoopsIfPossible()` is allowed to return naturally. It re-creates `canStartIter` as an empty channel so that the VU loop cannot pick up a new iteration once the current one completes.
 - **`lib/executor/vu_handle.go:165-182` — `hardStop()`**:
   - Transitions `running`/`toGracefulStop` → `toHardStop` and calls `vh.cancel()`, forcefully cancelling the iteration context. The currently executing iteration exits via its `ctx.Done()` branch (or is killed mid-`sleep(2)` call because `sleep` honours context cancellation).
-- **`lib/executor/vu_handle.go:185-280` — `runLoopsIfPossible()`**:
-  - The main VU loop; selects on `canStartIter`, `ctx.Done()`, and `executorDone`. When in state `toGracefulStop` it waits for the in-flight iteration to finish (via `runIter` returning) before transitioning to `stopped` — this is the code path that produces the `VU ... iteration ... finished` DEBUG messages.
+- **`lib/executor/vu_handle.go:185-264` — `runLoopsIfPossible()`** (file total length: 264 lines):
+  - The main VU loop; selects on `canStartIter`, `ctx.Done()`, and `executorDone`. When in state `toGracefulStop` it waits for the in-flight `runIter(ctx, vu)` to return before transitioning to `stopped`. The file itself emits only three DEBUG messages — `"Start"` (line 123 for the initial spawn, line 127 when the VU re-enters `running` from a paused state), `"Graceful stop"` (line 161), and `"Hard stop"` (line 177); there is no per-iteration DEBUG log in this file, so the "iteration is allowed to finish" semantics are observed indirectly via the progress-bar delta (12→14 complete iterations between SIGINT and summary) rather than via a per-iteration log line.
 
-**Interpretation**: The 14 "complete" iterations are VUs that finished their `sleep(2)` before the 5-second `gracefulRampDown` budget elapsed; the 10 "interrupted" iterations are VUs whose contexts were cancelled by `hardStop()` (either because the second-signal path triggered or because the executor deadline expired while iterations were still in flight) before their iteration returned. This confirms that the **first `SIGINT` triggers the graceful path where in-flight work is allowed to finish**, and **only after the deadline or a second signal does k6 force-cancel** the iteration contexts.
+**Interpretation**: The progress bar at t = 5 s (just before SIGINT at t ≈ 6 s) shows `12 complete and 0 interrupted iterations`; the end-of-test summary shows `14 complete and 10 interrupted iterations`. The 2 additional "complete" iterations beyond the SIGINT moment are VUs that finished their `sleep(2)` within the 5-second `gracefulRampDown` budget; the 10 "interrupted" iterations are VUs whose contexts were cancelled by `hardStop()` (either because the executor deadline expired while iterations were still in flight, or because the VU iteration contexts were cancelled via `runCtx` at test teardown) before their iteration returned. This confirms that the **first `SIGINT` triggers the graceful path where in-flight work is allowed to finish**, and **only after the deadline does k6 force-cancel** the iteration contexts.
 
 ---
 
@@ -108,7 +118,7 @@ Exit code: `105`.
 
 ### Answer
 
-**`grpc_streams_msgs_received: 96`** (rate `19.437248/s`) across 2 active streams, with exit code **105**. Logs show the streaming loop receiving messages from the server, then the server-side context cancellation propagating through the debug line `stream is cancelled/finished`, followed by `stream /main.FeatureExplorer/ListFeatures is closing`, and culminating in client-side `Stream ended` events for each of the 2 active streams.
+**`grpc_streams_msgs_received: 98`** (rate `19.702762/s`) across 2 active streams, with exit code **105**. Logs show the streaming loop receiving messages from the server, then the client-side context cancellation propagating through the debug line `stream is cancelled/finished` (one per active stream), followed by `stream /main.FeatureExplorer/ListFeatures is closing` during cleanup, and — because the test script registered no error handler — culminating in two `level=warning msg="no handlers for error registered, but an error happened: canceled by client (k6)"` lines (one per active stream).
 
 ### Runtime Evidence — Experiment 2
 
@@ -157,34 +167,35 @@ export default function () {
 
 ```bash
 /tmp/grpc_test_server &                              # port 10000
-/tmp/k6 run --verbose --log-output=stdout --log-format=raw /tmp/test_grpc_stream_v2.js &
+/tmp/k6 run --verbose --log-output=stdout /tmp/test_grpc_stream_v2.js &
 # at t ≈ 5s:
 kill -SIGINT "$(pgrep -f test_grpc_stream_v2)"
 ```
 
-**Verbatim log sequence (post-signal)**:
+**Verbatim log sequence (post-signal)** — output rendered by logrus's default `TextFormatter` (the `time="..." level=... msg="..."` long form is emitted when stdout is not a TTY — see `cmd/root.go:197-258` for formatter selection):
 
 ```text
-INFO[0000] Stopping k6 in response to signal...          sig=interrupt
-DEBUG[0005] stream is cancelled/finished
-DEBUG[0005] stream /main.FeatureExplorer/ListFeatures is closing  source=grpc method=/main.FeatureExplorer/ListFeatures
-DEBUG[0005] stream is cancelled/finished
-DEBUG[0005] stream /main.FeatureExplorer/ListFeatures is closing  source=grpc method=/main.FeatureExplorer/ListFeatures
-DEBUG[0005] Stream ended
-DEBUG[0005] Stream ended
-DEBUG[0005] Metrics emission of VUs and VUsMax metrics stopped
-DEBUG[0005] Local execution scheduler finished successfully
-DEBUG[0005] Executor finished successfully               executor=ramping-vus scenario=default
-ERRO[0005] test run was aborted because k6 received a 'interrupt' signal
+time="2026-04-17T00:22:39Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-04-17T00:22:39Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-04-17T00:22:39Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-04-17T00:22:39Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-04-17T00:22:39Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-04-17T00:22:39Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-04-17T00:22:39Z" level=warning msg="no handlers for error registered, but an error happened: canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-04-17T00:22:39Z" level=warning msg="no handlers for error registered, but an error happened: canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-04-17T00:22:39Z" level=debug msg="Executor finished successfully" executor=default startTime=0s type=ramping-vus
+time="2026-04-17T00:22:39Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+time="2026-04-17T00:22:39Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-04-17T00:22:39Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
 **End-of-test summary**:
 
 ```text
-running (00m04.9s), 00/4 VUs, 0 complete and 2 interrupted iterations
-grpc_streams...............: 2     0.404858/s
-grpc_streams_msgs_received.: 96    19.437248/s
-grpc_streams_msgs_sent.....: 2     0.404858/s
+running (0m05.0s), 0/4 VUs, 0 complete and 2 interrupted iterations
+grpc_streams.................: 2      0.402097/s
+grpc_streams_msgs_received...: 98     19.702762/s
+grpc_streams_msgs_sent.......: 2      0.402097/s
 ```
 
 Exit code: `105`.
@@ -203,11 +214,11 @@ Exit code: `105`.
 - **`js/modules/k6/grpc/stream.go:201` — debug log `"stream is cancelled/finished"`**:
   - Emitted when `isRegularClosing(err)` returns true, i.e., when the stream closes cleanly (EOF) **or** when the stream's context is cancelled as part of graceful shutdown — which is exactly the case here.
 - **`js/modules/k6/grpc/stream.go:371` — debug log `"stream %s is closing"`**:
-  - Emitted during the final stream cleanup, immediately after `close(s.done)` and just before the `eventEnd` callback is queued to the JS runtime (producing the `Stream ended` log entry).
+  - Emitted during the final stream cleanup, immediately after `close(s.done)`. If the stream closed cleanly (EOF), the `eventEnd` callback is queued to the JS runtime so any `stream.on('end', …)` handler fires; if instead the stream terminated with an error (e.g., cancellation) and no `stream.on('error', …)` handler is registered, the `logger.Warnf("no handlers for error registered, but an error happened: %s", …)` path fires (emitted from the event loop when the error event has no subscribers).
 - **`lib/testutils/grpcservice/service.go:57-68` — `FeatureExplorer.ListFeatures(Rectangle) returns (stream Feature)`**:
   - Iterates over the feature database and, for each feature within the requested rectangle, does `time.Sleep(100 * time.Millisecond)` followed by `stream.Send(feature)`. The 100 ms server-side pacing is what limits the throughput during the short window before interrupt.
 
-**Interpretation**: 96 received messages across 2 streams ≈ **48 messages per stream** before the 30 ms `gracefulRampDown` window elapsed and the client-side VU contexts were cancelled. At ~100 ms per server-side `stream.Send` plus client-side receive overhead, 48 messages in roughly 5 s is consistent. After interruption, the `loop()` goroutine's `RecvMsg` returned with a cancellation error, `isRegularClosing` matched, the `stream is cancelled/finished` debug log fired, and the cleanup path produced the `stream /main.FeatureExplorer/ListFeatures is closing` log line followed by `Stream ended`. The observed rate `19.437248/s` matches 96 ÷ 4.9 s runtime.
+**Interpretation**: 98 received messages across 2 streams ≈ **49 messages per stream** before the 30 ms `gracefulRampDown` window elapsed and the client-side VU contexts were cancelled. At ~100 ms per server-side `stream.Send` plus client-side receive overhead, 49 messages in roughly 5 s is consistent. After interruption, the `loop()` goroutine's `RecvMsg` returned with a cancellation error, `isRegularClosing` matched, the `stream is cancelled/finished` debug log fired, and the cleanup path produced the `stream /main.FeatureExplorer/ListFeatures is closing` log line. Because the test script registers only `data` and `end` handlers (no `error` handler), the unhandled `canceled by client (k6)` error surfaced as two `level=warning` lines — one per active stream — instead of clean `Stream ended` events. The observed rate `19.702762/s` matches 98 ÷ 4.97 s runtime.
 
 ---
 
@@ -377,7 +388,7 @@ export default function () {
 
 - **`js/modules/k6/data/data.go:18-47` — `RootModule` singleton pattern**:
   - The `RootModule` struct holds a single `shared sharedArrays` field (whose internal `data map[string]sharedArray` is protected by a `sync.RWMutex`). `New()` initializes exactly ONE `sharedArrays` value per k6 process; `NewModuleInstance()` returns a per-VU `Data` struct that holds a **pointer** `shared *sharedArrays` back to the same `RootModule`-level value → the map is process-global, not per-VU.
-- **`js/modules/k6/data/data.go:150-167` — `sharedArrays.get()` double-checked locking**:
+- **`js/modules/k6/data/data.go:152-167` — `sharedArrays.get()` double-checked locking**:
   1. Acquires `RLock` — if `s.data[name]` exists, returns the existing `sharedArray` reference without invoking the user's constructor closure.
   2. Otherwise releases the `RLock`, acquires `Lock`, re-checks the map, and only then calls `getShareArrayFromCall()` which executes the user's closure **exactly once**. The result (a JS array) is marshaled element-by-element into `arr []string` and stored in the shared map.
 - **`js/modules/k6/data/share.go:11-13` — `sharedArray` struct**:
@@ -474,12 +485,12 @@ k6_vus
 k6_vus_max
 ```
 
-**Relevant log lines (INFO/DEBUG)**:
+**Relevant log lines** (verbatim, captured with `--verbose --log-output=stdout`; the leading `output: ...` line is a startup banner emitted by `cmd/ui.go:134` via `fmt.Fprintf`, not a logrus log entry, so it carries no level/timestamp):
 
 ```text
-INFO[0000] output: Output: Prometheus remote write
-DEBUG[...] Converted samples to Prometheus TimeSeries
-DEBUG[...] Successful flushed time series to remote write endpoint  nts=N t=...
+        output: Prometheus remote write (http://localhost:9998/api/v1/write)
+time="2026-04-17T00:26:40Z" level=debug msg="Converted samples to Prometheus TimeSeries" nts=26 output="Prometheus remote write"
+time="2026-04-17T00:26:40Z" level=debug msg="Successful flushed time series to remote write endpoint" nts=26 output="Prometheus remote write" took=1.180139ms
 ```
 
 **Naming pattern**:
@@ -540,7 +551,7 @@ DEBUG[...] Successful flushed time series to remote write endpoint  nts=N t=...
   - Runs periodically on `flushPeriod` (default 5 s — `defaultPushInterval` in `config.go`).
   - `convertToPbSeries()` walks the in-memory registry, invokes `MapSeries()` (directly for Counter/Gauge/Rate, via the trend-as-gauges helper for Trend) per metric, and batches the resulting `TimeSeries` into a `prompb.WriteRequest`.
   - The request is marshaled, snappy-compressed, and POSTed to `SERVER_URL`. The log lines `Converted samples to Prometheus TimeSeries` and `Successful flushed time series to remote write endpoint` are emitted here at DEBUG level.
-- **`cmd/outputs.go:65-67` — output constructor registration**:
+- **`cmd/outputs.go:66-68` — output constructor registration**:
   - `builtinOutputExperimentalPrometheusRW.String(): func(params output.Params) (output.Output, error) { return remotewrite.New(params) }` wires the `-o experimental-prometheus-rw` CLI flag to the vendored `remotewrite.New()` constructor.
 
 **Interpretation**: The `k6_` prefix is an **unconditional constant** applied at the single `MapSeries()` call site (line 40 of `prometheus.go`). The user's original metric name is preserved verbatim **between** the prefix and the optional type suffix, so the transformation `my_custom_counter` → `k6_my_custom_counter_total` is deterministic and reversible — guaranteeing full metric-name integrity for downstream Prometheus queries (e.g., `sum(rate(k6_my_custom_counter_total[1m]))`).
