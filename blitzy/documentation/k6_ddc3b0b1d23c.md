@@ -276,7 +276,7 @@ The rest of this section walks each layer file-by-file.
 
 | File | Key types / functions | Responsibility |
 |------|----------------------|----------------|
-| `metrics/metric.go` | `Metric` struct (lines 12–26), `Submetric` struct (lines 30–37, preceded by a doc comment at line 29), `AddSubmetric(suffix)`, `ParseMetricName(name)` | Defines the core `Metric` value — `registry`, `Name`, `Type`, `Contains` (ValueType), `Tainted`, `Thresholds`, `Submetrics`, `Sub`, `Sink`, `Observed`. Also defines `Submetric` which is a tag-filtered view of a parent metric. |
+| `metrics/metric.go` | `Metric` struct (lines 12–26), `Submetric` struct (lines 29–36), `AddSubmetric(suffix)`, `ParseMetricName(name)` | Defines the core `Metric` value — `registry`, `Name`, `Type`, `Contains` (ValueType), `Tainted`, `Thresholds`, `Submetrics`, `Sub`, `Sink`, `Observed`. Also defines `Submetric` which is a tag-filtered view of a parent metric. |
 | `metrics/metric_type.go` | `MetricType` enum | Defines the four canonical metric types k6 understands. |
 | `metrics/value_type.go` | `ValueType` enum | Defines what the numeric value of a sample semantically is (a plain number, a duration-in-ms, or a byte-count). |
 | `metrics/sample.go` | `TimeSeries`, `Sample`, `SampleContainer` interface, `Samples`, `ConnectedSampleContainer`, `ConnectedSamples`, `GetBufferedSamples(buf)`, `PushIfNotDone(ctx, output, sample)` | Defines the in-memory shape of a single sample and the container abstractions used on the samples channel. |
