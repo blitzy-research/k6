@@ -288,7 +288,7 @@ Relative specifiers like `"./util.js"` and `"../shared/helper.js"` are resolved 
 
 ### The full resolution chain
 
-```
+```text
 ESM static import or require()
     └─► sobekModuleResolver(referencingScriptOrModule, specifier)   [resolution.go:192]
           └─► resolve(reversePath(referencingScriptOrModule), specifier)   [resolution.go:145]
