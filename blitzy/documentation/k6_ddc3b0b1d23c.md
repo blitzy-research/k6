@@ -202,7 +202,7 @@ Exit code: `105`.
 
 ### Rationale
 
-- **`js/modules/k6/grpc/metrics.go:14-32` — `registerMetrics()`** registers the three counter metrics at module init:
+- **`js/modules/k6/grpc/metrics.go:13-30` — `registerMetrics()`** registers the three counter metrics at module init:
   - `grpc_streams` via `registry.NewMetric("grpc_streams", metrics.Counter)`
   - `grpc_streams_msgs_sent` — client → server messages
   - `grpc_streams_msgs_received` — server → client messages
@@ -292,7 +292,7 @@ Exit code: `0`.
   - This is **real-time** emission: one sample per dropped tick, pushed the moment it happens → the API counter increments continuously throughout the run (113 at t ≈ 6 s, 195 at end).
 - **`api/v1/routes.go:31-39` — `NewHandler()`**:
   - Registers `mux.HandleFunc("/v1/metrics/", ...)` which strips the `/v1/metrics/` prefix from `r.URL.Path` and dispatches the remainder (the metric id) to `handleGetMetric(cs, rw, r, id)`.
-- **`api/v1/metric_routes.go:27-50` — `handleGetMetric()`**:
+- **`api/v1/metric_routes.go:27-49` — `handleGetMetric()`**:
   - Acquires `cs.MetricsEngine.MetricsLock`.
   - Looks up `cs.MetricsEngine.ObservedMetrics[id]`; returns `404 Not Found` if the metric has never been observed.
   - Wraps the metric in an envelope via `newMetricEnvelope(metric, t)` where `t = cs.Scheduler.GetState().GetCurrentTestRunDuration()`.
@@ -520,7 +520,7 @@ time="2026-04-17T00:26:40Z" level=debug msg="Successful flushed time series to r
   )
   ```
 
-- **`vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:38-55` — `MapSeries()`** (this is the core naming logic):
+- **`vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:39-52` — `MapSeries()`** (this is the core naming logic):
   - Builds the `Labels` slice for a Prometheus `TimeSeries`.
   - `v := defaultMetricPrefix + series.Metric.Name` → **unconditionally prepends `k6_`**.
   - If a suffix is passed (e.g., `"total"`, `"p99"`, `"avg"`), `v += "_" + suffix`.
