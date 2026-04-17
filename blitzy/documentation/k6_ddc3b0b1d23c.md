@@ -276,7 +276,7 @@ The rest of this section walks each layer file-by-file.
 
 | File | Key types / functions | Responsibility |
 |------|----------------------|----------------|
-| `metrics/metric.go` | `Metric` struct (lines 12–26), `Submetric` struct (lines 29–36), `AddSubmetric(suffix)`, `ParseMetricName(name)` | Defines the core `Metric` value — `Name`, `Type`, `Contains` (ValueType), `Tainted`, `Thresholds`, `Submetrics`, `Sub`, `Sink`, `Observed`. Also defines `Submetric` which is a tag-filtered view of a parent metric. |
+| `metrics/metric.go` | `Metric` struct (lines 12–26), `Submetric` struct (lines 30–37, preceded by a doc comment at line 29), `AddSubmetric(suffix)`, `ParseMetricName(name)` | Defines the core `Metric` value — `registry`, `Name`, `Type`, `Contains` (ValueType), `Tainted`, `Thresholds`, `Submetrics`, `Sub`, `Sink`, `Observed`. Also defines `Submetric` which is a tag-filtered view of a parent metric. |
 | `metrics/metric_type.go` | `MetricType` enum | Defines the four canonical metric types k6 understands. |
 | `metrics/value_type.go` | `ValueType` enum | Defines what the numeric value of a sample semantically is (a plain number, a duration-in-ms, or a byte-count). |
 | `metrics/sample.go` | `TimeSeries`, `Sample`, `SampleContainer` interface, `Samples`, `ConnectedSampleContainer`, `ConnectedSamples`, `GetBufferedSamples(buf)`, `PushIfNotDone(ctx, output, sample)` | Defines the in-memory shape of a single sample and the container abstractions used on the samples channel. |
@@ -312,21 +312,27 @@ const (
 
 #### 2.1.2 The `Metric` struct
 
-From `metrics/metric.go` lines 12–26:
+From `metrics/metric.go` lines 12–26 (verbatim):
 
 ```go
 type Metric struct {
-    Name       string        `json:"name"`
-    Type       MetricType    `json:"type"`
-    Contains   ValueType     `json:"contains"`
-    Tainted    null.Bool     `json:"tainted"`
-    Thresholds Thresholds    `json:"thresholds"`
-    Submetrics []*Submetric  `json:"submetrics"`
-    Sub        *Submetric    `json:"sub,omitempty"`
-    Sink       Sink          `json:"-"`
-    Observed   bool          `json:"-"`
+    registry *Registry  `json:"-"`
+    Name     string     `json:"name"`
+    Type     MetricType `json:"type"`
+    Contains ValueType  `json:"contains"`
+
+    // TODO: decouple the metrics from the sinks and thresholds... have them
+    // linked, but not in the same struct?
+    Tainted    null.Bool    `json:"tainted"`
+    Thresholds Thresholds   `json:"thresholds"`
+    Submetrics []*Submetric `json:"submetrics"`
+    Sub        *Submetric   `json:"-"`
+    Sink       Sink         `json:"-"`
+    Observed   bool         `json:"-"`
 }
 ```
+
+The unexported `registry` field is a back-pointer to the owning `*metrics.Registry` that created this metric — every `*Metric` knows which registry minted it, which is used internally by `Metric.AddSubmetric` when a submetric needs a fresh `*Metric` allocation. The preserved in-source `TODO` comment is the authors' acknowledgement that sinks and thresholds are awkwardly co-located on the `Metric` struct today.
 
 Every sample emitted by a VU carries a pointer to exactly one such `Metric` (via `Sample.Metric`), and every increment / update to that metric's in-memory state happens through `Metric.Sink.Add(sample)`. The fact that `Sink` is a **pointer shared across the whole test run** is what makes the architecture work: no matter how many VUs, outputs, or goroutines are in play, there is exactly one `CounterSink` for the `iterations` counter, and every `Add` call mutates that one object.
 
