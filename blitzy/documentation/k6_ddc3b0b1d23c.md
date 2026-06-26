@@ -6,7 +6,7 @@
 | :-------------------- | :------------------------------------------------------------------------------------------------ |
 | **subject**           | Option consolidation, finalization ("freeze"), precedence, and multi-VU hand-off                  |
 | **codebase**          | `module go.k6.io/k6` [go.mod:L1], commit `ddc3b0b1d2`                                              |
-| **binary of record**  | `k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)` — built from source with vendored deps    |
+| **binary of record**  | `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` — built from source with vendored deps   |
 | **method**            | Source reading (code is the source of truth) + real runs of the from-source binary + official docs |
 | **answer (one line)** | `CLI flags > environment variables (K6_*) > script options > config file (JSON) > defaults`        |
 
@@ -15,7 +15,7 @@
 Everything in this document is grounded in two kinds of evidence, and every behavioral claim carries a `path:line` citation so it can be checked against the tree at commit `ddc3b0b1d2`:
 
 1. **The code itself**, read directly from the repository. Per the governing rule for this investigation — *"do not make assumptions, base your answers on the code as the truth"* — no behavior is asserted that is not visibly implemented in a cited source line.
-2. **Real runs** of a k6 binary compiled from this exact source with its vendored dependencies. The binary of record reports its build string as `k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)` — the verbatim `k6 version` output for the environment of record used throughout this document.
+2. **Real runs** of a k6 binary compiled from this exact source with its vendored dependencies. The binary of record reports its build string as `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` — the verbatim `k6 version` output for the environment of record used throughout this document.
 
 The experiments below were executed with that binary using throwaway scripts and config files created **outside** the repository tree and deleted afterward, so the working tree remains byte-for-byte unchanged. The observable in every experiment is the **k6 startup banner** — specifically the lines:
 
@@ -248,7 +248,7 @@ This is proven side-by-side in experiments **E5a** (`-e VUS=5` → no change) an
 
 ## 7. R3 — Real-run experiments
 
-All experiments below were executed with the from-source binary `/tmp/k6bin/k6` (`k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)`) against a base script created **outside** the repository tree:
+All experiments below were executed with the from-source binary `/tmp/k6bin/k6` (`k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`) against a base script created **outside** the repository tree:
 
 ```js
 // script.js (created under /tmp, deleted afterward)
@@ -305,11 +305,11 @@ $ /tmp/k6bin/k6 run --vus 7 --duration 3s script.js
               * default: 7 looping VUs for 3s (gracefulStop: 30s)
 running (01.0s), 7/7 VUs, ... complete and 0 interrupted iterations
 running (02.0s), 7/7 VUs, ... complete and 0 interrupted iterations
-running (03.0s), 1/7 VUs, ... complete and 0 interrupted iterations
+running (03.0s), 7/7 VUs, ... complete and 0 interrupted iterations
 running (03.0s), 0/7 VUs, ... complete and 0 interrupted iterations
 ```
 
-**Result: 7 VUs run concurrently.** The per-second `7/7 VUs` progress lines are the proof of real concurrency; the trailing `1/7` → `0/7` lines are VUs winding down during graceful teardown. (The "complete iterations" counts are machine- and run-specific — the empty default function loops as fast as possible, producing on the order of hundreds of thousands of iterations — so they are shown here as `...`; the invariant to read is the `7/7 VUs` concurrency, not the iteration count.) **Why:** the derived `constant-vus` scenario (from `--vus`/`--duration` via `DeriveScenariosFromShortcuts` [lib/executor/execution_config_shortcuts.go:L52]) drives `GetMaxPlannedVUs`/`GetMaxPossibleVUs` at [execution/scheduler.go:L45-L46], so the frozen scenario — not the raw flags — determines the concurrent VU count.
+**Result: 7 VUs run concurrently.** The per-second `7/7 VUs` progress lines are the proof of real concurrency; the final `0/7 VUs` line is the graceful-teardown tick once the 3s duration elapses. (The exact VU count on the transitional tick at `03.0s` is itself run-specific — it commonly stays at `7/7` as observed here, and on some runs shows an intermediate fraction such as `3/7` or `1/7` as in-flight iterations drain before the final `0/7`.) (The "complete iterations" counts are machine- and run-specific — the empty default function loops as fast as possible, producing on the order of hundreds of thousands of iterations — so they are shown here as `...`; the invariant to read is the `7/7 VUs` concurrency, not the iteration count.) **Why:** the derived `constant-vus` scenario (from `--vus`/`--duration` via `DeriveScenariosFromShortcuts` [lib/executor/execution_config_shortcuts.go:L52]) drives `GetMaxPlannedVUs`/`GetMaxPossibleVUs` at [execution/scheduler.go:L45-L46], so the frozen scenario — not the raw flags — determines the concurrent VU count.
 
 ### E5a — the `-e`/`--env` nuance (no option change)
 
@@ -438,7 +438,7 @@ The binary used here was built from source with vendored dependencies, outside t
 
 ```sh
 CGO_ENABLED=0 go build -mod=vendor -trimpath -o /tmp/k6bin/k6 .
-/tmp/k6bin/k6 version   # k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)
+/tmp/k6bin/k6 version   # k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)
 ```
 
 Each experiment in §7 uses a temporary `script.js` (and, for E2, `cfg.json`) created under `/tmp` and removed afterward, so the repository working tree is unaffected. The observable in every case is the startup banner; do **not** pass `--quiet`, which suppresses it.
