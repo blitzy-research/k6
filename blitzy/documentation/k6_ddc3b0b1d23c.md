@@ -33,9 +33,11 @@ issue.
 interpreted with its intended meaning.** Two interpretive caveats matter most: `http_req_connecting`
 and `http_req_tls_handshaking` are *expected* to be `0` on a reused connection (no new connection or
 handshake occurred), and on Windows very fast phases can read `0` because of the operating system's
-coarse `time.Now()` resolution. The underlying measurement code is concurrency-safe: every hook
-timestamp is read and written through `sync/atomic`, and a fresh tracer is created per request
-[`lib/netext/httpext/transport.go:L205`].
+coarse `time.Now()` resolution. The underlying measurement code is concurrency-safe: the hook
+timestamps that the Go contract allows to fire concurrently, repeatedly, or after the request completes
+are read and written through `sync/atomic`, the connection-acquisition fields are written once under a
+documented hook-ordering invariant (with the race detector as a tripwire), and a fresh tracer is
+created per request [`lib/netext/httpext/transport.go:L205`].
 
 ### Q2 — Should anything be reported upstream?
 
@@ -93,7 +95,7 @@ Each hook records a timestamp by calling the package helper `now()`, which is si
 the tracer's `int64` fields — `getConn`, `connectStart`, `connectDone`, `tlsHandshakeStart`,
 `tlsHandshakeDone`, `gotConn`, `wroteRequest`, `gotFirstResponseByte`
 [`lib/netext/httpext/tracer.go:L147-L159`]. Storing nanosecond integers (rather than `time.Time`
-values) is what allows the writes/reads to go through `sync/atomic` (Section 4).
+values) is what allows the concurrency-sensitive writes/reads to go through `sync/atomic` (Section 4).
 
 ### 2.3 `Done()` computes per-phase durations into a `Trail`
 
@@ -256,8 +258,10 @@ requests; the user suspects a race condition in the measurement code.
 
 **Verdict: KNOWN PLATFORM LIMITATION — NOT a race.**
 
-**Rationale.** Every timestamp originates from `now()`, defined as `time.Now().UnixNano()`
-[`lib/netext/httpext/tracer.go:L175-L177`]. On Windows, `time.Now()` has historically had **coarse
+**Rationale.** Every hook timestamp originates from `now()` (`time.Now().UnixNano()`)
+[`lib/netext/httpext/tracer.go:L175-L177`], while `Done()` captures the final `done` timestamp with
+`time.Now()` directly [`lib/netext/httpext/tracer.go:L316`] — so both share the same clock source. On
+Windows, `time.Now()` has historically had **coarse
 resolution** (on the order of ~1–15 ms). When two hooks for a fast request fire within the same clock
 tick, they read the **same** integer value, so deltas such as `connectDone − connectStart` evaluate
 to `0` [`lib/netext/httpext/tracer.go:L340-L345`]. With several phases sharing a tick, an entire
@@ -274,8 +278,9 @@ and [#41087](https://github.com/golang/go/issues/41087) (`lib/netext/httpext/tra
 Crucially, this is a **clock-precision artifact, not a data race.** The distinction matters:
 
 - A *race* would mean concurrent, unsynchronized access corrupting the timestamps. As Section 4
-  shows, every timestamp is written and read through `sync/atomic`, and the package is stress-tested
-  under the race detector — so there is no race.
+  shows, the concurrently/late-firing hook timestamps are written and read through `sync/atomic` while
+  the connection-acquisition fields rely on a documented single-write invariant, and the package is
+  stress-tested under the race detector — so there is no race.
 - The *zeros* arise because the clock cannot resolve two events that occur very close together; both
   reads are correct, they just return the same coarse value.
 
@@ -376,37 +381,56 @@ request has completed or failed." k6's code acknowledges both halves of this con
 - The TLS and response hooks note they "could be called after the RoundTrip() method has returned"
   [`lib/netext/httpext/tracer.go:L240-L241`, `L308-L309`].
 
-### 4.2 All timestamps are mutated and read through atomics
+### 4.2 Concurrent and late-firing hook timestamps are handled through atomics
 
-The `Tracer` stores every hook timestamp as an `int64` field
-[`lib/netext/httpext/tracer.go:L147-L159`] and mutates them **exclusively** through `sync/atomic`:
+The `Tracer` stores each captured instant as an `int64` field
+[`lib/netext/httpext/tracer.go:L147-L159`]. The timestamps written by the hooks that the Go contract
+allows to fire **concurrently, repeatedly, or after the request has completed** — `connectStart`,
+`connectDone`, the two TLS-handshake timestamps, `wroteRequest`, and `gotFirstResponseByte` — are
+mutated and read through `sync/atomic`:
 
 - `atomic.CompareAndSwapInt64` — `ConnectStart` [`lib/netext/httpext/tracer.go:L201`], `ConnectDone`
   [`L218`], `TLSHandshakeStart` [`L231`], `TLSHandshakeDone` [`L244`], `GotFirstResponseByte` [`L311`],
   and the false-`Reused` else branch [`L287-L291`].
-- `atomic.SwapInt64` — the reuse branch in `GotConn` [`lib/netext/httpext/tracer.go:L271-L277`].
+- `atomic.SwapInt64` — the reuse branch in `GotConn`, which overwrites the connect/TLS timestamps
+  [`lib/netext/httpext/tracer.go:L271-L277`].
 - `atomic.StoreInt64` — `WroteRequest` [`lib/netext/httpext/tracer.go:L301`].
-- `atomic.LoadInt64` — all reads in `Done()` [`lib/netext/httpext/tracer.go:L332-L338`].
+- `atomic.LoadInt64` — the reads of these timestamps in `Done()`
+  [`lib/netext/httpext/tracer.go:L332-L338`].
 
-Because reads and writes are atomic, a hook firing late or on another goroutine cannot tear a value or
-race with `Done()`; the worst case is that a very-late hook's write simply loses the CAS (the field is
-already set) and is ignored — which is the intended de-duplication behavior.
+For these fields, a hook firing late or on another goroutine cannot tear a value or race with `Done()`;
+the worst case is that a very-late hook's write simply loses the CAS (the field is already set) and is
+ignored — which is the intended de-duplication behavior. The connection-acquisition fields are handled
+differently, as the next section explains.
 
-### 4.3 One deliberate non-atomic write
+### 4.3 Connection-acquisition fields are non-atomic by design, with the race detector as a tripwire
 
-There is exactly one intentional exception. In `GotConn`, the fields `gotConn`, `connReused`, and
-`connRemoteAddr` are written **without** synchronization
-[`lib/netext/httpext/tracer.go:L261-L263`], guarded by the comment that this hook "shouldn't be called
-multiple times so no synchronization here, it's better for the race detector to panic if we're wrong"
-[`lib/netext/httpext/tracer.go:L259-L260`]. This is a conscious design decision — not an oversight —
-that uses the race detector as a tripwire for an invariant the authors believe holds.
+The connection-acquisition fields are deliberately **not** atomic, and `Done()` reads two of them
+directly. `GetConn` writes `t.getConn = now()` with a plain assignment
+[`lib/netext/httpext/tracer.go:L187-L188`], and `GotConn` likewise writes `gotConn`, `connReused`, and
+`connRemoteAddr` **without** synchronization [`lib/netext/httpext/tracer.go:L261-L263`], guarded by the
+comment that this hook "shouldn't be called multiple times so no synchronization here, it's better for
+the race detector to panic if we're wrong" [`lib/netext/httpext/tracer.go:L259-L260`]. `Done()` then
+computes `Blocked` by reading `t.gotConn` and `t.getConn` **directly**, not through atomic loads
+[`lib/netext/httpext/tracer.go:L323-L325`]. (`gotConn` is *additionally* loaded atomically at
+[`lib/netext/httpext/tracer.go:L336`] for the connect/TLS duration math.)
+
+This is a conscious design decision — not an oversight. Unlike the connect/TLS/write/response hooks,
+`GetConn` and `GotConn` are each invoked exactly once and at a fixed point in the request lifecycle:
+the Go contract — echoed in k6's own comment — states that `GetConn`, "if it's called ... will be
+called before all other hooks" [`lib/netext/httpext/tracer.go:L186`], and `GotConn` fires once a
+connection has been obtained, ahead of the request write. Both are therefore ordered-before `Done()` on
+the goroutine that drives the round trip, and that happens-before relationship makes a plain write/read
+safe — so the authors use the race detector as a tripwire for the invariant rather than paying for
+atomics on these fields.
 
 ### 4.4 Per-request isolation
 
 Because a fresh `&Tracer{}` is created for every round trip
 [`lib/netext/httpext/transport.go:L205`] and the type is explicitly documented as unsafe to reuse
 [`lib/netext/httpext/tracer.go:L145`], there is no shared mutable state across requests. Concurrency
-concerns are therefore confined to the hooks of a *single* request, which the atomics handle.
+concerns are therefore confined to the hooks of a *single* request, which the atomics and the
+single-write invariant described above handle.
 
 ### 4.5 Empirical guard: the 200-request cancellation stress test
 
@@ -417,8 +441,10 @@ calling `tracer.Done()` [`lib/netext/httpext/tracer_test.go:L275`]. Cancelled re
 the case where hooks fire late / concurrently, so this test (normally run under `-race`) is the guard
 that the atomic accounting is correct.
 
-**Conclusion.** The measurement code is concurrency-safe by construction (atomics + per-request
-tracers) and is exercised by a dedicated race-stress test. This is why Behavior 3 must be attributed
+**Conclusion.** The measurement code is concurrency-safe by construction — atomics for the
+concurrent/late-firing hook timestamps, a documented single-write invariant for the
+connection-acquisition fields, and a fresh tracer per request — and is exercised by a dedicated
+race-stress test. This is why Behavior 3 must be attributed
 to clock resolution, not to a race: the synchronization is sound; the clock is simply coarse.
 
 ---
