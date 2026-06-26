@@ -6,10 +6,17 @@ commands, environment variables, external files, and validation logic involved. 
 seven discrete questions (Q1–Q7), each grounded in the tool's own source code and confirmed
 by running a binary built from that source.
 
-> **Analyzed version (pinned):** **k6 v0.55.0**, commit **`ddc3b0b1d2`**.
-> Source-of-truth: `const Version = "0.55.0"` [lib/consts/consts.go:L12]. The binary built and
-> run during this analysis reports `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`.
-> All claims are scoped to this version; behavior in other releases may differ.
+> **Analyzed version (pinned):** **k6 v0.55.0**, at k6 **source** commit **`ddc3b0b1d23c`**.
+> Source-of-truth: `const Version = "0.55.0"` [lib/consts/consts.go:L12]. A binary built at that
+> source commit reports `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` — but that
+> `commit/<hash>` suffix is **not** a constant: `FullVersion()` stamps it from the build's VCS
+> info (the git HEAD at build time) via `debug.ReadBuildInfo()` [lib/consts/consts.go:L16-L53].
+> Because committing this document advances git HEAD past the source commit, a fresh rebuild
+> stamps the current HEAD's hash rather than `commit/ddc3b0b1d2` (for instance, building at HEAD
+> `c4413b7ce` stamps `commit/c4413b7ceb`) — while the k6 source,
+> and therefore every behavior documented below, is byte-identical (the source-only diff
+> `git diff ddc3b0b1d23c HEAD -- . ':(exclude)blitzy/**'` is empty). All claims are scoped to this
+> version; behavior in other releases may differ.
 
 ---
 
@@ -182,10 +189,12 @@ It is defined by `Use: "run"` [cmd/run.go:L491] and takes a single positional ar
 to the script, or `-` to read the script from STDIN [cmd/run.go:L498]. The load model and outputs
 are controlled through flags.
 
-**Evidence.** The principal flags below are reproduced **verbatim from `k6 run --help`** of the
-built binary (names, short forms, and descriptions are exactly as printed):
+**Evidence.** The principal flags below are drawn **from `k6 run --help`** of the built binary
+(names, short forms, and descriptions are reproduced as printed); a few cells add a brief,
+clearly-marked editorial parenthetical — `-o/--out` (repeatable for multiple outputs), `-e/--env`
+(sets `__ENV`, not k6 options), and `--compatibility-mode` (default `extended`) — for clarity:
 
-| Flag | Meaning (verbatim from `--help`) |
+| Flag | Meaning (from `--help`, lightly annotated) |
 |------|----------------------------------|
 | `-u, --vus int` | number of virtual users (**default 1**) |
 | `-i, --iterations int` | script total iteration limit (among all VUs) |
@@ -274,9 +283,12 @@ info/warn/error messages — are written to **STDERR**.
 - **Banner → STDOUT.** `Banner()` returns the five-line ASCII "Grafana k6" logo
   [lib/consts/consts.go:L55-L66]; `printBanner` writes it to `gs.Stdout` and is skipped under
   `--quiet` [cmd/ui.go:L58-L64]; it is invoked at the start of a run [cmd/run.go:L68]. The version
-  string comes from `const Version = "0.55.0"` [lib/consts/consts.go:L12] and is rendered in full
-  by `FullVersion()` as `v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`
-  [lib/consts/consts.go:L16].
+  string comes from `const Version = "0.55.0"` [lib/consts/consts.go:L12]; `FullVersion()` renders
+  it in full by appending the build's git commit — read from `debug.ReadBuildInfo()` (the
+  `vcs.revision` setting, truncated to 10 characters), so the suffix tracks the git HEAD at build
+  time — followed by the Go version and platform [lib/consts/consts.go:L16-L53]. Built at the
+  source commit it reads `v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`; a rebuild at a
+  later HEAD stamps a newer commit suffix (see the version note at the top of this document).
 - **Execution block & progress bar → STDOUT.** `printExecutionDescription` builds the
   `execution` / `script` / `output` block and writes it to STDOUT
   [cmd/ui.go:L100,L108-L134,L163]; `printBar` writes the progress bar to STDOUT — in a TTY it
@@ -667,14 +679,17 @@ precedence [cmd/runtime_options.go:L54]. Optional external files (`--out json`, 
 `--summary-export`) capture machine-readable results, and a small family of exit codes
 [errext/exitcodes/codes.go:L10-L55] lets automation tell a crossed threshold (99) apart from a
 broken script (107/255). Every statement here was taken from the **k6 v0.55.0** source (commit
-`ddc3b0b1d2`) and confirmed by running the binary built from it; the numeric values shown are
+`ddc3b0b1d23c`) and confirmed by running the binary built from it; the numeric values shown are
 illustrative observations from individual runs.
 
 ---
 
 ## Appendix — Verbatim evidence
 
-These are **real** outputs from the built `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`.
+These are **real** outputs captured from a `k6 v0.55.0` binary built at source commit
+`ddc3b0b1d23c` (reported by `k6 version` as `commit/ddc3b0b1d2`; a rebuild at a later git HEAD
+stamps a newer commit suffix — see the version note at the top — while the source, and therefore
+these outputs, are unchanged).
 Numbers (durations, byte counts, rates, timestamps) are **illustrative/observed** and vary per run.
 
 **A) Canonical single-GET end-of-test summary** — `k6 run --vus 1 --iterations 1` against a local,
