@@ -6,7 +6,7 @@
 | :-------------------- | :------------------------------------------------------------------------------------------------ |
 | **subject**           | Option consolidation, finalization ("freeze"), precedence, and multi-VU hand-off                  |
 | **codebase**          | `module go.k6.io/k6` [go.mod:L1], commit `ddc3b0b1d2`                                              |
-| **binary of record**  | `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` — built from source with vendored deps   |
+| **binary of record**  | `k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)` — built from source with vendored deps    |
 | **method**            | Source reading (code is the source of truth) + real runs of the from-source binary + official docs |
 | **answer (one line)** | `CLI flags > environment variables (K6_*) > script options > config file (JSON) > defaults`        |
 
@@ -15,7 +15,7 @@
 Everything in this document is grounded in two kinds of evidence, and every behavioral claim carries a `path:line` citation so it can be checked against the tree at commit `ddc3b0b1d2`:
 
 1. **The code itself**, read directly from the repository. Per the governing rule for this investigation — *"do not make assumptions, base your answers on the code as the truth"* — no behavior is asserted that is not visibly implemented in a cited source line.
-2. **Real runs** of a k6 binary compiled from this exact source with its vendored dependencies. The binary reports its own build string as `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`; that is the verbatim `k6 version` output, so this document uses the toolchain string **`go1.23.10`** that the binary actually emits rather than any assumed value.
+2. **Real runs** of a k6 binary compiled from this exact source with its vendored dependencies. The binary of record reports its build string as `k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)` — the verbatim `k6 version` output for the environment of record used throughout this document.
 
 The experiments below were executed with that binary using throwaway scripts and config files created **outside** the repository tree and deleted afterward, so the working tree remains byte-for-byte unchanged. The observable in every experiment is the **k6 startup banner** — specifically the lines:
 
@@ -45,7 +45,7 @@ CLI flags  >  environment variables (K6_*)  >  script `export const options`  > 
 1. The explicit **layer order** in `getConsolidatedConfig` [cmd/config.go:L189-L216], where the **CLI config is applied twice** — once as the seed and once last on top of everything.
 2. The **null-aware, per-field merge** in `Options.Apply` [lib/options.go:L357-L410], where a field from a higher layer only overrides a lower layer when its nullable `.Valid` flag is set.
 
-This ordering is corroborated three independent ways: by the code, by the real runs in [§7](#7-r3--real-run-experiments), and by the official Grafana k6 "How to use options" documentation, which lists the same order and explicitly notes the config file is the second-lowest precedence.
+This ordering is corroborated three independent ways: by the code, by the real runs in [§7](#7-r3--real-run-experiments), and by the official Grafana k6 [How to use options](https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/) documentation, which lists the same order and explicitly notes the config file is the second-lowest precedence (the exact links and short quotations are collected in [§7.2](#72-official-documentation-corroboration)).
 
 ---
 
@@ -79,7 +79,7 @@ The crux for anyone debugging precedence: **the CLI config appears twice.** It i
 
 ### 2.3 The null-aware merge engine
 
-`Config.Apply` [cmd/config.go:L71-L92] is the per-layer merge entry point; it delegates the option-level merging to `Options.Apply` [lib/options.go:L357-L410]. The defining characteristic of that engine is that **every option field is a nullable type** (from `gopkg.in/guregu/null.v3`) carrying a `.Valid` flag, and a field from the incoming (higher) layer overrides the existing (lower) layer *only when that flag is true*. The pattern repeats for every field; the VUs field is representative:
+`Config.Apply` [cmd/config.go:L71-L92] is the per-layer merge entry point; it delegates the option-level merging to `Options.Apply` [lib/options.go:L357-L410]. The defining characteristic of that engine is that a field from the incoming (higher) layer overrides the existing (lower) layer **only when the higher layer actually supplies a value**. The presence test, however, depends on the field's type. **Many scalar fields are nullable/validity-tracked types** (from `gopkg.in/guregu/null.v3` and k6's own `types` package) carrying a `.Valid` flag — e.g. `VUs`, `Duration`, `Paused`, `RPS` — and these override only when `.Valid` is true. **Other fields are slices, maps, or pointers** — e.g. `Stages`, `Scenarios`, `Thresholds`, `BlacklistIPs`, `ExecutionSegment` — and these override only when non-`nil`. A **few custom presence-tracked types** — e.g. `BlockedHostnames`, `Hosts` — expose their own `.Valid` flag. In every case the rule is identical: the higher layer overrides only the fields it actually set. The `.Valid`-gated scalar case is by far the most common, and the VUs field is representative of it:
 
 ```go
 // lib/options.go — Options.Apply (representative field)
@@ -88,7 +88,7 @@ if opts.VUs.Valid {
 }
 ```
 
-This conditional is at [lib/options.go:L361-L363]. Because an *unset* field has `.Valid == false`, a higher layer that does not mention a field is **transparent** — it does not clobber the value from a lower layer.
+This conditional is at [lib/options.go:L361-L363]. The non-scalar fields follow the same principle with a different presence test — for example `if opts.Stages != nil` [lib/options.go:L385], `if opts.Scenarios != nil` [lib/options.go:L397], and `if opts.Thresholds != nil` [lib/options.go:L452] — while a custom presence-tracked type uses its own validity flag, e.g. `if opts.BlockedHostnames.Valid` [lib/options.go:L458]. Because an *unset* field has `.Valid == false` (or remains `nil`), a higher layer that does not mention a field is **transparent** — it does not clobber the value from a lower layer.
 
 > **Rationale.** The null-aware merge is what makes "set on the CLI but not in the script" behave correctly. If `Apply` blindly copied every field, then layering an almost-empty CLI config on top would wipe out everything the script set. Instead, only the handful of fields the user actually specified on the CLI are `.Valid`, so only those override. This is the mechanism that lets the simple four-line layering in §2.2 produce a precise, field-by-field precedence rather than an all-or-nothing replacement.
 
@@ -133,7 +133,7 @@ Two code facts produce this table, and it is worth stating them together because
 1. **The explicit layer order with CLI applied twice** [cmd/config.go:L199-L204]. The CLI is the seed (L199) and is re-applied last (L203); the config file is only the seed's first overlay (L199) and is then overwritten by the script (L201).
 2. **The per-field `.Valid`-gated override** [lib/options.go:L357-L410]. Each field is overridden only where the higher layer actually set it, so unset higher layers are transparent.
 
-The **counterintuitive consequence** to internalize: because the config file is consumed at L199 as the base and the script is layered over it at L201, **the script always beats the config file**. The config file in k6 is best understood as "defaults you can edit," not as "an authoritative override." This is proven empirically in experiment **E2** ([§7](#7-r3--real-run-experiments)) and corroborated by the official Grafana k6 documentation, which places the config file at the second-lowest precedence (just above hard-coded defaults) and states that options set anywhere else override the `--config` options.
+The **counterintuitive consequence** to internalize: because the config file is consumed at L199 as the base and the script is layered over it at L201, **the script always beats the config file**. The config file in k6 is best understood as "defaults you can edit," not as "an authoritative override." This is proven empirically in experiment **E2** ([§7](#7-r3--real-run-experiments)) and corroborated by the official Grafana k6 [How to use options](https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/) documentation, which places the config file at the second-lowest precedence (just above hard-coded defaults) and states that options set anywhere else override the `--config` options.
 
 
 ---
@@ -240,7 +240,7 @@ This is one of the most common real-world k6 confusions, and the two behaviors a
 - A real **`K6_*` environment variable** *configures an option*. `readEnvConfig` [cmd/config.go:L170-L178] parses `K6_*` variables into the env config layer, which is applied at [cmd/config.go:L203] (above the script, below the final CLI re-apply). So `K6_VUS=5 k6 run script.js` sets the VUs option.
 - The **`-e`/`--env` flag** does *not* configure any option. It only injects a key/value into the script-visible `__ENV` object. So `-e VUS=5` makes `__ENV.VUS === "5"` available to the script, but it changes no option unless the script itself reads `__ENV.VUS` and acts on it.
 
-This is proven side-by-side in experiments **E5a** (`-e VUS=5` → no change) and **E5b** (`K6_VUS=5` → option set) in [§7](#7-r3--real-run-experiments). The official Grafana k6 documentation states the same distinction explicitly: the `-e` flag does not configure options — it just provides variables to the script — whereas `K6_ITERATIONS=120 k6 run …` does set iterations.
+This is proven side-by-side in experiments **E5a** (`-e VUS=5` → no change) and **E5b** (`K6_VUS=5` → option set) in [§7](#7-r3--real-run-experiments). The official Grafana k6 [Environment variables](https://grafana.com/docs/k6/latest/using-k6/environment-variables/) documentation states the same distinction explicitly: the `-e` flag does not configure options — it just provides variables to the script — whereas `K6_ITERATIONS=120 k6 run …` does set iterations.
 
 > **Rationale.** `-e` is a *script input* mechanism (it feeds `__ENV`), while `K6_*` is an *option configuration* mechanism (it feeds `readEnvConfig` and therefore the consolidation merge). They look similar because people often write `-e K6_VUS=…`, but the `K6_` prefix is meaningless to `-e`: it lands in `__ENV` as an ordinary variable and never reaches the option merge. Only a true process environment variable named `K6_VUS` is parsed by `readEnvConfig`.
 
@@ -248,7 +248,7 @@ This is proven side-by-side in experiments **E5a** (`-e VUS=5` → no change) an
 
 ## 7. R3 — Real-run experiments
 
-All experiments below were executed with the from-source binary `/tmp/k6bin/k6` (`k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`) against a base script created **outside** the repository tree:
+All experiments below were executed with the from-source binary `/tmp/k6bin/k6` (`k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)`) against a base script created **outside** the repository tree:
 
 ```js
 // script.js (created under /tmp, deleted afterward)
@@ -353,11 +353,17 @@ The same precedence is exercised by the repository's own table-driven test, `Tes
 - **Env shortcuts derive a constant-vus scenario:** `K6_VUS=10 K6_DURATION=20s` ⇒ `verifyConstLoopingVUs(10, 20s)` [cmd/config_consolidation_test.go:L207] — the env layer both sets the option and drives the same shortcut→scenario derivation seen in E3/E4.
 - **A four-layer case proving CLI > env > script > file:** a config-file `stages: 11s:11` + script (`runner`) `VUs: 22` + `K6_VUS=33` + CLI `--stage 44s:44 -s 55s:55` resolves to ramping VUs with `VUs = 33` and the **CLI** stages [cmd/config_consolidation_test.go:L274-L282] — i.e. the CLI stages beat the config-file stages, and env `K6_VUS=33` beats the script's `22`.
 
-This test was run during this investigation with the vendored toolchain — `go test -mod=vendor -run '^TestConfigConsolidation$' ./cmd/` → `ok go.k6.io/k6/cmd` — using a build cache outside the repository so the working tree stayed clean. It passes, corroborating the live-binary runs from inside the codebase's own assertions.
+The in-repo `TestConfigConsolidation` table test asserts the same precedence behavior; it is cited here as **source-code corroboration** and was **not** rerun for this final evidence (the live-binary runs above are the primary real-run proof). The relevant assertions are the env-shortcut case [cmd/config_consolidation_test.go:L207] and the four-layer case [cmd/config_consolidation_test.go:L274-L282], both within `getConfigConsolidationTestCases` [cmd/config_consolidation_test.go:L146] and driven by `TestConfigConsolidation` [cmd/config_consolidation_test.go:L577]. Reading the assertion helpers directly (`verifyConstLoopingVUs`, `verifyRampingVUs`) confirms, from the codebase's own checks, the same outcomes the live runs produced.
 
 ### 7.2 Official-documentation corroboration
 
-The official Grafana k6 "How to use options" guide independently lists the order from lowest to highest as defaults → config file (`--config`) → script → environment variable → CLI flag, and explicitly notes that the config file holds the second-lowest precedence (after defaults) and that options set elsewhere override the `--config` options — matching E2 exactly. The k6 options reference likewise states that the `-e` flag does not configure options (it only provides variables to the script), in contrast to a real `K6_*` variable — matching E5a vs E5b. All three sources — code, real runs, and official docs — agree.
+The official Grafana k6 documentation independently corroborates both the precedence order and the `-e`/`K6_*` distinction. The concrete sources are:
+
+- **Order of precedence** — [How to use options](https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/) (`https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/`). It lists, from lowest to highest: the option's default value, then the config file (`--config`), then the script, then the environment variable, and finally the CLI flag. It states the config-file options take `"the second lowest order of precedence (after defaults)"`, that options set anywhere else override the `--config` options, and that command-line flags hold the highest precedence — matching **E1** and **E2** exactly.
+- **`-e`/`--env` vs real `K6_*`** — [Environment variables](https://grafana.com/docs/k6/latest/using-k6/environment-variables/) (`https://grafana.com/docs/k6/latest/using-k6/environment-variables/`). It explains that the `--env` flag only passes variables to the script, with the canonical example that `-e K6_ITERATIONS=120` does *not* configure iterations whereas `K6_ITERATIONS=120 k6 run script.js` *does* — matching **E5a vs E5b**.
+- **General multi-source rule** — [Options reference](https://grafana.com/docs/k6/latest/using-k6/k6-options/reference/) (`https://grafana.com/docs/k6/latest/using-k6/k6-options/reference/`). It confirms that most options can be set in several places and that k6 then uses the value from the highest order of precedence.
+
+All three sources — the code, the real runs, and the official docs — agree.
 
 
 ---
@@ -378,7 +384,7 @@ Yes — six real runs of the from-source binary, each read off the startup banne
 - **E4 — multiple VUs:** `--vus 7 --duration 3s` → banner `7 looping VUs for 3s` and per-second `7/7 VUs` progress lines, proving seven VUs execute concurrently (the derived `constant-vus` scenario drives `GetMaxPlannedVUs`/`GetMaxPossibleVUs` [execution/scheduler.go:L45-L46]).
 - **E5a vs E5b — the `-e`/`K6_*` gotcha:** `-e VUS=5` changes nothing (`2 looping VUs for 5s`, because `-e` only feeds `__ENV`), whereas `K6_VUS=5` sets the option (`5 looping VUs for 5s`).
 
-The same behavior is asserted by the in-repo `TestConfigConsolidation` [cmd/config_consolidation_test.go:L577] (verified passing) and matches the official Grafana k6 documentation.
+The same behavior is asserted by the in-repo `TestConfigConsolidation` [cmd/config_consolidation_test.go:L577] (cited as source-code corroboration, not rerun for this evidence) and matches the official Grafana k6 documentation (the precise links are in [§7.2](#72-official-documentation-corroboration)).
 
 ---
 
@@ -413,7 +419,7 @@ flowchart TD
 | Env (`K6_*`) parsing | `cmd/config.go:L170-L178` |
 | Defaults filled last | `cmd/config.go:L222-L246` |
 | Derive shortcuts + validate | `cmd/config.go:L248-L257` (L252, L254) |
-| Null-aware field merge | `lib/options.go:L357-L410` (VUs example L361-L363) |
+| Null-aware / presence-aware field merge | `lib/options.go:L357-L410` (`.Valid` scalar example L361-L363; `nil` checks e.g. Stages L385, Scenarios L397, Thresholds L452; custom `.Valid` e.g. BlockedHostnames L458) |
 | Execution-settings group reset | `lib/options.go:L371` (resets L373-L376) |
 | Consolidate → derive → validate sequence | `cmd/test_load.go:L188-L236` (L203, L213-L223, L226) |
 | **Freeze point** | `cmd/test_load.go:L280` (re-inject `SetOptions` L269) |
@@ -432,7 +438,7 @@ The binary used here was built from source with vendored dependencies, outside t
 
 ```sh
 CGO_ENABLED=0 go build -mod=vendor -trimpath -o /tmp/k6bin/k6 .
-/tmp/k6bin/k6 version   # k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)
+/tmp/k6bin/k6 version   # k6 v0.55.0 (commit/ddc3b0b1d2, go1.22.2, linux/amd64)
 ```
 
 Each experiment in §7 uses a temporary `script.js` (and, for E2, `cfg.json`) created under `/tmp` and removed afterward, so the repository working tree is unaffected. The observable in every case is the startup banner; do **not** pass `--quiet`, which suppresses it.
