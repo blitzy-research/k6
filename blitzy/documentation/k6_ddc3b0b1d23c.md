@@ -9,8 +9,7 @@ by running a binary built from that source.
 > **Analyzed version (pinned):** **k6 v0.55.0**, commit **`ddc3b0b1d2`**.
 > Source-of-truth: `const Version = "0.55.0"` [lib/consts/consts.go:L12]. The binary built and
 > run during this analysis reports `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`.
-> All claims are scoped to this version; behavior in other releases may differ (for example,
-> the REST control-server defaults change in later major versions).
+> All claims are scoped to this version; behavior in other releases may differ.
 
 ---
 
@@ -83,6 +82,18 @@ export default function () {
 
 Here the `import http from 'k6/http';` line (module scope) is the **init context**, and the body
 of `export default function () { ... }` is the **per-iteration** VU logic.
+
+**Lifecycle anchors (how the engine realizes the two stages).** Each virtual user gets its own
+JavaScript runtime, so the init context runs **once per VU**: for every new VU the runner
+instantiates a fresh bundle [js/runner.go:L124-L129], `Instantiate` builds a per-VU Sobek runtime
+[js/bundle.go:L244-L257], and the script's top-level/module source is executed once in that
+runtime via the event loop [js/bundle.go:L320-L347]. Thereafter the configured export is called
+**once per iteration**: `ActiveVU.RunOnce()` looks up the export and invokes it exactly one time
+per iteration [js/runner.go:L723-L773]. The export that gets called defaults to `default` when a
+scenario does not name one — `GetExec()` falls back to `consts.DefaultFn` if no custom `exec` is
+set [lib/executor/base_config.go:L107-L113] — and k6 validates up front that the named export
+actually exists in the script, erroring `function '<name>' not found in exports` otherwise
+[cmd/config.go:L284-L288].
 
 k6 can also scaffold a starter script with **`k6 new`** (command `Use: "new"`,
 `Short: "Create and initialize a new k6 script"`), which writes to the default file name
@@ -192,28 +203,10 @@ built binary (names, short forms, and descriptions are exactly as printed):
 | `--summary-export string` | output the end-of-test summary report to JSON file |
 | `--summary-time-unit string` | define the time unit used to display the trend stats. Possible units are: `s`, `ms` and `us` |
 
-Common invocations (these example forms are printed in the command's own help text
-[cmd/run.go:L485-L488]):
-
-```bash
-# Run a single VU, once (also the default load).
-k6 run script.js
-
-# Run a single VU, 10 times.
-k6 run -i 10 script.js
-
-# Run 5 VUs, splitting 10 iterations between them.
-k6 run -u 5 -i 10 script.js
-
-# Run 5 VUs for 10s.
-k6 run -u 5 -d 10s script.js
-
-# Ramp VUs from 0 to 100 over 10s, stay there for 60s, then 10s down to 0.
-k6 run -u 0 -s 10s:100 -s 60s:100 -s 10s:0 script.js
-
-# Send metrics to an external output (e.g. InfluxDB).
-k6 run -o influxdb=http://1.2.3.4:8086/k6 script.js
-```
+The command also ships a set of example invocations in its own help text, defined as the
+`Example` field of the `run` cobra command [cmd/run.go:L471-L488]. Those examples are reproduced
+**verbatim** — together with the observed nuance that two of them omit the script argument — in
+**Verified output (observed)** below.
 
 **Rationale (thinking).** `k6 run` deliberately takes a *single* script argument and exposes the
 entire load model through flags rather than through the script alone, so the same script can be
@@ -221,6 +214,38 @@ driven differently in different environments. Flags override the script's export
 (the precedence chain is detailed in Q6). The `-o/--out` flag is repeatable — k6 can stream to
 several external outputs simultaneously (verified by passing `--out json=...` and `--out csv=...`
 together in one run, which produced both files).
+
+**Verified output (observed).** `./k6 run --help` on the built `k6 v0.55.0` binary prints the
+following **Examples** block (reproduced verbatim, exactly as the binary emits it):
+
+```text
+Examples:
+  # Run a single VU, once.
+  k6 run script.js
+
+  # Run a single VU, 10 times.
+  k6 run -i 10 script.js
+
+  # Run 5 VUs, splitting 10 iterations between them.
+  k6 run -u 5 -i 10 script.js
+
+  # Run 5 VUs for 10s.
+  k6 run -u 5 -d 10s script.js
+
+  # Ramp VUs from 0 to 100 over 10s, stay there for 60s, then 10s down to 0.
+  k6 run -u 0 -s 10s:100 -s 60s:100 -s 10s:0
+
+  # Send metrics to an influxdb server
+  k6 run -o influxdb=http://1.2.3.4:8086/k6
+```
+
+Note that, **as printed in the help text**, the last two examples (the ramping `-s` example and
+the InfluxDB `-o` example) omit the trailing script path. Because `k6 run` requires exactly one
+positional argument [cmd/run.go:L498], a real invocation must add one — e.g.
+`k6 run -u 0 -s 10s:100 -s 60s:100 -s 10s:0 script.js` or
+`k6 run -o influxdb=http://1.2.3.4:8086/k6 script.js`. This was confirmed empirically: running
+`k6 run` with no argument failed with
+`accepts 1 arg(s), received 0: arg should either be "-", if reading script from stdin, or a path to a script file`.
 
 ---
 
@@ -385,8 +410,12 @@ column shapes follow directly from each metric's type and value type above.
 ### 4d. Protocols
 
 **Answer.** Protocols are **not** separate metrics. They are surfaced as **system tags** attached
-to each sample: chiefly `proto`, `subproto`, and `tls_version`. The same tag names appear as
-**CSV columns** and inside the JSON `tags` object (see Q7 and the Appendix).
+to each sample: chiefly `proto`, `subproto`, and `tls_version`. These tag constants are declared
+in [metrics/system_tag.go:L21-L31] (`TagProto`, `TagSubproto`, `TagTLSVersion`, …) and are part of
+the **default** system-tag set that k6 emits without any extra configuration
+[metrics/system_tag.go:L47-L49]; their lowercase string names (`proto`, `subproto`, `tls_version`,
+…) are produced by the generated mapping [metrics/system_tag_gen.go:L9-L25]. The same tag names
+appear as **CSV columns** and inside the JSON `tags` object (see Q7 and the Appendix).
 
 **Evidence + verified contrast (observed).** Running the same one-line GET against two endpoints
 made the protocol surface visible through these tags:
@@ -394,17 +423,33 @@ made the protocol surface visible through these tags:
 - **Local plain-HTTP endpoint** → `proto: HTTP/1.0`, **no** `tls_version` tag, and
   `http_req_tls_handshaking` of `0s` (no TLS occurred).
 - **Public HTTPS `https://test-api.k6.io/`** → `proto: HTTP/2.0`, `tls_version: tls1.3`, and a
-  non-zero TLS handshake time (observed `avg=18.3ms`).
+  non-zero TLS handshake time (observed `avg=18.44ms`).
 
-For example, a JSON Point row from the public run carried
-`"proto":"HTTP/2.0"`, `"tls_version":"tls1.3"`, and `"status":"302"` in its `tags` (full rows in
-the Appendix).
+These tags are populated by the protocol code itself: for HTTP, the transport sets `proto` from
+the response's protocol and `tls_version` from the negotiated TLS connection state
+[lib/netext/httpext/transport.go:L118-L123]; for WebSockets, the `ws` module sets `subproto` from
+the negotiated `Sec-WebSocket-Protocol` response header [js/modules/k6/ws/ws.go:L287-L289]. For
+example, a JSON Point row from the public run carried `"proto":"HTTP/2.0"`,
+`"tls_version":"tls1.3"`, and `"status":"302"` in its `tags` (the full row is reproduced in the
+Appendix, section **E**).
 
 **Rationale (thinking).** Because the timing breakdown (the `http_req_*` Trends) and the protocol
 identity live on the **same sample's tags**, an operator can see, for each request, both *how
 fast* it was and *over which protocol and TLS version* it happened — without any extra
 configuration. Tagging (rather than minting separate per-protocol metrics) also keeps the metric
 catalog small and lets the same `http_req_duration` Trend describe HTTP/1.1, HTTP/2, and beyond.
+
+**Verified output (observed).** A single real run ties the whole catalog together. Against the
+**local** plain-HTTP endpoint, the summary rendered every `http_req_*` **Trend** as
+`avg/min/med/max/p(90)/p(95)` (in µs for that fast local request), `http_req_failed` (a **Rate**)
+as `0.00% 0 out of 1`, `http_reqs`/`iterations` (**Counters**) as a count plus a per-second rate,
+and `data_sent`/`data_received` (**Data** Counters) as byte amounts plus throughput — every sample
+tagged `proto: HTTP/1.0` with no `tls_version` (full summary: **Appendix A**; JSON `Metric`
+envelope and local `Point`/CSV rows: **Appendix B–D**). Against `https://test-api.k6.io/` the same
+**Time** metrics rendered in **milliseconds** (observed `http_req_duration avg=16.84ms`),
+`http_req_tls_handshaking` was non-zero (observed `avg=18.44ms`), and each sample carried
+`proto: HTTP/2.0` and `tls_version: tls1.3` (full JSON `Point` row: **Appendix E**). The column
+shapes and units follow directly from each metric's **type** and **value type** tabulated above.
 
 ---
 
@@ -420,10 +465,17 @@ flags, a config file, or environment variables.
 There are **two distinct kinds** of environment variables, and conflating them is the most common
 mistake:
 
-1. **`-e/--env VAR=value`** — injects a variable into the script's **`__ENV`** object only. It
-   does **not** set any k6 option. The flag is parsed via `flags.GetStringArray("env")` and merged
-   into `opts.Env` [cmd/runtime_options.go:L121,L131], then surfaced to the script through a
-   `LookupEnv` closure over `gs.Env` [cmd/test_load.go:L77-L78].
+1. **`-e/--env VAR=value`** — adds (or overrides) a variable in the script's **`__ENV`** object. It
+   does **not** set any k6 option. The flag is parsed via `flags.GetStringArray("env")` and written
+   into **`RuntimeOptions.Env`** [cmd/runtime_options.go:L120-L132]; for `k6 run` that map is first
+   seeded with the real system environment — because `--include-system-env-vars` defaults to `true`
+   for the run command [cmd/run.go:L441; cmd/runtime_options.go:L116-L118] — and the `-e` values are
+   then layered on top. `RuntimeOptions.Env` is what populates `__ENV`: when each VU's JavaScript
+   runtime is set up, k6 copies `RuntimeOptions.Env` into the `__ENV` object [js/bundle.go:L382-L386],
+   and at scenario activation any scenario-specific env vars are overlaid before the iteration runs
+   [js/runner.go:L653-L662]. (Separately, the `LookupEnv` closure over `gs.Env` in
+   [cmd/test_load.go:L77-L80] exposes the *real* process environment for direct lookups — e.g. k6
+   reads `GODEBUG` through it [js/runner.go:L256-L259] — and is **not** the `-e`/`__ENV` path.)
 2. **`K6_`-prefixed variables** — *are* evaluated as k6 **configuration** (options), via
    `envconfig` struct tags on the options/runtime types.
 
@@ -449,8 +501,13 @@ A second family of **runtime** options is read in `getRuntimeOptions`
 `K6_SUMMARY_EXPORT` [L98], and `K6_TRACES_OUTPUT` [L110].
 
 **Evidence — precedence.** From lowest to highest priority:
-**default → config file → exported script `options` → environment variable → CLI flag.** This is
-anchored in code: each runtime-option environment read applies only *"if not explicitly set via
+**default → config file → exported script `options` → environment variable → CLI flag.** The
+general consolidation order is implemented (and documented in its own comments) in
+`getConsolidatedConfig` [cmd/config.go:L180-L204]: it starts from the CLI-provided shadow defaults,
+applies the global file config, then the runner/script `options`, then the environment-variable
+config, and finally re-applies the user-supplied CLI flags on top to give them the highest
+priority (`conf = conf.Apply(envConf).Apply(cliConf)`), before filling in defaults. For the
+runtime-option subset specifically, each environment read applies only *"if not explicitly set via
 the CLI flag"* [cmd/runtime_options.go:L54,L76,L80], so a CLI flag always wins over the matching
 `K6_*` variable.
 
@@ -486,6 +543,20 @@ $ K6_NO_SUMMARY=true k6 run --vus 1 --iterations 1 script.js
 
 
 ## Q7 — External files and script validation
+
+**Answer.** By default k6 generates **no** external files — results go to the STDOUT summary only.
+External files are produced solely on request, via three flags: `--out json[=file]`,
+`--out csv[=file]`, and `--summary-export=file` (detailed in **7a**). Separately, k6 enforces a
+**primary validation rule** before a run: the script must export at least one callable function,
+or k6 refuses to start; other validation and abort outcomes map to a small family of exit codes
+(detailed in **7b**).
+
+**Evidence.** The external-file writers live under `output/` — JSON [output/json/json.go] and CSV
+[output/csv/output.go] — and the summary-export path is threaded through
+`RuntimeOptions.SummaryExport` [js/runner.go:L403]. The export-at-least-one-function rule is in
+`populateExports`, which returns `"no exported functions in script"` when none are callable
+[js/bundle.go:L188,L238], and the validation/abort exit codes are the constants in
+[errext/exitcodes/codes.go:L10-L55]. The specifics and per-claim citations follow in 7a and 7b.
 
 ### 7a. External files (all optional)
 
@@ -563,6 +634,18 @@ you ask for them:
 (107/255 — the script is broken or malformed) from *operational aborts* (105 — someone sent
 SIGINT). That separation is what lets a pipeline "fail the build on a crossed threshold" while
 treating a `Ctrl-C` differently from a genuine performance regression.
+
+**Verified output (observed).** All four external artifacts were produced and inspected from real
+runs: a JSON **`Metric` envelope** (`{"type":"Metric",…,"contains":"time",…}`, **Appendix B**),
+JSON **`Point`** rows (one per sample, time values in milliseconds — **Appendix C** local and
+**Appendix E** public), the CSV **19-column header**
+`metric_name,timestamp,metric_value,…,extra_tags,metadata` (**Appendix D**), and a
+`--summary-export` JSON object whose top-level keys were observed to be exactly
+`["metrics","root_group"]` (each Trend a `{avg,min,med,max,p(90),p(95)}` stats object). The
+validation/exit behavior was re-confirmed empirically: a script with no exported function exited
+**255** (`no exported functions in script`), a syntax error exited **107**, an `http.get()` in the
+init context exited **107** (`Making http requests in the init context is not supported`), and a
+crossed threshold exited **99** (`thresholds on metrics 'http_req_duration' have been crossed`).
 
 ---
 
@@ -649,5 +732,13 @@ containing `time`):
 ```text
 metric_name,timestamp,metric_value,check,error,error_code,expected_response,group,method,name,proto,scenario,service,status,subproto,tls_version,url,extra_tags,metadata
 http_reqs,1782507384,1.000000,,,,true,,GET,http://127.0.0.1:8085/,HTTP/1.0,default,,200,,,http://127.0.0.1:8085/,,
+```
+
+**E) One JSON `Point` row from the public HTTPS run** — `--out json` against
+`https://test-api.k6.io/` (note `proto: HTTP/2.0`, `tls_version: tls1.3`, `status: 302`, and the
+millisecond `value`):
+
+```json
+{"metric":"http_req_duration","type":"Point","data":{"time":"2026-06-26T21:41:11.093682939Z","value":12.610861,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://test-api.k6.io/","proto":"HTTP/2.0","scenario":"default","status":"302","tls_version":"tls1.3","url":"https://test-api.k6.io/"}}}
 ```
 
