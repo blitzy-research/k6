@@ -7,10 +7,13 @@ seven discrete questions (Q1–Q7), each grounded in the tool's own source code 
 by running a binary built from that source.
 
 > **Analyzed version (pinned):** **k6 v0.55.0**, at k6 **source** commit **`ddc3b0b1d23c`**.
-> Source-of-truth: `const Version = "0.55.0"` [lib/consts/consts.go:L12]. A binary built at that
-> source commit reports `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` — but that
-> `commit/<hash>` suffix is **not** a constant: `FullVersion()` stamps it from the build's VCS
-> info (the git HEAD at build time) via `debug.ReadBuildInfo()` [lib/consts/consts.go:L16-L53].
+> Source-of-truth: `const Version = "0.55.0"` [lib/consts/consts.go:L12]. A binary built from this
+> source with the repository's pinned Go toolchain (`toolchain go1.21.13` [go.mod:L5]) reports
+> `k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)` — but neither the `commit/<hash>` nor the
+> `go1.21.13` portion of that string is a constant: `FullVersion()` assembles it at build time from
+> the build's VCS info (the git HEAD at build time, via `debug.ReadBuildInfo()`) and the Go toolchain
+> that compiled the binary (via `runtime.Version()`) [lib/consts/consts.go:L16-L53], so a rebuild
+> with a different Go toolchain shows a different `go<version>` suffix.
 > Because committing this document advances git HEAD past the source commit, a fresh rebuild
 > stamps the current HEAD's hash rather than `commit/ddc3b0b1d2` (for instance, building at HEAD
 > `c4413b7ce` stamps `commit/c4413b7ceb`) — while the k6 source,
@@ -286,9 +289,11 @@ info/warn/error messages — are written to **STDERR**.
   string comes from `const Version = "0.55.0"` [lib/consts/consts.go:L12]; `FullVersion()` renders
   it in full by appending the build's git commit — read from `debug.ReadBuildInfo()` (the
   `vcs.revision` setting, truncated to 10 characters), so the suffix tracks the git HEAD at build
-  time — followed by the Go version and platform [lib/consts/consts.go:L16-L53]. Built at the
-  source commit it reads `v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)`; a rebuild at a
-  later HEAD stamps a newer commit suffix (see the version note at the top of this document).
+  time — followed by the Go version (from `runtime.Version()`) and platform
+  [lib/consts/consts.go:L16-L53]. Built from this source with the pinned `go1.21.13` toolchain
+  ([go.mod:L5]) it reads `v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)`; a rebuild at a
+  later HEAD or with a different Go toolchain stamps a different commit/Go suffix (see the version
+  note at the top of this document).
 - **Execution block & progress bar → STDOUT.** `printExecutionDescription` builds the
   `execution` / `script` / `output` block and writes it to STDOUT
   [cmd/ui.go:L100,L108-L134,L163]; `printBar` writes the progress bar to STDOUT — in a TTY it
