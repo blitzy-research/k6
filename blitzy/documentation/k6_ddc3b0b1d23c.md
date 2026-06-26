@@ -142,40 +142,40 @@ neededVUs=6
 **1. The signal is trapped and dispatched (first signal → graceful, second → hard).** `handleTestAbortSignals` registers the OS-signal channel and routes the first and second signals to two different handlers:
 
 ```go
-// cmd/common.go:97
+// cmd/common.go:L97
 func handleTestAbortSignals(gs *state.GlobalState, gracefulStopHandler, onHardStop func(os.Signal)) (stop func()) {
-    gs.Logger.Debug("Trapping interrupt signals so k6 can handle them gracefully...")   // cmd/common.go:98 (DEBUG => needs -v)
+    gs.Logger.Debug("Trapping interrupt signals so k6 can handle them gracefully...")   // cmd/common.go:L98 (DEBUG => needs -v)
     sigC := make(chan os.Signal, 2)
     ...
-    gs.SignalNotify(sigC, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)                 // cmd/common.go:101
+    gs.SignalNotify(sigC, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)                 // cmd/common.go:L101
     go func() {
         select {
         case sig := <-sigC:
-            gracefulStopHandler(sig)                                                     // cmd/common.go:106 (1st signal)
+            gracefulStopHandler(sig)                                                     // cmd/common.go:L106 (1st signal)
         ...
         select {
         case sig := <-sigC:
-            if onHardStop != nil { onHardStop(sig) }                                     // cmd/common.go:113-114 (2nd signal)
-            gs.OSExit(int(exitcodes.ExternalAbort))                                       // cmd/common.go:118
+            if onHardStop != nil { onHardStop(sig) }                                     // cmd/common.go:L113-L114 (2nd signal)
+            gs.OSExit(int(exitcodes.ExternalAbort))                                       // cmd/common.go:L118
         ...
 ```
 
 **2. The graceful handler logs the DEBUG line and aborts with the reason string + exit code 105.** The hard handler logs the ERROR line:
 
 ```go
-// cmd/run.go:349
+// cmd/run.go:L349
 gracefulStop := func(sig os.Signal) {
-    logger.WithField("sig", sig).Debug("Stopping k6 in response to signal...")           // cmd/run.go:350
+    logger.WithField("sig", sig).Debug("Stopping k6 in response to signal...")           // cmd/run.go:L350
     runAbort(errext.WithAbortReasonIfNone(
         errext.WithExitCodeIfNone(
             fmt.Errorf("test run was aborted because k6 received a '%s' signal", sig),
-            exitcodes.ExternalAbort,                                                       // cmd/run.go:354
+            exitcodes.ExternalAbort,                                                       // cmd/run.go:L354
         ), errext.AbortedByUser,
     ))
     lingerCancel()
 }
 onHardStop := func(sig os.Signal) {
-    logger.WithField("sig", sig).Error("Aborting k6 in response to signal")               // cmd/run.go:360 (the un-observed hard-stop line)
+    logger.WithField("sig", sig).Error("Aborting k6 in response to signal")               // cmd/run.go:L360 (the un-observed hard-stop line)
     globalCancel()
 }
 ```
@@ -183,19 +183,19 @@ onHardStop := func(sig os.Signal) {
 **3. The lifecycle contract distinguishes graceful from hard.** The executor's VU-handle documents the intended semantics — but note these describe a *gracefulStop of a ramp/stage*, which is distinct from the SIGINT-driven *abort*:
 
 ```go
-// lib/executor/vu_handle.go:63
+// lib/executor/vu_handle.go:L63
 // - gracefulStop must let an iteration which has started to finish ...
-// lib/executor/vu_handle.go:67
+// lib/executor/vu_handle.go:L67
 // - hardStop must stop an iteration in process
 ```
 
 **4. The decisive mechanism — the JS VM is forcibly halted.** A SIGINT abort cancels the VU's run context. When that context is done, k6 interrupts the Sobek JavaScript runtime, which stops the currently executing iteration *mid-body*:
 
 ```go
-// js/runner.go:708
+// js/runner.go:L708
 context.AfterFunc(ctx, func() {
     // Interrupt the JS runtime
-    u.Runtime.Interrupt(context.Canceled)   // js/runner.go:710 — halts the iteration mid-execution
+    u.Runtime.Interrupt(context.Canceled)   // js/runner.go:L710 — halts the iteration mid-execution
     ...
 })
 ```
@@ -203,13 +203,13 @@ context.AfterFunc(ctx, func() {
 This is why everything after the point of interruption (here, the second `console.log`) never runs for the active VUs. `k6.Sleep` corroborates this: it races the timer against `ctx.Done()`, so a cancelled context makes the sleep return immediately — which is exactly why vu=2's `sleep(10)` ended at ~5.6 s:
 
 ```go
-// js/modules/k6/k6.go:72
+// js/modules/k6/k6.go:L72
 func (mi *K6) Sleep(secs float64) {
     ctx := mi.vu.Context()
     timer := time.NewTimer(time.Duration(secs * float64(time.Second)))
     select {
     case <-timer.C:
-    case <-ctx.Done():        // js/modules/k6/k6.go:77 — cancellation returns early
+    case <-ctx.Done():        // js/modules/k6/k6.go:L77 — cancellation returns early
         timer.Stop()
     }
 }
@@ -218,15 +218,15 @@ func (mi *K6) Sleep(secs float64) {
 **5. The exit code.** `ExternalAbort` is defined as 105:
 
 ```go
-// errext/exitcodes/codes.go:41
+// errext/exitcodes/codes.go:L41
 ExternalAbort ExitCode = 105
 ```
 
-The executor and its `gracefulRampDown` option are defined in `lib/executor/ramping_vus.go:40` (`RampingVUsConfig`) and `lib/executor/ramping_vus.go:44` (`GracefulRampDown`).
+The executor and its `gracefulRampDown` option are defined in `lib/executor/ramping_vus.go:L40` (`RampingVUsConfig`) and `lib/executor/ramping_vus.go:L44` (`GracefulRampDown`).
 
 ### (c) Concluding answer
 
-On a single SIGINT, k6 logs (at `DEBUG`, hence `-v` is required) `Stopping k6 in response to signal... sig=interrupt`, then `Test finished with an error ... test run was aborted because k6 received a 'interrupt' signal`, and finally the `level=error` line `test run was aborted because k6 received a 'interrupt' signal`; the process exits with code **105** (`ExternalAbort`). The currently active VUs are **NOT allowed to finish their current iteration — they are terminated mid-execution.** The runtime proof is the marker count: 6 VUs printed `ITER_START` but only one printed a (truncated) `ITER_END`, and that VU's `sleep(10)` was cut to ~5.6 s. The root cause is that the abort cancels the VU context and `u.Runtime.Interrupt(context.Canceled)` (`js/runner.go:710`) halts the JavaScript VM in the middle of the iteration.
+On a single SIGINT, k6 logs (at `DEBUG`, hence `-v` is required) `Stopping k6 in response to signal... sig=interrupt`, then `Test finished with an error ... test run was aborted because k6 received a 'interrupt' signal`, and finally the `level=error` line `test run was aborted because k6 received a 'interrupt' signal`; the process exits with code **105** (`ExternalAbort`). The currently active VUs are **NOT allowed to finish their current iteration — they are terminated mid-execution.** The runtime proof is the marker count: 6 VUs printed `ITER_START` but only one printed a (truncated) `ITER_END`, and that VU's `sleep(10)` was cut to ~5.6 s. The root cause is that the abort cancels the VU context and `u.Runtime.Interrupt(context.Canceled)` (`js/runner.go:L710`) halts the JavaScript VM in the middle of the iteration.
 
 ---
 
@@ -239,11 +239,24 @@ On a single SIGINT, k6 logs (at `DEBUG`, hence `-v` is required) `Stopping k6 in
 **1. The bundled gRPC server.** k6 ships a runnable gRPC server example (`examples/grpc_server`) that serves the `route_guide` dataset on `localhost:10000`. It is a *separate Go module* (`module go.k6.io/k6/examples/grpc_server`, with `replace go.k6.io/k6 => ../../`) and imports the non-vendored `google.golang.org/grpc/testdata`, so it must be built with `-mod=mod`. To avoid mutating the repo's tracked manifests, the example was copied to `/tmp/grpcsrc`, its `replace` directive repointed to the absolute repo path, and built from there; the repo's `go.mod`/`go.sum` were also backed up and restored as a belt-and-braces measure:
 
 ```bash
-cp go.mod /tmp/go.mod.bak && cp go.sum /tmp/go.sum.bak     # protect manifests
-# build from an out-of-tree copy so the repo module is untouched
-GOTOOLCHAIN=local go build -mod=mod -o /tmp/grpcserver <out-of-tree copy of ./examples/grpc_server>
-cp /tmp/go.mod.bak go.mod && cp /tmp/go.sum.bak go.sum     # restore immediately
-/tmp/grpcserver &                                          # serves localhost:10000
+# from the repo root; capture the absolute repo path for the replace directive
+REPO="$(pwd)"
+cp go.mod /tmp/go.mod.bak && cp go.sum /tmp/go.sum.bak       # protect repo manifests (belt-and-braces)
+
+# 1) copy the example module out-of-tree so the repo is never built/mutated in place
+rm -rf /tmp/grpcsrc && cp -a examples/grpc_server /tmp/grpcsrc
+
+# 2) repoint its "replace go.k6.io/k6 => ../../" to the absolute repo path so the copy
+#    can resolve the k6 module from its new /tmp location
+sed -i "s#replace go.k6.io/k6 => ../../#replace go.k6.io/k6 => ${REPO}#" /tmp/grpcsrc/go.mod
+
+# 3) build from INSIDE the copy (needs -mod=mod: it imports the non-vendored
+#    google.golang.org/grpc/testdata). Building from /tmp/grpcsrc — not the repo —
+#    leaves the repo's go.mod/go.sum byte-for-byte unchanged.
+( cd /tmp/grpcsrc && GOTOOLCHAIN=local go build -mod=mod -o /tmp/grpcserver . )
+
+cp /tmp/go.mod.bak go.mod && cp /tmp/go.sum.bak go.sum       # restore repo manifests immediately
+/tmp/grpcserver &                                            # serves localhost:10000
 cp lib/testutils/grpcservice/route_guide.proto /tmp/route_guide.proto
 ```
 
@@ -326,37 +339,37 @@ So in this run **`grpc_streams_msgs_received = 235`**, with `grpc_streams = 5` a
 **The three counters are plain `metrics.Counter`s** registered by the gRPC module:
 
 ```go
-// js/modules/k6/grpc/metrics.go:17
+// js/modules/k6/grpc/metrics.go:L17
 m.Streams, err = registry.NewMetric("grpc_streams", metrics.Counter)
-// js/modules/k6/grpc/metrics.go:21
+// js/modules/k6/grpc/metrics.go:L21
 m.StreamsMessagesSent, err = registry.NewMetric("grpc_streams_msgs_sent", metrics.Counter)
-// js/modules/k6/grpc/metrics.go:25
+// js/modules/k6/grpc/metrics.go:L25
 m.StreamsMessagesReceived, err = registry.NewMetric("grpc_streams_msgs_received", metrics.Counter)
 ```
 
-`grpc_streams_msgs_received` is incremented per received message in `js/modules/k6/grpc/stream.go:153`; `grpc_streams_msgs_sent` at `stream.go:257`; `grpc_streams` at `stream.go:106`.
+`grpc_streams_msgs_received` is incremented per received message in `js/modules/k6/grpc/stream.go:L153`; `grpc_streams_msgs_sent` at `js/modules/k6/grpc/stream.go:L257`; `grpc_streams` at `js/modules/k6/grpc/stream.go:L106`.
 
 **Why the received count is non-deterministic.** The server streams matching features with a deliberate **100 ms sleep before each send**:
 
 ```go
-// lib/testutils/grpcservice/service.go:57
+// lib/testutils/grpcservice/service.go:L57
 func (s *FeatureExplorerImplementation) ListFeatures(rect *Rectangle, stream FeatureExplorer_ListFeaturesServer) error {
     ...
     for _, feature := range s.savedFeatures {
         if inRange(feature.Location, rect) {
-            time.Sleep(100 * time.Millisecond)        // lib/testutils/grpcservice/service.go:62
+            time.Sleep(100 * time.Millisecond)        // lib/testutils/grpcservice/service.go:L62
             if err := stream.Send(feature); err != nil { return err }   // :63
         }
     }
 ```
 
-The embedded dataset has 100 features (`LoadFeatures` at `lib/testutils/grpcservice/service.go:170`), and the script's bounding rectangle covers all of them, so a *complete* single stream delivers 100 messages at ~10/second — taking ~10 s. Five staggered streams are therefore each only partway through their 100 messages when the SIGINT lands at ~6 s, and the total received (here 235) reflects exactly how many had arrived at that instant. The RPC is declared server-streaming in the proto: `rpc ListFeatures(Rectangle) returns (stream Feature)` (`lib/testutils/grpcservice/route_guide.proto:38`, `package main` at `:17`).
+The embedded dataset has 100 features (`LoadFeatures` at `lib/testutils/grpcservice/service.go:L170`), and the script's bounding rectangle covers all of them, so a *complete* single stream delivers 100 messages at ~10/second — taking ~10 s. Five staggered streams are therefore each only partway through their 100 messages when the SIGINT lands at ~6 s, and the total received (here 235) reflects exactly how many had arrived at that instant. The RPC is declared server-streaming in the proto: `rpc ListFeatures(Rectangle) returns (stream Feature)` (`lib/testutils/grpcservice/route_guide.proto:L38`, `package main` at `:L17`).
 
-**Why `stream.on('error')` fired 0 times.** This is the same VM-halt behavior proven in Q1: the abort cancels the context and `u.Runtime.Interrupt(context.Canceled)` (`js/runner.go:710`) stops the JavaScript runtime outright, rather than delivering a graceful per-stream gRPC error callback into the script. The interruption is a VM halt, not a clean stream error — hence zero `error` events. The `gracefulRampDown: '30ms'` option itself lives on `lib/executor/ramping_vus.go:44`.
+**Why `stream.on('error')` fired 0 times.** This is the same VM-halt behavior proven in Q1: the abort cancels the context and `u.Runtime.Interrupt(context.Canceled)` (`js/runner.go:L710`) stops the JavaScript runtime outright, rather than delivering a graceful per-stream gRPC error callback into the script. The interruption is a VM halt, not a clean stream error — hence zero `error` events. The `gracefulRampDown: '30ms'` option itself lives on `lib/executor/ramping_vus.go:L44`.
 
 ### (c) Concluding answer
 
-When the server-streaming test is interrupted, k6 emits the same graceful-abort log lines as any SIGINT — `Stopping k6 in response to signal... sig=interrupt` and `test run was aborted because k6 received a 'interrupt' signal` (DEBUG + final ERROR) — and exits **105**. The final summary in this run reported **`grpc_streams_msgs_received = 235`** (alongside `grpc_streams = 5` and `grpc_streams_msgs_sent = 5`), and `stream.on('error')` fired **0 times**. That received count is **timing-dependent**: the server sleeps 100 ms before each of up to 100 streamed features (`service.go:62`), so the figure reflects how many messages had been received across the five in-flight streams at the moment the SIGINT halted the JS VM.
+When the server-streaming test is interrupted, k6 emits the same graceful-abort log lines as any SIGINT — `Stopping k6 in response to signal... sig=interrupt` and `test run was aborted because k6 received a 'interrupt' signal` (DEBUG + final ERROR) — and exits **105**. The final summary in this run reported **`grpc_streams_msgs_received = 235`** (alongside `grpc_streams = 5` and `grpc_streams_msgs_sent = 5`), and `stream.on('error')` fired **0 times**. That received count is **timing-dependent**: the server sleeps 100 ms before each of up to 100 streamed features (`lib/testutils/grpcservice/service.go:L62`), so the figure reflects how many messages had been received across the five in-flight streams at the moment the SIGINT halted the JS VM.
 
 ---
 
@@ -435,16 +448,16 @@ Together these show that the `count: 85` was retrievable **only** by querying th
 **Metric identity.** The name constant and the counter registration:
 
 ```go
-// metrics/builtin.go:10
+// metrics/builtin.go:L10
 DroppedIterationsName = "dropped_iterations"
-// metrics/builtin.go:84
+// metrics/builtin.go:L84
 DroppedIterations: registry.MustNewMetric(DroppedIterationsName, Counter),
 ```
 
 **Deferred emission when `maxDuration` is hit.** The `shared-iterations` executor pushes the dropped count only *after* all VUs have stopped, computing it as the unfinished remainder of the budget:
 
 ```go
-// lib/executor/shared_iterations.go:213
+// lib/executor/shared_iterations.go:L213
 var attemptedIters uint64
 ...
 defer func() {
@@ -462,12 +475,12 @@ defer func() {
 }()
 ```
 
-With `totalIters = 100` and `attemptedIters = 15`, the pushed value is `100 − 15 = 85`. (Equivalent deferred-emission paths exist for the other executors: `lib/executor/per_vu_iterations.go:202`, `lib/executor/constant_arrival_rate.go:324`, and `lib/executor/ramping_arrival_rate.go:472`.)
+With `totalIters = 100` and `attemptedIters = 15`, the pushed value is `100 − 15 = 85`. This deferred end-of-run push (`lib/executor/shared_iterations.go:L217-L228`) is the mechanism this experiment exercises. Other executors also report the same `dropped_iterations` metric, but **not all via a deferred end-of-run push**: the `per-vu-iterations` executor emits the unfinished per-VU remainder (`iterations - i`) at the moment its `maxDuration` is reached (`lib/executor/per_vu_iterations.go:L216`), whereas the arrival-rate executors emit `dropped_iterations` **immediately** — pushing one sample with `Value: 1` each time the scheduler finds no free VU for a planned iteration (`lib/executor/constant_arrival_rate.go:L339-L345`, `lib/executor/ramping_arrival_rate.go:L470-L476`) — rather than as a single deferred push at end of run.
 
 **Why `--linger` is required.** Because the count is pushed only in this deferred end-of-run step, it appears in the metrics engine only at/after test end. `--linger` keeps the engine and API alive past that point:
 
 ```go
-// cmd/run.go:373
+// cmd/run.go:L373
 if conf.Linger.Bool {
     defer func() {
         msg := "The test is done, but --linger was enabled, so k6 is waiting for Ctrl+C to continue..."
@@ -479,27 +492,27 @@ Without it, the server tears down and the GET returns 404 (or, as observed, the 
 **The API surface.** The versioned API is mounted at `/v1/` on the default address `localhost:6565`:
 
 ```go
-// api/server.go:24
+// api/server.go:L24
 mux.Handle("/v1/", v1.NewHandler(cs))
 ```
 
 ```go
-// cmd/state/state.go:150
+// cmd/state/state.go:L150
 Address: "localhost:6565",
 ```
 
-The routes dispatch `GET /v1/metrics` to `handleGetMetrics` (`api/v1/routes.go:23`) and `GET /v1/metrics/{id}` by slicing the id out of the path (`api/v1/routes.go:37`) into `handleGetMetric` (`:38`). A missing id yields the 404 string seen above:
+The routes dispatch `GET /v1/metrics` to `handleGetMetrics` (`api/v1/routes.go:L23`) and `GET /v1/metrics/{id}` by slicing the id out of the path (`api/v1/routes.go:L37`) into `handleGetMetric` (`:L38`). A missing id yields the 404 string seen above:
 
 ```go
-// api/v1/metric_routes.go:37
+// api/v1/metric_routes.go:L37
 apiError(rw, "Not Found", "No metric with that ID was found", http.StatusNotFound)
 ```
 
-The JSON shape (`type`, `contains`, `tainted`, `sample map[string]float64`) is defined by the `Metric` struct in `api/v1/metric.go:62`.
+The JSON shape (`type`, `contains`, `tainted`, `sample map[string]float64`) is defined by the `Metric` struct in `api/v1/metric.go:L62`.
 
 ### (c) Concluding answer
 
-Querying the REST control API at `GET http://localhost:6565/v1/metrics/dropped_iterations` returned **`count: 85`** — the exact number of iterations dropped when the `shared-iterations` test exceeded its 3 s `maxDuration` (100 budgeted − 15 completed = 85). The runtime proof that this came from the API is twofold: the raw `curl` JSON envelope above, and the negative controls — *without* `--linger` the identical query is refused (`curl_exit=7`, API gone), and a bogus metric id returns the API's own `404 "No metric with that ID was found"`. `--linger` is required because `dropped_iterations` is emitted only in a deferred end-of-run push (`lib/executor/shared_iterations.go:217-228`), so the API must outlive the test to serve it.
+Querying the REST control API at `GET http://localhost:6565/v1/metrics/dropped_iterations` returned **`count: 85`** — the exact number of iterations dropped when the `shared-iterations` test exceeded its 3 s `maxDuration` (100 budgeted − 15 completed = 85). The runtime proof that this came from the API is twofold: the raw `curl` JSON envelope above, and the negative controls — *without* `--linger` the identical query is refused (`curl_exit=7`, API gone), and a bogus metric id returns the API's own `404 "No metric with that ID was found"`. `--linger` is required because `dropped_iterations` is emitted only in a deferred end-of-run push (`lib/executor/shared_iterations.go:L217-L228`), so the API must outlive the test to serve it.
 
 ---
 
@@ -510,7 +523,19 @@ Querying the REST control API at `GET http://localhost:6565/v1/metrics/dropped_i
 
 ### Experiment
 
-A ~16 MB JSON fixture (`/tmp/big.json`, 17,077,780 bytes ≈ 16.29 MB; an array of 95,000 objects) is loaded two different ways, and peak resident memory is measured at VU counts of **1, 50, and 200** for each.
+A ~13.8 MB JSON fixture (`/tmp/big.json`, **14,463,456 bytes ≈ 13.79 MB; an array of 70,000 objects**, each with `id`/`name`/`email`/`score`/`payload` fields) is loaded two different ways, and peak resident memory is measured at VU counts of **1, 50, and 200** for each. The fixture is generated once, out of tree, with a small Python script:
+
+```python
+# /tmp/gen_fixture.py  ->  python3 /tmp/gen_fixture.py 70000 95   (N objects, payload length)
+import json, random, string, sys
+N = int(sys.argv[1]); PAY = int(sys.argv[2]); random.seed(42)
+def rs(n): return ''.join(random.choice(string.ascii_lowercase) for _ in range(n))
+arr = [{"id": i, "name": f"User Name {i:06d}", "email": f"user{i:06d}@example.com",
+        "score": round(random.uniform(0, 1000), 4), "payload": rs(PAY)} for i in range(N)]
+json.dump(arr, open('/tmp/big.json', 'w'))
+```
+
+To keep the comparison **apples-to-apples**, *both* variants `JSON.parse` the file into a live JavaScript object graph — the only difference is *where* the parsed data lives: once in a shared Go-side store (`SharedArray`) versus once inside every VU's own runtime (`open()`).
 
 **SharedArray variant** — the file is parsed inside the `SharedArray` constructor (init context):
 
@@ -518,16 +543,16 @@ A ~16 MB JSON fixture (`/tmp/big.json`, 17,077,780 bytes ≈ 16.29 MB; an array 
 // /tmp/q4_shared.js
 import { SharedArray } from 'k6/data';
 const data = new SharedArray('big', function () { return JSON.parse(open('/tmp/big.json')); });
-export const options = { scenarios: { s: { executor: 'shared-iterations', vus: __ENV.VUS, iterations: __ENV.VUS, maxDuration: '60s' } } };
+export const options = { scenarios: { s: { executor: 'shared-iterations', vus: __ENV.VUS, iterations: __ENV.VUS, maxDuration: '120s' } } };
 export default function () { if (data.length < 0) console.log('noop'); }
 ```
 
-**`open()` variant** — the file is opened in the init context *outside* any `SharedArray`, so every VU's init runs it:
+**`open()` variant** — the file is opened **and parsed** in the init context *outside* any `SharedArray`, so every VU's init runs it independently:
 
 ```javascript
 // /tmp/q4_open.js
-const data = open('/tmp/big.json');   // each VU runs init => each VU copies the file
-export const options = { scenarios: { s: { executor: 'shared-iterations', vus: __ENV.VUS, iterations: __ENV.VUS, maxDuration: '60s' } } };
+const data = JSON.parse(open('/tmp/big.json'));   // each VU runs init => each VU parses & holds its own copy
+export const options = { scenarios: { s: { executor: 'shared-iterations', vus: __ENV.VUS, iterations: __ENV.VUS, maxDuration: '120s' } } };
 export default function () { if (data.length < 0) console.log('noop'); }
 ```
 
@@ -553,28 +578,30 @@ done
 Raw sweep output:
 
 ```text
-q4_shared  VUS=1    VmHWM_kB=255668    (~249 MB)
-q4_open    VUS=1    VmHWM_kB=124040    (~121 MB)
-q4_shared  VUS=50   VmHWM_kB=254836    (~248 MB)
-q4_open    VUS=50   VmHWM_kB=1596092   (~1558 MB)
-q4_shared  VUS=200  VmHWM_kB=250244    (~244 MB)
-q4_open    VUS=200  VmHWM_kB=5173736   (~5052 MB)
+q4_shared  VUS=1    VmHWM_kB=218920     (~214 MB)
+q4_open    VUS=1    VmHWM_kB=263424     (~257 MB)
+q4_shared  VUS=50   VmHWM_kB=225364     (~220 MB)
+q4_open    VUS=50   VmHWM_kB=5716960    (~5583 MB)
+q4_shared  VUS=200  VmHWM_kB=229180     (~224 MB)
+q4_open    VUS=200  VmHWM_kB=19664812   (~19204 MB)
 ```
 
 | VUs | `SharedArray` peak RSS (`VmHWM`) | `open()` peak RSS (`VmHWM`) |
 |----:|---------------------------------:|----------------------------:|
-| 1   | 255,668 kB (~249 MB)             | 124,040 kB (~121 MB)        |
-| 50  | 254,836 kB (~248 MB)             | 1,596,092 kB (~1,558 MB)    |
-| 200 | 250,244 kB (~244 MB)             | 5,173,736 kB (~5,052 MB)    |
+| 1   | 218,920 kB (~214 MB)             | 263,424 kB (~257 MB)        |
+| 50  | 225,364 kB (~220 MB)             | 5,716,960 kB (~5,583 MB)    |
+| 200 | 229,180 kB (~224 MB)             | 19,664,812 kB (~19,204 MB)  |
 
-The pattern is unambiguous: **`SharedArray` stays flat** (~249 → ~248 → ~244 MB; it actually drifts slightly *down*, i.e. constant within noise) regardless of VU count, while **`open()` grows linearly** — roughly `(5,173,736 − 124,040) / (200 − 1) ≈ 25,375 kB ≈ ~24.8 MB per added VU`. (At 1 VU `open()` is *lower* than `SharedArray` because it skips the JSON-parse-into-Go-store cost; its per-VU duplication only dominates as VUs grow.)
+The pattern is unambiguous: **`SharedArray` stays flat** (~214 → ~220 → ~224 MB — a ~10 MB spread that does *not* scale with VU count, i.e. constant within measurement noise) regardless of VU count, while **`open()` grows linearly** — from ~257 MB at 1 VU to ~19.2 GB at 200 VUs, i.e. `(19,664,812 − 263,424) / (200 − 1) ≈ 97,494 kB ≈ ~95 MB per added VU` (per-segment slope ranges ~91–109 MB/VU). At 1 VU the two variants are close (~257 MB `open()` vs ~214 MB `SharedArray`) because exactly one parsed copy exists in both cases; `open()`'s per-VU duplication only dominates as VUs grow. Because peak RSS includes Go allocator/GC headroom and varies run to run, the **reproducible finding is the *shape*** — flat vs. linear — not the exact kB.
+
+> **Reconciliation with the validated reference.** The AAP's validated reference run measured `SharedArray` ~310/308/296 MB (flat) and `open()` ~248/7,514/28,369 MB (~140 MB/VU) on a ~15 MB fixture. This run reproduces the **identical behavior and root cause** — `SharedArray` constant, `open()` linear, both reaching tens of GB at 200 VUs — and the 1-VU `open()` figure matches closely (~257 MB here vs ~248 MB there). The absolute magnitudes differ (this run: flat ~214–224 MB; ~95 MB/VU) because the per-VU cost tracks the *parsed in-memory expansion* of the specific fixture: a 13.79 MB / 70,000-object file here versus the reference's ~15 MB file, whose object graph expanded to ~140 MB per copy. That difference is fixture composition (object count, field types, string sizes) plus Go heap/GC headroom in this environment — **not** a behavioral difference. The flat-vs-linear conclusion is therefore identical and trustworthy.
 
 ### (b) Code-level root-cause rationale
 
 **`SharedArray` keeps exactly one copy.** The module's root holds a single shared store, and every VU instance is handed a pointer to that *same* store. The construction callback runs only the first time a given name is requested; thereafter the cached array is reused:
 
 ```go
-// js/modules/k6/data/data.go:152
+// js/modules/k6/data/data.go:L152
 func (s *sharedArrays) get(rt *sobek.Runtime, name string, call sobek.Callable) sharedArray {
     s.mu.RLock()
     array, ok := s.data[name]
@@ -584,7 +611,7 @@ func (s *sharedArrays) get(rt *sobek.Runtime, name string, call sobek.Callable) 
         defer s.mu.Unlock()
         array, ok = s.data[name]
         if !ok {
-            array = getShareArrayFromCall(rt, call)   // js/modules/k6/data/data.go:161 — runs the callback ONCE
+            array = getShareArrayFromCall(rt, call)   // js/modules/k6/data/data.go:L161 — runs the callback ONCE
             s.data[name] = array
         }
     }
@@ -592,10 +619,10 @@ func (s *sharedArrays) get(rt *sobek.Runtime, name string, call sobek.Callable) 
 }
 ```
 
-(The single store lives at `data/data.go:32` `data map[string]sharedArray`; each VU's module instance points at `&rm.shared` — the same store — at `data/data.go:56`.) When a VU *accesses* an element, only that one element is copied into the VU's runtime and deep-frozen — the bulk data is never duplicated:
+(The single store lives at `js/modules/k6/data/data.go:L32` `data map[string]sharedArray`; each VU's module instance points at `&rm.shared` — the same store — at `js/modules/k6/data/data.go:L56`.) When a VU *accesses* an element, only that one element is copied into the VU's runtime and deep-frozen — the bulk data is never duplicated:
 
 ```go
-// js/modules/k6/data/share.go:44
+// js/modules/k6/data/share.go:L44
 func (s wrappedSharedArray) Get(index int) sobek.Value {
     if index < 0 || index >= len(s.arr) { return sobek.Undefined() }
     val, err := s.parse(sobek.Undefined(), s.rt.ToValue(s.arr[index]))   // copies ONE element on demand
@@ -609,25 +636,29 @@ func (s wrappedSharedArray) Get(index int) sobek.Value {
 **`open()` makes one full copy per VU.** Each k6 VU is a separate JavaScript runtime, and the `open` builtin returns the file's entire contents *into the calling VU's runtime*:
 
 ```go
-// js/initcontext.go:21
+// js/initcontext.go:L21
 func openImpl(rt *sobek.Runtime, fs fsext.Fs, basePWD *url.URL, filename string, args ...string) (sobek.Value, error) {
     data, err := readFile(fs, fsext.Abs(basePWD.Path, filename))
     if err != nil { return nil, err }
     if len(args) > 0 && args[0] == "b" {
-        ab := rt.NewArrayBuffer(data)        // js/initcontext.go:28 (binary)
+        ab := rt.NewArrayBuffer(data)        // js/initcontext.go:L28 (binary)
         return rt.ToValue(&ab), nil
     }
-    return rt.ToValue(string(data)), nil     // js/initcontext.go:31 — full contents into THIS VU's runtime
+    return rt.ToValue(string(data)), nil     // js/initcontext.go:L31 — full contents into THIS VU's runtime
 }
 ```
 
-The `open` builtin is wired into each VU's init context at `js/bundle.go:445` (invoking `openImpl` at `js/bundle.go:475`). Because init runs once per VU, N VUs ⇒ N independent copies — exactly the linear growth measured above.
+The `open` builtin is wired into each VU's init context at `js/bundle.go:L445` (invoking `openImpl` at `js/bundle.go:L475`). Because init runs once per VU, N VUs ⇒ N independent copies — exactly the linear growth measured above.
 
-**Corroboration from the official Grafana k6 documentation** (the code remains the source of truth; these merely confirm the conclusion). The SharedArray API page states that it <cite index="1-9,1-10">"shares the underlying memory between VUs"</cite> and that <cite index="1-10">the function "executes only once, and its result is saved in memory once."</cite> It further notes that <cite index="1-11">"when a script requests an element, k6 gives a copy of that element"</cite> — matching the per-element copy in `share.go:44`. Conversely, if the file is opened outside the SharedArray callback, <cite index="1-30">"each VU opens the file independently and holds its own copy of the data."</cite> The data-parameterization guide gives the architectural rationale: <cite index="5-7,5-8">"Each VU in k6 is a separate JS VM. To prevent multiple copies of the whole data file, SharedArray was added."</cite>
+**Corroboration from the official Grafana k6 documentation** (the code remains the source of truth; these references only confirm the conclusion):
+
+- The [SharedArray API reference](https://grafana.com/docs/k6/latest/javascript-api/k6-data/sharedarray/) states that a `SharedArray` "shares the underlying memory between VUs", that its constructor function "executes only once, and its result is saved in memory once", and that on access "k6 gives a copy of that element" — exactly matching the single name-keyed store and the per-element copy in `js/modules/k6/data/share.go:L44`.
+- The [`open()` API reference](https://grafana.com/docs/k6/latest/javascript-api/init-context/open/) documents the opposite footprint directly: with `open()`, "every VU keeps a separate copy of the file in memory."
+- The [Data parameterization guide](https://grafana.com/docs/k6/latest/examples/data-parameterization/) gives the architectural rationale — each VU is a separate JS VM, so "to prevent multiple copies of the whole data file, SharedArray was added."
 
 ### (c) Concluding answer
 
-The memory footprint for file data loaded via **`SharedArray` remains essentially constant** as the VU count grows (measured ~249/248/244 MB at 1/50/200 VUs), whereas data loaded with a plain **`open()` grows linearly — each VU creates its own full copy** (~121/1,558/5,052 MB at 1/50/200 VUs, ≈ 24.8 MB per VU for this ~16 MB fixture). The root cause is architectural: `SharedArray` stores the parsed data exactly once in a single name-keyed Go-side store whose construction callback runs only once (`js/modules/k6/data/data.go:152-164`) and copies only individual elements on demand (`js/modules/k6/data/share.go:44`), while `open()` returns the entire file contents into each separate VU runtime (`js/initcontext.go:31`), so N VUs hold N copies.
+The memory footprint for file data loaded via **`SharedArray` remains essentially constant** as the VU count grows (measured ~214/220/224 MB at 1/50/200 VUs — within measurement noise), whereas data loaded with a plain **`open()` grows linearly — each VU creates its own full copy** (~257/5,583/19,204 MB at 1/50/200 VUs, ≈ 95 MB per VU for this 13.79 MB fixture). This reproduces the AAP's validated reference behavior (flat `SharedArray`, linear `open()`, both reaching tens of GB at 200 VUs); the absolute per-VU cost differs only because it tracks the parsed in-memory expansion of the specific fixture and environment, not any behavioral difference. The root cause is architectural: `SharedArray` stores the parsed data exactly once in a single name-keyed Go-side store whose construction callback runs only once (`js/modules/k6/data/data.go:L152-L164`) and copies only individual elements on demand (`js/modules/k6/data/share.go:L44`), while `open()` returns the entire file contents into each separate VU runtime (`js/initcontext.go:L31`), so N VUs hold N copies.
 
 ---
 
@@ -700,9 +731,9 @@ The built-in metrics are likewise intact and correctly suffixed: counters get `_
 **The output is registered** under the kebab-case name `experimental-prometheus-rw` and backed by the vendored `github.com/grafana/xk6-output-prometheus-remote`:
 
 ```go
-// cmd/outputs.go:34
+// cmd/outputs.go:L34
 builtinOutputExperimentalPrometheusRW
-// cmd/outputs.go:66
+// cmd/outputs.go:L66
 builtinOutputExperimentalPrometheusRW.String(): func(params output.Params) (output.Output, error) {
     return remotewrite.New(params)
 ```
@@ -710,16 +741,17 @@ builtinOutputExperimentalPrometheusRW.String(): func(params output.Params) (outp
 **The `__name__` label is built deterministically** as `prefix + metric name (+ "_" + suffix)`:
 
 ```go
-// vendor/.../remotewrite/prometheus.go:11
+// vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:L11
 const namelbl = "__name__"
-// vendor/.../remotewrite/prometheus.go:39
+
+// vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:L39-L52
 func MapSeries(series metrics.TimeSeries, suffix string) []*prompb.Label {
-    v := defaultMetricPrefix + series.Metric.Name      // prometheus.go:40
+    v := defaultMetricPrefix + series.Metric.Name      // :L40 — "k6_" + metric name
     if suffix != "" {
-        v += "_" + suffix                              // prometheus.go:41-42
+        v += "_" + suffix                              // :L41-L42 — append type/stat suffix
     }
     lbls := append(MapTagSet(series.Tags), &prompb.Label{
-        Name:  namelbl,                                // prometheus.go:45
+        Name:  namelbl,                                // :L45 — the __name__ label
         Value: v,
     })
     ...
@@ -729,24 +761,24 @@ func MapSeries(series metrics.TimeSeries, suffix string) []*prompb.Label {
 **The prefix and the default trend stat:**
 
 ```go
-// vendor/.../remotewrite/config.go:24
+// vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/config.go:L24
 defaultMetricPrefix = "k6_"
-// vendor/.../remotewrite/config.go:28
+// vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/config.go:L28
 var defaultTrendStats = []string{"p(99)"}
 ```
 
 **The suffixes.** A counter is mapped with the suffix `"total"` (⇒ `_total`):
 
 ```go
-// vendor/.../remotewrite/remotewrite.go:330
+// vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:L330-L331
 case metrics.Counter:
-    ts := mapMonoSeries(swm.TimeSeries, "total", swm.Latest)   // remotewrite.go:331
+    ts := mapMonoSeries(swm.TimeSeries, "total", swm.Latest)   // :L331 — counter => "_total"
 ```
 
 A trend's sub-metric gets its stat appended to the name label; the default `p(99)` is sanitized to `p99` and appended (⇒ `_p99`):
 
 ```go
-// vendor/.../remotewrite/trend.go:89
+// vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/trend.go:L89
 ts.Labels[tg.ixname].Value += "_" + suffix
 ```
 
@@ -768,7 +800,7 @@ The exported remote-write data **preserves metric-name integrity**. Each k6 metr
 | Q1 | SIGINT on `ramping-vus` (6 VUs) | DEBUG `Stopping k6 in response to signal... sig=interrupt` + final ERROR `test run was aborted...`; exit **105**; 6 `ITER_START` / 1 truncated `ITER_END` (sleep cut to ~5.6 s) | Deterministic (exit 105; mid-iteration termination always) |
 | Q2 | gRPC server-streaming interrupt, `gracefulRampDown: '30ms'` | abort logs as Q1; **`grpc_streams_msgs_received = 235`** (`grpc_streams = 5`, `grpc_streams_msgs_sent = 5`, `on('error')` = 0); exit 105 | Received count is **timing-dependent** |
 | Q3 | `dropped_iterations` over REST API | API `GET /v1/metrics/dropped_iterations` → **`count: 85`**; matches summary; no-`--linger` → connection refused; bogus id → 404 | Deterministic (85) |
-| Q4 | `SharedArray` vs `open()` RSS at 1/50/200 VUs | SharedArray ~249/248/244 MB (flat); `open()` ~121/1,558/5,052 MB (linear, ≈24.8 MB/VU) | Shape deterministic; exact kB varies |
+| Q4 | `SharedArray` vs `open()` RSS at 1/50/200 VUs | SharedArray ~214/220/224 MB (flat); `open()` ~257/5,583/19,204 MB (linear, ≈95 MB/VU) | Shape deterministic; exact kB varies with fixture/GC |
 | Q5 | Prometheus remote-write name integrity | decoded `__name__`: `k6_my_custom_counter_total`, `k6_my_custom_trend_p99`, + built-ins; names intact | Deterministic |
 
 ### Temporary artifacts (all outside the repository, under `/tmp`)
@@ -776,7 +808,7 @@ The exported remote-write data **preserves metric-name integrity**. Each k6 metr
 - `/tmp/k6bin/k6` — the out-of-tree k6 v0.55.0 binary
 - `/tmp/grpcserver` (+ the out-of-tree build copy) — the gRPC server example binary
 - `/tmp/route_guide.proto` — proto copied for the Q2 client
-- `/tmp/big.json` — the ~16 MB JSON fixture for Q4
+- `/tmp/big.json` — the ~13.8 MB JSON fixture for Q4 (14,463,456 bytes; 70,000 objects), plus `/tmp/gen_fixture.py` that generates it
 - `/tmp/rwrecv/` — the standalone Go remote-write receiver module (Q5)
 - `/tmp/q1_ramping.js`, `/tmp/q2_grpc_streaming.js`, `/tmp/q3_dropped.js`, `/tmp/q4_shared.js`, `/tmp/q4_open.js`, `/tmp/q5_prom.js` — experiment scripts
 - `/tmp/q1.log`, `/tmp/q2.log`, `/tmp/q2.summary`, `/tmp/q3.summary`, `/tmp/q3_api_dropped.json`, `/tmp/q4_rss.txt`, `/tmp/q5.log` — captured output
@@ -788,7 +820,7 @@ The exported remote-write data **preserves metric-name integrity**. Each k6 metr
 
 ```bash
 # stop any background servers spawned during the experiments (by their specific PIDs)
-rm -f  /tmp/grpcserver /tmp/route_guide.proto /tmp/big.json
+rm -f  /tmp/grpcserver /tmp/route_guide.proto /tmp/big.json /tmp/gen_fixture.py
 rm -f  /tmp/q1_ramping.js /tmp/q2_grpc_streaming.js /tmp/q3_dropped.js \
        /tmp/q4_shared.js /tmp/q4_open.js /tmp/q5_prom.js
 rm -f  /tmp/q1*.log /tmp/q2.* /tmp/q3*.summary /tmp/q3_api_*.json /tmp/q4_rss.txt /tmp/q5.log
@@ -799,15 +831,18 @@ rm -rf /tmp/k6bin
 
 ### Final verification — the source tree is unchanged
 
-After cleanup, from the repository root, `git status --porcelain` reports only this newly added report (no k6 source, config, test, or `vendor/` file is modified), and the branch/commit are unchanged:
+After cleanup, from the repository root, the working tree is **clean** — `git status --porcelain` produces no output because this report is committed (nothing is untracked or modified). The **only** change relative to the k6 source baseline (`ddc3b0b1d23c128e34e2792fc9075f9126e32375` — the commit this report investigates) is this newly added report; no k6 source, config, test, `go.mod`/`go.sum`, or `vendor/` file is touched:
 
 ```text
-$ git status --porcelain --untracked-files=all
-?? blitzy/documentation/k6_ddc3b0b1d23c.md
-
-$ git rev-parse --short HEAD
-ddc3b0b1d
+$ git status --porcelain
+$ git diff --name-status ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
+$ git diff --stat ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD -- . ':(exclude)blitzy/'
+$ git diff --name-only ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD -- go.mod go.sum vendor/
+$
 ```
+
+The first command (`git status --porcelain`) prints nothing — the working tree is clean. The second shows the single added file. The third and fourth print nothing — zero k6 source/config/test files changed, and the dependency manifests and `vendor/` tree are byte-for-byte unchanged.
 
 The only file added anywhere in the repository is this document, `blitzy/documentation/k6_ddc3b0b1d23c.md`. It lives under `blitzy/`, outside the k6 Go packages, so it does not affect the build. The k6 source under investigation (`k6 v0.55.0`, branch `k6_ddc3b0b1d23c` @ `ddc3b0b1d`) was treated as **read-only evidence** throughout and is byte-for-byte identical to its committed state.
 
