@@ -352,7 +352,7 @@ exports.default = function () {
 
 Result (verbatim):
 ```
-$ /tmp/k6bin/k6 run --iterations 1 require_in_vu.js
+$ /tmp/k6bin/k6 run --iterations 1 extra/require_in_vu.js
 time="..." level=error msg="GoError: the \"require\" function is only available in the init stage (i.e. the global scope), see https://grafana.com/docs/k6/latest/using-k6/test-lifecycle/ for more information\n\tat go.k6.io/k6/js.(*requireImpl).require-fm (native)\n\tat file:///tmp/k6demos/extra/require_in_vu.js:2:10(3)\n" executor=shared-iterations scenario=default source=stacktrace
 # exit code: 0   (iteration-level exception: logged each iteration, iteration dropped, run still exits 0)
 ```
@@ -369,7 +369,7 @@ exports.default = function () {};
 
 Result (verbatim):
 ```
-$ /tmp/k6bin/k6 run --iterations 1 empty_specifier.js
+$ /tmp/k6bin/k6 run --iterations 1 extra/empty_specifier.js
 time="..." level=error msg="GoError: require() can't be used with an empty specifier\n\tat go.k6.io/k6/js.(*requireImpl).require-fm (native)\n\tat file:///tmp/k6demos/extra/empty_specifier.js:1:35(3)\n" hint="script exception"
 # exit code: 107
 ```
@@ -399,7 +399,7 @@ exports.default = function () {};
 
 Result (verbatim):
 ```
-$ /tmp/k6bin/k6 run --vus 2 --iterations 4 open_never.js
+$ /tmp/k6bin/k6 run --vus 2 --iterations 4 extra/open_never.js
 time="..." level=error msg="GoError: open() can't be used with files that weren't previously opened during initialization (__VU==0), path: \"/tmp/k6demos/extra/data.txt\"\n\tat go.k6.io/k6/js.(*Bundle).setInitGlobals.func3 (native)\n\tat file:///tmp/k6demos/extra/open_never.js:2:7(7)\n" hint="error while initializing VU #1 (script exception)"
 # exit code: 107
 ```
@@ -463,7 +463,7 @@ export default function () {};
 
 Result (verbatim):
 ```
-$ /tmp/k6bin/k6 run --iterations 1 esm_mixing.js
+$ /tmp/k6bin/k6 run --iterations 1 extra/esm_mixing.js
 time="..." level=error msg="GoError: you are trying to access identifier \"module\", this likely is due to mixing ECMAScript Modules (ESM) and CommonJS syntax. This isn't supported in the JavaScript standard, please use only one or the other\n\tat file:///tmp/k6demos/extra/esm_mixing.js:2:16(13)\n" hint="script exception"
 # exit code: 107
 ```
