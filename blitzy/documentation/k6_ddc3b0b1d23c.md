@@ -32,7 +32,7 @@ A user investigating the `ramping-vus` executor reported five interrelated pheno
 
 | Item | Value |
 |------|-------|
-| k6 version | `v0.55.0` (commit `ddc3b0b1d2`) — confirmed by the built binary's `version` output |
+| k6 version | `v0.55.0` (commit `9ed7392295`) — confirmed by the built binary's `version` output. The analysis filename and source branch are `k6_ddc3b0b1d23c`; the current destination build reports commit `9ed7392295`. |
 | Go toolchain | `go1.23.9 linux/amd64`, `GOTOOLCHAIN=local`, `GOFLAGS=-mod=vendor` |
 | cgo / race | `CGO_ENABLED=1` (for the `-race` binary) |
 | Authoritative instrument | Go's `-race` detector — k6's always-on, zero-tolerance CI gate (`go test -race -timeout 210s ./...` [Makefile:L29]) |
@@ -67,17 +67,17 @@ Only **after** `iterateSteps()` returns does `Run` launch a *separate* goroutine
 
 ```mermaid
 flowchart TD
-    Run["Run goroutine"] --> Spawn["runLoopsIfPossible(): spawn maxVUs VU goroutines<br/>one per vuHandle [ramping_vus.go:L592-L617]"]
-    Run --> Iterate["iterateSteps() — SYNCHRONOUS, single goroutine<br/>merges raw + graceful steps by TimeOffset<br/>[ramping_vus.go:L549, L622-L645]"]
-    Iterate -->|"raw step (L640)"| SchedH["scheduled handler<br/>start() / gracefulStop()<br/>[L679-L690]"]
-    Iterate -->|"graceful step (L634)"| MaxH["max-allowed handler<br/>hardStop()<br/>[L668-L677]"]
-    Iterate -->|"loop returns handledGracefulSteps (L644)"| Handoff["go runRemainingGracefulSteps()<br/>launches AFTER iterateSteps returns<br/>[L554-L558, L654-L666]"]
-    Handoff --> MaxH2["max-allowed handler ONLY<br/>leftover graceful steps (L664)"]
-    SchedH --> Slice["vuHandles slice [L521]"]
+    Run["Run goroutine"] --> Spawn["runLoopsIfPossible(): spawn maxVUs VU goroutines<br/>one per vuHandle [lib/executor/ramping_vus.go:L592-L617]"]
+    Run --> Iterate["iterateSteps() — SYNCHRONOUS, single goroutine<br/>merges raw + graceful steps by TimeOffset<br/>[lib/executor/ramping_vus.go:L549, L622-L645]"]
+    Iterate -->|"raw step [lib/executor/ramping_vus.go:L640]"| SchedH["scheduled handler<br/>start() / gracefulStop()<br/>[lib/executor/ramping_vus.go:L679-L690]"]
+    Iterate -->|"graceful step [lib/executor/ramping_vus.go:L634]"| MaxH["max-allowed handler<br/>hardStop()<br/>[lib/executor/ramping_vus.go:L668-L677]"]
+    Iterate -->|"loop returns handledGracefulSteps [lib/executor/ramping_vus.go:L644]"| Handoff["go runRemainingGracefulSteps()<br/>launches AFTER iterateSteps returns<br/>[lib/executor/ramping_vus.go:L554-L558, L654-L666]"]
+    Handoff --> MaxH2["max-allowed handler ONLY<br/>leftover graceful steps [lib/executor/ramping_vus.go:L664]"]
+    SchedH --> Slice["vuHandles slice [lib/executor/ramping_vus.go:L521]"]
     MaxH --> Slice
     MaxH2 --> Slice
-    Slice --> Mutex["per-handle *sync.Mutex<br/>serializes each VU's transitions [vu_handle.go:L71]"]
-    Spawn --> Buffer["VU buffer: vus chan InitializedVU [execution.go:L106]<br/>GetPlannedVU / ReturnVU paired, WaitGroup-gated<br/>[ramping_vus.go:L594, L600, L606, L608, L540]"]
+    Slice --> Mutex["per-handle *sync.Mutex<br/>serializes each VU's transitions [lib/executor/vu_handle.go:L71]"]
+    Spawn --> Buffer["VU buffer: vus chan InitializedVU [lib/execution.go:L106]<br/>GetPlannedVU / ReturnVU paired, WaitGroup-gated<br/>[lib/executor/ramping_vus.go:L594, L600, L606, L608, L540]"]
 %% Both handler closures run on the SAME goroutine via iterateSteps; the trailing graceful goroutine starts only AFTER the merge loop returns and uses only the max-allowed handler.
 ```
 
@@ -209,9 +209,9 @@ Per the methodology, claims here are *run*, not just argued. Using the race-enab
 
 - **Scenario runs.** The rapid up/down scenario and all three segment-split scenarios completed with **exit 0 and zero data races** under `GORACE="halt_on_error=1"` (§ 8).
 - **Dedicated race tests.** `TestVUHandleRace` [lib/executor/vu_handle_test.go:L25] and `TestVUHandleStartStopRace` [lib/executor/vu_handle_test.go:L114] — the tests purpose-built to hammer the handle's concurrent transitions — **PASS under `-race`** with zero races, alongside the execution-plan and segment-tuple tests.
-- **Leak gate.** The repository's test harness runs `goleak.Find()` [cmd/tests/tests.go:L57] (from `func Main(m *testing.M)` [cmd/tests/tests.go:L33]) with zero-leak tolerance, backing the "no goroutine/VU leak" conclusion.
+- **Leak gate (separate `cmd/tests` harness).** Goroutine-leak detection lives in the repository's `cmd/tests` harness — *not* in the `lib/executor` package: `func Main(m *testing.M)` [cmd/tests/tests.go:L33] runs `goleak.Find()` [cmd/tests/tests.go:L57] with zero-leak tolerance. Running that harness directly — `go test -race -timeout 210s ./cmd/tests` — **passes with zero goroutine-leak reports**, corroborating no goroutine/VU leak in that harness. The `lib/executor` race command below is gated by the `-race` detector, *not* by `goleak` — that package's tests import no `goleak` and define no `TestMain`.
 
-**Full package race suite.** `go test -race ./lib/executor/...` **passes — `ok go.k6.io/k6/lib/executor` (~30s), exit 0, zero data races** — reproduced independently. This is the project's own zero-tolerance gate (`go test -race -timeout 210s ./...` [Makefile:L29]), and it is green. Across **every** race-enabled run in this investigation — both the scenario binaries above and the full package suite — the `-race` detector reported **zero data races, without exception**. That invariant is the authoritative answer to the central question.
+**Full package race suite (race-gated).** `go test -race ./lib/executor/...` **passes — `ok go.k6.io/k6/lib/executor` (~30s), exit 0, zero data races** — reproduced independently. This command exercises the executor package under the `-race` detector — the project's own zero-tolerance gate (`go test -race -timeout 210s ./...` [Makefile:L29]) — while the goroutine-leak check is supplied separately by the `cmd/tests` harness noted above. Across **every** race-enabled run in this investigation — the scenario binaries above, this full executor-package suite, and the `cmd/tests` harness — the `-race` detector reported **zero data races, without exception**, and `cmd/tests` reported **zero goroutine leaks**. Those invariants together are the authoritative answer to the central question.
 
 **A secondary, non-blocking timing note** (it never indicates a data race or a concurrency defect, and so does not change the race verdict): one test, `TestRampingVUsHandleRemainingVUs` [lib/executor/ramping_vus_test.go:L311], asserts on **millisecond-level** interrupt-vs-finish timing (10ms/40ms stages, a 30ms `gracefulRampDown`, a 50ms `gracefulStop`, and 65ms VU sleeps). It passes **5/5 with `-race` in isolation** and **5/5 without `-race`**; only under the `-race` detector's runtime slowdown combined with CPU contention from many `t.Parallel()` race-instrumented tests can its tight windows occasionally skew so that both VUs are interrupted instead of one finishing. When that happens it is a **timing assertion, never a data race** — the detector still reports zero races. The test's own source comment acknowledges the fragility: the graceful budget was widened "to prevent the test to become flaky" [lib/executor/ramping_vus_test.go:L327-L328]. It is a test-timing artifact, not a concurrency defect in the executor, and is out of scope to change under this analysis-only task.
 
@@ -231,7 +231,7 @@ Per the methodology, claims here are *run*, not just argued. Using the race-enab
 | 2 | Handler count mismatch | **By design** | Graceful planned count `>=` raw count; gap = `reserveVUsForGracefulRampDowns()` [lib/executor/ramping_vus.go:L307]; "stay with 6 PlannedVUs until t=32 … run until t=52" [lib/executor/ramping_vus.go:L293-L294] | `TestRampingVUsConfigExecutionPlanExample` [lib/executor/ramping_vus_test.go:L442] PASS under `-race` |
 | 3 | Early kill runs longer than `gracefulStop` | **Explained timing semantics** | `gracefulStop` does not cancel a running iteration [lib/executor/vu_handle.go:L158]; `hardStop` does [lib/executor/vu_handle.go:L178]; default 30s [lib/executor/base_config.go:L20] | `TestRampingVUsHandleRemainingVUs` [lib/executor/ramping_vus_test.go:L311] encodes finish-vs-interrupt |
 | 4 | Segments exceed max | **By design** | Striped per-instance `SegmentedIndex` [lib/execution_segment.go:L768]; each instance owns its own [lib/execution_segment.go:L762-L764] | Three-segment split: `4 + 3 + 3 = 10` = peak, exit 0, **0 races** |
-| 5 | Race / buffer leak (central) | **No race, no leak** | Both handlers run sequentially via synchronous `iterateSteps()` [lib/executor/ramping_vus.go:L549, L622-L645]; trailing goroutine uses only max-allowed handler [lib/executor/ramping_vus.go:L664]; per-handle mutex [lib/executor/vu_handle.go:L71]; channel buffer + balanced `WaitGroup` [lib/execution.go:L106; lib/executor/ramping_vus.go:L540, L594, L600, L606, L608] | All `-race` runs: **zero data races, exit 0**; `TestVUHandleRace`/`TestVUHandleStartStopRace` PASS |
+| 5 | Race / buffer leak (central) | **No race, no leak** | Both handlers run sequentially via synchronous `iterateSteps()` [lib/executor/ramping_vus.go:L549, L622-L645]; trailing goroutine uses only max-allowed handler [lib/executor/ramping_vus.go:L664]; per-handle mutex [lib/executor/vu_handle.go:L71]; channel buffer + balanced `WaitGroup` [lib/execution.go:L106], [lib/executor/ramping_vus.go:L540, L594, L600, L606, L608] | All `-race` runs: **zero data races, exit 0**; `TestVUHandleRace`/`TestVUHandleStartStopRace` PASS |
 
 ### 8.2 Exact reproduction commands
 
@@ -262,7 +262,7 @@ rm -f /tmp/k6 /tmp/k6race /tmp/rapid_updown.js /tmp/seg.js
 
 ### 8.3 Observed results
 
-- **Builds:** both succeeded (`exit 0`); the binaries report `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.9, linux/amd64)`.
+- **Builds:** both succeeded (`exit 0`); the binaries report `k6 v0.55.0 (commit/9ed7392295, go1.23.9, linux/amd64)`.
 - **Rapid up/down (race):** `exit 0`, **0 data races**, `vus_max=6`; all scheduled iterations completed gracefully (**0 interrupted**). The exact iteration count is scenario-script-dependent, so it is not treated as a fixed invariant.
 - **Three-segment split (race):** `vus_max` of **4 / 3 / 3** → sum **10** = configured peak, never exceeding; each `exit 0` with **0 data races**.
 - **`go test -race ./lib/executor/...`:** **PASS — `ok go.k6.io/k6/lib/executor` (~30s), exit 0, zero data races**, reproduced independently. The dedicated race tests `TestVUHandleRace` and `TestVUHandleStartStopRace`, plus the execution-plan and segment-tuple tests, all pass with **zero data races**, and the race detector reported **zero data races in every run, without exception**. (Secondary, non-blocking: the millisecond-timing test `TestRampingVUsHandleRemainingVUs` — which passes 5/5 with `-race` in isolation and 5/5 without `-race` — can occasionally skew under heavy parallel race load; that is a timing assertion, never a data race. See § 7.4.)
