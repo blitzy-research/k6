@@ -45,9 +45,13 @@ k6bin v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
 
 All test scripts and helper binaries were created **outside** the repository
 tree (under `/tmp`). `git status --porcelain` was empty before and after every
-run, and `HEAD` never changed — it stayed at
-`ddc3b0b1d23c128e34e2792fc9075f9126e32375` throughout. The single artifact this
-task adds to the repository is **this document**.
+run — no k6 source, test, config, build, or `vendor/` file was touched. The
+runtime investigation was performed against **source commit
+`ddc3b0b1d23c128e34e2792fc9075f9126e32375`** (k6 v0.55.0). The **only** change
+this task makes to the repository is adding **this document**; committing it
+advances the destination branch's `HEAD` by exactly that single documentation
+commit, so the diff from the source commit to that commit is precisely
+`A blitzy/documentation/k6_ddc3b0b1d23c.md` and nothing else.
 
 ### Environment caveat (applies to R3 & R4)
 
@@ -316,10 +320,20 @@ Scenario line observed:
 - `lib/testutils/grpcservice/service.go:57-63` — `ListFeatures` sleeps
   `100 * time.Millisecond` (line 62) then `stream.Send(feature)` (line 63) — one
   feature per 100 ms.
-- `examples/grpc_server/main.go` — the bundled server (default listen
-  `localhost:10000`); built/run with `-mod=mod`.
-- `examples/grpc_server_streaming.js` — reference client using
-  `main.FeatureExplorer/ListFeatures`.
+- `examples/grpc_server/main.go:51,57-82` — the bundled server: the default
+  listen port `flag.Int("port", 10000, "The server port")` (line 51), the startup
+  log `"gRPC server starting on localhost:%d"` (line 57),
+  `net.Listen("tcp", fmt.Sprintf("localhost:%d", *port))` (line 59), then
+  `RegisterFeatureExplorerServer(...)` (line 80) — the `main.FeatureExplorer`
+  service the test streams from — followed by `grpcServer.Serve(lis)` (line 82).
+  Built/run with `-mod=mod`.
+- `examples/grpc_server_streaming.js:1,9,14,17,19,21-30,38-41` — the reference
+  client: imports `Client, Stream` from `k6/net/grpc` (line 1), the default
+  `GRPC_ADDR = __ENV.GRPC_ADDR || '127.0.0.1:10000'` (line 9), `client.load(...)`
+  (line 14), `client.connect(GRPC_ADDR, { plaintext: true })` (line 17), and — the
+  key line — `new Stream(client, 'main.FeatureExplorer/ListFeatures', null)`
+  (line 19), with the `stream.on('data', ...)` (lines 21-30) and
+  `stream.on('error', ...)` (lines 38-41) handlers.
 
 ### 6. Reasoned answer
 
@@ -602,19 +616,32 @@ across all 10 VUs and 50 iterations).
 
 ### 5. Source citations
 
-- `js/modules/k6/data/data.go:19-95` — the root module holds a single
-  `shared sharedArrays` (line 22) whose type is
+- `js/modules/k6/data/data.go:21-23,31-34` — the root module holds a single
+  `shared sharedArrays` field (line 22) whose type is
   `sharedArrays struct { data map[string]sharedArray; mu sync.RWMutex }`
-  (lines 31-32); every VU's module instance is constructed with
-  `shared: &rm.shared` (line 56) — the **same** map; the constructor calls
-  `d.shared.get(rt, name, fn)` (line 95) which **caches by name** (it only builds
-  when the name is absent — `get` at line 152). The source comment states it
-  maintains "*a single instance of arrays for the whole test setup and VUs*"
-  (line 115).
-- `js/modules/k6/data/share.go` — `sharedArray struct { arr []string }`
-  (lines 10-11); each VU receives a lightweight read-only `wrappedSharedArray`
-  (line 14) over the **same backing slice**; `Set`/`SetLen` panic
-  `"SharedArray is immutable"` (lines 37, 41).
+  (lines 31-34).
+- `js/modules/k6/data/data.go:53-58` — every VU's module instance is constructed
+  with `shared: &rm.shared` (line 56) — the **same** map for all VUs.
+- `js/modules/k6/data/data.go:73-97` — the `SharedArray` constructor calls
+  `d.shared.get(rt, name, fn)` (line 95).
+- `js/modules/k6/data/data.go:152-167` — `get` **caches by name**: it reads any
+  existing entry (line 154) and, only when the name is absent, builds it once
+  under a write lock (`if !ok { … s.data[name] = array }`, lines 160-162) — so the
+  dataset is built at most once per name.
+- `js/modules/k6/data/data.go:113-115` — the source comment states the
+  implementation "relies on maintaining *a single instance of arrays for the
+  whole test setup and VUs*" (line 115).
+- `js/modules/k6/data/share.go:10-12` — the backing store
+  `sharedArray struct { arr []string }` (the single shared slice).
+- `js/modules/k6/data/share.go:14-21` — the lightweight read-only
+  `wrappedSharedArray` type, which embeds `sharedArray`.
+- `js/modules/k6/data/share.go:23-34` — `wrap` builds a `wrappedSharedArray` over
+  the **same** `sharedArray` value (`sharedArray: s`, line 28) via
+  `rt.NewDynamicArray(...)` — no copy of the backing slice is made.
+- `js/modules/k6/data/share.go:36-42` — `Set` (line 37) and `SetLen` (line 41)
+  both `panic("SharedArray is immutable")`, enforcing read-only access.
+- `js/modules/k6/data/share.go:44-48` — `Get` reads element `s.arr[index]`
+  (line 48) from the shared slice.
 
 ### 6. Reasoned answer
 
@@ -629,9 +656,9 @@ across all 10 VUs and 50 iterations).
   built a single time.
 - **Root cause:** the `SharedArray` dataset is stored **once** in the root
   module's shared, name-keyed map and cached by name
-  (`js/modules/k6/data/data.go:19-95`); every VU gets only a read-only
+  (`js/modules/k6/data/data.go:53-58,95,152-167`); every VU gets only a read-only
   `wrappedSharedArray` referencing the **same backing slice**
-  (`js/modules/k6/data/share.go`). A plain array, by contrast, is re-created
+  (`js/modules/k6/data/share.go:14-34`). A plain array, by contrast, is re-created
   inside **every VU's own (sobek) JS runtime**, because k6 uses a
   **shared-nothing VU model** — hence the linear growth.
 
@@ -753,10 +780,26 @@ The **ten exported series names** (sorted) are exactly:
   — `defaultServerURL = "http://localhost:9090/api/v1/write"` (line 21);
   `defaultMetricPrefix = "k6_"` (line 24); `defaultTrendStats = []string{"p(99)"}`
   (line 28).
-- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:319-356`
-  — per-type suffix: Counter → `"total"` (`_total`, line 331), Gauge → `""` (none,
-  line 335), Rate → `"rate"` (`_rate`, line 341), Trend → per-stat (default
-  `p(99)` → `_p99`, from line 347).
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:319-345`
+  — the `mapMonoSeries` helper (lines 319-326) applies the type suffix for the
+  single-sample types: Counter → `mapMonoSeries(..., "total", ...)` (`_total`,
+  line 331), Gauge → `mapMonoSeries(..., "", ...)` (none, line 336), Rate →
+  `mapMonoSeries(..., "rate", ...)` (`_rate`, line 341).
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:347-356`
+  — the Trend branch does **not** append the suffix itself; it **delegates** via
+  `newts = trend.MapPrompb(swm.TimeSeries, swm.Latest)` (line 356).
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/trend.go:36,48,53-54,78,89`
+  — the delegated Trend mapping is where the per-stat suffix is actually appended:
+  `extendedTrendSink.MapPrompb` (line 36) builds the base labels with no suffix
+  (`MapSeries(series, "")`, line 48), then iterates `sink.trendStats` calling
+  `tg.Append(stat, ...)` for each stat (lines 53-54); `Append` (line 78) appends
+  the stat name as the suffix — `ts.Labels[tg.ixname].Value += "_" + suffix`
+  (line 89) — e.g. `p99` → `_p99`.
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:177-189`
+  — `setTrendStatsResolver` normalizes the configured stat `p(99)` into the series
+  suffix `p99`: it trims the parentheses (`statKey = stat[2 : len(statKey)-1]`,
+  line 185) and re-prepends `"p"` (line 187), storing the resolver under key `p99`
+  (line 189) — this is why the exported Trend suffix is `_p99`, not `_p(99)`.
 - `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remote/client.go:78-133`
   — `Store` (line 78) POSTs with headers `User-Agent: k6-prometheus-rw-output`
   (line 96), `Content-Encoding: snappy` (line 99),
@@ -781,7 +824,9 @@ The **ten exported series names** (sorted) are exactly:
   The original names appear **intact — no truncation, mangling, or collision** —
   confirming metric-name integrity. This matches
   `prometheus.go:39-50` + `config.go:24` (the `k6_` prefix) +
-  `remotewrite.go:319-356` (the per-type suffixes).
+  `remotewrite.go:329-356` (the per-type suffixes) + `trend.go:53-54,89` (the
+  Trend per-stat `_p99` suffix, appended after `remotewrite.go:356` delegates to
+  `trend.MapPrompb`).
 
 ### 7. Coverage checklist (R5)
 
@@ -810,9 +855,14 @@ Every distinct sub-question of R1–R5 is answered, as summarized below.
 
 ### Read-only guarantee (verified)
 
-- No repository source file was modified, added, or deleted other than this
-  document.
-- `git status` remained clean (only this new file is added by the task); `HEAD`
-  stayed at `ddc3b0b1d23c128e34e2792fc9075f9126e32375`.
+- No repository source, test, config, build, or `vendor/` file was modified,
+  added, or deleted — the **only** artifact added is this document.
+- The runtime investigation was performed against **source commit
+  `ddc3b0b1d23c128e34e2792fc9075f9126e32375`**; the final repository diff from
+  that commit contains only this Markdown deliverable
+  (`git diff --name-status ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD` →
+  `A blitzy/documentation/k6_ddc3b0b1d23c.md`). Committing the deliverable
+  necessarily advances the destination branch's `HEAD` by that single
+  documentation commit.
 - All observation scripts and helper binaries lived under `/tmp` (outside the
   repository) and are not committed.
