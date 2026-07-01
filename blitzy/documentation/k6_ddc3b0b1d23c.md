@@ -37,7 +37,11 @@ GOFLAGS=-mod=vendor CGO_ENABLED=1 go build -o k6 .
 k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
 
-The version literal in source is `const Version = "0.55.0"` [`lib/consts/consts.go:12`]. The external-abort exit code observed in Q3 is `ExternalAbort ExitCode = 105` [`errext/exitcodes/codes.go:41`]. Toolchain / dependency context: `go 1.21` [`go.mod:3`], `toolchain go1.21.13` [`go.mod:5`]; test dependencies `github.com/stretchr/testify v1.9.0` [`go.mod:41`] and `go.uber.org/goleak v1.3.0` [`go.mod:49`]; `github.com/sirupsen/logrus v1.9.3` [`go.mod:37`] produces the `--verbose` log output quoted throughout. The race detector requires CGO plus a C compiler; `gcc 13.3.0` was installed for this.
+The version literal in source is `const Version = "0.55.0"` [`lib/consts/consts.go:12`]. The external-abort exit code observed in Q3 is `ExternalAbort ExitCode = 105` [`errext/exitcodes/codes.go:41`]. Toolchain / dependency context: `go 1.21` [`go.mod:3`], `toolchain go1.21.13` [`go.mod:5`]; test dependencies `github.com/stretchr/testify v1.9.0` [`go.mod:41`] and `go.uber.org/goleak v1.3.0` [`go.mod:49`]; `github.com/sirupsen/logrus v1.9.3` [`go.mod:37`] produces the `--verbose` log output quoted throughout. The race detector requires CGO plus a C compiler; the C compiler in this environment was verified with `gcc --version`, whose first line is:
+
+```
+gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0
+```
 
 ---
 
@@ -57,7 +61,7 @@ The window during which such a VU is kept alive is produced by `reserveVUsForGra
 ./k6 run --verbose oscillate.js
 ```
 
-Across the whole run the debug log contained **20× `"Start"`**, **19× `"Graceful stop"`**, and **0× `"Hard stop"`** — a non-interrupt ramp-down **never hard-stops**, which is exactly why the count of hard stops is `0`.
+Across the whole run the debug log contained **20x `"Start"`**, **19x `"Graceful stop"`**, and **0x `"Hard stop"`**. This Q1 run produced **0 hard stops** because every VU's `sleep(5)` iteration completed within the `30s` `gracefulRampDown` reserve, so each ramped-down VU reached `stopped` on its own before the reserve shrank. This is **not** a general guarantee for the executor: `maxAllowedVUsHandlerStrategy` *can* hard-stop VUs — it calls `rs.vuHandles[cur-1].hardStop()` once the reserved/max-allowed count itself shrinks [`lib/executor/ramping_vus.go:668-676`] (which would occur if an iteration outlived its `gracefulRampDown` window).
 
 The lifecycle of VU 1 shows the lingering `toGracefulStop → running` transition directly (verbatim):
 
@@ -102,7 +106,36 @@ The interrupt path is a two-stage abort. The **first** signal runs the `graceful
 
 Iteration cancellation is checked **only after `RunOnce` returns**, via a `select` on `case <-ctx.Done():` that returns `false` in `getIterationRunner` [`lib/executor/helpers.go:114-120`] (function defined at [`lib/executor/helpers.go:104`]). The max-duration deadline `maxEndTime := startTime.Add(regularDuration + gracefulStop)` is set in `getDurationContexts` [`lib/executor/helpers.go:172`] (function defined at [`lib/executor/helpers.go:168`]) — this governs the *natural* end plus `gracefulStop`; a manual interrupt cancels the parent context immediately, so this deadline is not what bounds a `ctrl+c`.
 
-**Observed evidence — Run A** (interruptible `sleep` iteration, `constant-vus`, `gracefulStop` `'60s'`): `SIGINT` was sent at `19:56:06.252` and the process exited at `19:56:06.283` → **latency 0.031 s** versus the configured **60 s**, with `K6_EXIT_CODE=105`.
+**Observed evidence — Run A** (interruptible `sleep` iteration, `constant-vus`, `gracefulStop` `'60s'`).
+
+Script that produced this run (`runA.js`):
+
+```
+import { sleep } from 'k6';
+
+export const options = {
+  scenarios: {
+    a: { executor: 'constant-vus', vus: 1, duration: '5m', gracefulStop: '60s' },
+  },
+};
+
+export default function () {
+  // One long iteration built from interruptible sleeps; prints a "tick" each second.
+  for (let tick = 1; ; tick++) {
+    console.info(`VU ${__VU} tick ${tick} @ ${new Date().toISOString()}`);
+    sleep(1); // interruptible: k6 cancels this on abort
+  }
+}
+```
+
+Command that produced this run (send `SIGINT` ~5 s in, then record the exit code and the send/exit timestamps used for the latency):
+
+```
+./k6 run runA.js & PID=$!
+sleep 5; SENT=$(date +%s.%N); kill -INT "$PID"; wait "$PID"; echo "K6_EXIT_CODE=$?"; EXITED=$(date +%s.%N)
+```
+
+Observed: `SIGINT` was sent at `19:56:06.252` and the process exited at `19:56:06.283` → **latency 0.031 s** versus the configured **60 s**, with `K6_EXIT_CODE=105`.
 
 Last VU console line before the interrupt (verbatim):
 
@@ -118,7 +151,33 @@ Abort line (verbatim):
 time="2026-07-01T19:56:06Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-**Observed evidence — Run B** (NON-cancelable 12 s busy-loop iteration, `gracefulStop` `'1s'`): `SIGINT` was sent at `19:57:08.635` and the process exited at `19:57:08.672` → **latency 0.035 s**, with `EXIT_CODE=105`. The `busy-iteration DONE` line **never printed** (k6 exited during the busy loop); the abort message was identical to Run A.
+**Observed evidence — Run B** (NON-cancelable 12 s busy-loop iteration, `gracefulStop` `'1s'`).
+
+Script that produced this run (`runB.js`):
+
+```
+export const options = {
+  scenarios: {
+    b: { executor: 'constant-vus', vus: 1, duration: '5m', gracefulStop: '1s' },
+  },
+};
+
+export default function () {
+  // A single NON-cancelable iteration: a 12s busy loop that ignores context cancellation.
+  const end = Date.now() + 12000;
+  while (Date.now() < end) { /* spin — not interruptible */ }
+  console.info('busy-iteration DONE');
+}
+```
+
+Command that produced this run (send `SIGINT` during the busy loop, then record the exit code and the send/exit timestamps used for the latency):
+
+```
+./k6 run runB.js & PID=$!
+sleep 3; SENT=$(date +%s.%N); kill -INT "$PID"; wait "$PID"; echo "EXIT_CODE=$?"; EXITED=$(date +%s.%N)
+```
+
+Observed: `SIGINT` was sent at `19:57:08.635` and the process exited at `19:57:08.672` → **latency 0.035 s**, with `EXIT_CODE=105`. The `busy-iteration DONE` line **never printed** (k6 exited during the busy loop); the abort message was identical to Run A.
 
 **Claim ↔ evidence.**
 
@@ -146,7 +205,13 @@ Per-segment striping is seeded by `index = lib.NewSegmentedIndex(et)` [`lib/exec
 
 Ramping to a peak of 10, the per-segment `vus_max` values were **4, 3, 3** for segments `0:1/3`, `1/3:2/3`, `2/3:1` respectively, while the **global `vus_max` = 10** (`4+3+3 = 10` — the first segment gets the round-up extra).
 
-Aligning the per-second `vus` time-series across the three instances, the **maximum simultaneous sum across segments = 9** (≤ 10); e.g. at `20:00:01` the three instances read `[4,3,2] = 9`. There is **no true overflow**.
+Aligning the per-second `vus` time-series across the three instances, the **maximum simultaneous sum across segments = 9** (≤ 10). The peak aligned per-second sample (verbatim, `instance-0,instance-1,instance-2`) was:
+
+```
+20:00:01 -> [4,3,2]=9
+```
+
+There is **no true overflow**.
 
 A `constant-vus` sweep of the sum of per-segment `vus_max` against the global `N` (verbatim):
 
@@ -156,7 +221,19 @@ N=1→[1,0,0]=1; N=2→[1,1,0]=2; N=4→[2,1,1]=4; N=5→[2,2,1]=5; N=7→[3,2,2
 
 Every sum **exactly equals `N`** — the per-segment maxes always sum to the global maximum.
 
-The invariant is corroborated by the test `TestSumRandomSegmentSequenceMatchesNoSegment` [`lib/executor/ramping_vus_test.go:1112`], which **passes** under the race detector (all 10 random subtests PASS).
+The invariant is corroborated by the test `TestSumRandomSegmentSequenceMatchesNoSegment` [`lib/executor/ramping_vus_test.go:1112`], run under the race detector with:
+
+```
+go test -race -run '^TestSumRandomSegmentSequenceMatchesNoSegment$' -v ./lib/executor/
+```
+
+which **passes** — verbatim markers (all 10 random subtests `random00`…`random09` also PASS):
+
+```
+--- PASS: TestSumRandomSegmentSequenceMatchesNoSegment (0.00s)
+PASS
+ok  	go.k6.io/k6/lib/executor	2.838s
+```
 
 **Claim ↔ evidence.**
 
@@ -217,7 +294,7 @@ The only real concurrency is between the handler goroutine(s) and each VU's own 
 1. A ramp-down calls `gracefulStop()` on the highest-indexed active VU handle → `running → toGracefulStop` [`lib/executor/vu_handle.go:147-161`], logging `"Graceful stop"` — this is the `:53` line for VU 1 in Q1.
 2. The VU's `runLoopsIfPossible` loop observes `toGracefulStop` on its slow path, cancels its context, and transitions to `stopped` [`lib/executor/vu_handle.go:185-263`; table row `| loop | toGracefulStop | stopped |` at `lib/executor/vu_handle.go:24-55`].
 3. An arriving ramp-up calls `start()`; finding the handle in `toGracefulStop`, it transitions **back to `running`** — "we raced with the loop stopping, just continue" [`lib/executor/vu_handle.go:37`] (the `start` method begins at [`lib/executor/vu_handle.go:115`]), logging `"Start"` — this is the `:54` line for VU 1 in Q1.
-4. A `hardStop()` — issued **only** by `maxAllowedVUsHandlerStrategy` once the reserve itself shrinks [`lib/executor/ramping_vus.go:668-676`] — forces `toHardStop` and cancels the context [`lib/executor/vu_handle.go:165-181`]. In the Q1 non-interrupt run this path is not exercised (0× `"Hard stop"`), consistent with "a graceful ramp-down never hard-stops".
+4. A `hardStop()` — issued **only** by `maxAllowedVUsHandlerStrategy` once the reserve itself shrinks [`lib/executor/ramping_vus.go:668-676`] — forces `toHardStop` and cancels the context [`lib/executor/vu_handle.go:165-181`]. In the specific Q1 run this path was **not exercised (0x `"Hard stop"`)** because each `sleep(5)` iteration finished within the `gracefulRampDown` reserve; in general, however, this is precisely the path by which the executor *does* hard-stop ramped-down VUs when the reserved/max-allowed count shrinks.
 
 **Claim ↔ evidence.**
 
@@ -229,24 +306,35 @@ Named symbols exercised in this section: `scheduledVUsHandlerStrategy`, `maxAllo
 
 ---
 
-## Coverage pass
+## 8. Named-items sweep
 
-| # | Item to cover | Where answered | Grounding |
-|---|---------------|----------------|-----------|
-| 1 | Symptom: "stuck" VU | Q1 | `toGracefulStop` [`lib/executor/vu_handle.go:16-22`] + VU-1 `:53`/`:54` log lines |
-| 2 | Symptom: handler-count mismatch | Q2 | `vus` vs `vus_max` block; strategies [`ramping_vus.go:678-689`, `:668-676`] |
-| 3 | Symptom: interrupt outruns `gracefulStop` | Q3 | **contradicted**; Run A `0.031 s` vs `60 s`, Run B `0.035 s` |
-| 4 | Symptom: segment skew | Q4 | `vus_max = 4, 3, 3`; sweep `N=10→[4,3,3]=10` |
-| 5 | Symptom: sum-over-max | Q4 | aligned max sum `= 9 (≤10)`; every sweep sum `= N` |
-| 6 | Symptom: race vs leak | Q5 | `--- PASS` + no `WARNING: DATA RACE`; 1:1 `getVU`/`returnVU` |
-| 7 | Deliverable: simultaneous-modification trace | Q6 | serial dispatch [`ramping_vus.go:620-642`, `:549-558`] + mutex/atomic [`vu_handle.go:115-181`] |
-| 8 | Functions: `scheduledVUsHandlerStrategy`, `maxAllowedVUsHandlerStrategy`, `iterateSteps`, `runRemainingGracefulSteps`, `reserveVUsForGracefulRampDowns`, `getRawExecutionSteps`, `NewSegmentedIndex`, `Scale`, `GetPlannedVU`, `ReturnVU`, `ModCurrentlyActiveVUsCount`, `runLoopsIfPossible`, `start`/`gracefulStop`/`hardStop`, `getIterationRunner`, `getDurationContexts`, `GetGracefulStop` | Q1–Q6 | each cited at `file:line` in-section |
-| 9 | States: `stopped`, `starting`, `running`, `toGracefulStop`, `toHardStop` | Q1, Q6 | [`lib/executor/vu_handle.go:16-22`] |
-| 10 | Flags/config: `--verbose`, `--execution-segment`, `--execution-segment-sequence`, `gracefulStop`, `gracefulRampDown`, `startVUs`, `stages` | Q1, Q3, Q4 | in-section |
-| 11 | Signals: `os.Interrupt`, `syscall.SIGINT`, `syscall.SIGTERM` | Q3 | [`cmd/common.go:101`] |
-| 12 | Literals: `30s` defaults (`GracefulRampDown`, `gracefulStop`), exit code `105`, version `v0.55.0` | Q1, Q3, preamble | [`ramping_vus.go:52`], [`base_config.go:20`], [`codes.go:41`], [`consts.go:12`] |
-| 13 | Accuracy nuance: goleak only in `cmd/tests/tests.go`, not under `lib/` | Q5 | [`cmd/tests/tests.go:10,57`] |
-| 14 | Nuance: `maxEndTime` at `helpers.go:172` (def at `:168`) | Q3 | [`lib/executor/helpers.go:172`] |
-| 15 | Read-only scope affirmed | Preamble | repository unchanged apart from this file; temp scripts removed |
+Every concrete item the question names — each mechanism, function, state, handler, condition, file, flag/config key, signal, and literal — enumerated by name with where it is addressed and its `file:line` grounding.
+
+| Category | Named items (each addressed by name) | Where | Grounding |
+|----------|--------------------------------------|-------|-----------|
+| Functions / methods | `scheduledVUsHandlerStrategy`, `maxAllowedVUsHandlerStrategy`, `iterateSteps`, `runRemainingGracefulSteps`, `reserveVUsForGracefulRampDowns`, `getRawExecutionSteps`, `NewSegmentedIndex`, `Scale`, `GetPlannedVU`, `ReturnVU`, `ModCurrentlyActiveVUsCount`, `AddInitializedVU`, `runLoopsIfPossible`, `start`, `gracefulStop`, `hardStop`, `getIterationRunner`, `getDurationContexts`, `GetGracefulStop` | Q1–Q6 | each cited at `file:line` in-section |
+| VU states | `stopped`, `starting`, `running`, `toGracefulStop`, `toHardStop` | Q1, Q6 | [`lib/executor/vu_handle.go:16-22`] |
+| Handlers / goroutines | the two "handlers" (scheduled vs max-allowed); serialized `iterateSteps` dispatch; lone `runRemainingGracefulSteps` goroutine | Q2, Q5, Q6 | [`ramping_vus.go:620-642`, `:549-558`, `:668-689`] |
+| VU buffer | `ExecutionState` pool; 1:1 `getVU`/`returnVU` pairing | Q5 | [`lib/execution.go:471`, `:544`], [`ramping_vus.go:595-606`] |
+| Flags / config keys | `--verbose`, `--execution-segment`, `--execution-segment-sequence`, `gracefulStop`, `gracefulRampDown`, `startVUs`, `stages` | Q1, Q3, Q4 | in-section |
+| Signals | `os.Interrupt`, `syscall.SIGINT`, `syscall.SIGTERM` | Q3 | [`cmd/common.go:101`] |
+| Literals / defaults | `GracefulRampDown` `30s`; `gracefulStop` default `30s`; exit code `105`; version `v0.55.0`; C compiler `gcc … 15.2.0` | Q1, Q3, preamble | [`ramping_vus.go:52`], [`base_config.go:20`], [`codes.go:41`], [`consts.go:12`] |
+| Files consulted (read-only) | `ramping_vus.go`, `vu_handle.go`, `base_config.go`, `helpers.go`, `execution.go`, `execution_segment.go`, `execution/scheduler.go`, `cmd/run.go`, `cmd/common.go`, `ramping_vus_test.go`, `vu_handle_test.go` | Q1–Q6 | cited in-section |
+| Accuracy nuances | goleak used only in `cmd/tests/tests.go` (not under `lib/`); `maxEndTime` at `lib/executor/helpers.go:172` (def `:168`); `maxAllowedVUsHandlerStrategy` *can* `hardStop` when the reserve shrinks | Q5, Q3, Q1/Q6 | [`cmd/tests/tests.go:10,57`], [`lib/executor/helpers.go:172`], [`lib/executor/ramping_vus.go:668-676`] |
+
+## 9. Coverage-pass checklist
+
+Explicit confirmation that every sub-question, the central deliverable, and the governing constraints are covered:
+
+- [x] **Q1 — "stuck" VU** answered as `toGracefulStop`; grounded in the state list [`lib/executor/vu_handle.go:16-22`] and the VU-1 `:53`/`:54` log lines.
+- [x] **Q2 — handler-count mismatch** answered as by-design `vus` vs `vus_max`; strategies [`ramping_vus.go:678-689`, `:668-676`] plus the observed `vus`/`vus_max` block.
+- [x] **Q3 — interrupt vs `gracefulStop`** answered, with the user's expectation explicitly **contradicted** and reported as-observed: Run A `0.031 s` vs `60 s`, `K6_EXIT_CODE=105`; Run B `0.035 s`, `EXIT_CODE=105` — each with adjacent command/script provenance.
+- [x] **Q4 — segment skew** answered: the first segment gets the round-up extra (`vus_max = 4, 3, 3`; sweep `N=10→[4,3,3]=10`).
+- [x] **Q4 — sum-over-max** answered: no true simultaneous overflow (aligned `20:00:01 -> [4,3,2]=9`; every sweep sum `= N`; `--- PASS: TestSumRandomSegmentSequenceMatchesNoSegment`).
+- [x] **Q5 — race vs leak** answered: no data race (`--- PASS`, no `WARNING: DATA RACE`) and no VU-buffer leak (1:1 `getVU`/`returnVU`); goleak-scope nuance stated.
+- [x] **Q6 — simultaneous-modification trace** delivered: serialized dispatch [`ramping_vus.go:620-642`, `:549-558`] + mutex/atomic per-VU guards [`vu_handle.go:115-181`].
+- [x] **Every named item** (functions, states, handlers, VU buffer, flags/config, signals, literals, files, nuances) swept by name in §8, each grounded at `file:line`.
+- [x] **Run-first evidence**: each behavioral claim is paired with the verbatim observed line and the command/script that produced it.
+- [x] **Read-only scope**: repository byte-for-byte unchanged apart from this document; temporary scripts removed.
 
 **Read-only scope note (restated).** No existing source file in the repository was modified, and no code was added other than this answer document. Temporary observation scripts were used and then removed, leaving the repository byte-for-byte unchanged apart from this single Markdown file at `blitzy/documentation/k6_ddc3b0b1d23c.md`.
