@@ -21,7 +21,7 @@ Each of the five sub-parts of the question is answered explicitly below, every c
 
 All findings were produced by **building and running** the code at this commit, not by reading alone.
 
-- **Repo / commit:** working tree at `HEAD = ddc3b0b1d23c128e34e2792fc9075f9126e32375`; module `go.k6.io/k6` (`go.mod:1`), which declares `go 1.21` (`go.mod:3`) and `toolchain go1.21.13` (`go.mod:4`).
+- **Repo / commit under investigation:** the source under investigation is commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (`ddc3b0b1d23c`). The delivered branch adds only this answer document on top of that commit — `git diff --name-status ddc3b0b1d23c HEAD` reports exactly `A  blitzy/documentation/k6_ddc3b0b1d23c.md` (no source file differs), so every source `file:line` cited below is valid and byte-identical at both revisions. The module is `go.k6.io/k6` (`go.mod:1`), which declares `go 1.21` (`go.mod:3`) and `toolchain go1.21.13` (`go.mod:5`).
 - **Toolchain used:** `go1.23.12` (installed at `/usr/local/go`), `gcc 15.2.0` (required by the CGO-based `-race` detector), dependencies consumed from the vendored tree (`GOFLAGS=-mod=vendor`, fully offline; `GOPROXY=off`).
 - **Build command** (binary intentionally built *outside* the repository so the working tree stays clean):
 
@@ -30,13 +30,13 @@ All findings were produced by **building and running** the code at this commit, 
   go build -o /tmp/k6bin .
   ```
 
-- **Observed version string** (verbatim from `/tmp/k6bin version`):
+- **Observed version string.** k6 stamps the commit into its version string from Go's build metadata: `FullVersion()` reads the `vcs.revision` build setting and keeps its first 10 characters (`commitLen := 10` at `lib/consts/consts.go:31`; `commit = s.Value[:commitLen]` at `consts.go:35`), then formats `"%s (commit/%s, %s)"` (`consts.go:52`) with `Version = "0.55.0"` (`consts.go:12`). Building the **commit under investigation** (`ddc3b0b1d23c…`, whose embedded `vcs.revision` is that full hash) therefore produces, verbatim from `/tmp/k6bin version`:
 
   ```text
   k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
   ```
 
-  The important facts are `v0.55.0`, `commit/ddc3b0b1d2` (matches the target commit prefix `ddc3b0b1d23c`), `go1.23.12`, `linux/amd64`. The basename reads `k6bin` (not `k6`) purely because k6 derives its self-name from `os.Args[0]` and the binary was built to the path `/tmp/k6bin`; this is a cosmetic artifact, not a version discrepancy.
+  Here `ddc3b0b1d2` is exactly the first 10 characters of the target commit `ddc3b0b1d23c…`. The `commit/…` field simply reflects whichever commit is built: this branch adds only the answer document on top of the source commit (no source file changes), so building a later commit on the branch reports that commit's 10-character prefix instead — for example the doc-only commit `46e149114…` yields `commit/46e149114e` — while `v0.55.0`, `go1.23.12`, and `linux/amd64` stay unchanged and the investigated source is byte-identical (`git diff --name-status ddc3b0b1d23c HEAD` shows only the added document). The basename reads `k6bin` (not `k6`) purely because k6 derives its self-name from `os.Args[0]` and the binary was built to the path `/tmp/k6bin`; this is a cosmetic artifact, not a version discrepancy.
 
 Every command in this document is re-runnable; the exact command precedes each output block so a reviewer can reproduce it.
 
@@ -85,7 +85,7 @@ The file documents every legal transition in a state-transition table written as
 | grace | running         | toGracefulStop    | normal one, the actual work is in the loop        |
 ```
 
-Reading the relevant rows: the `gracefulStop()` method moves a `running` VU to `toGracefulStop` (`vu_handle.go:159-160`), and the VU's own run loop later moves `toGracefulStop → stopped` after the in-flight iteration ends. So a VU sitting in `toGracefulStop` is *draining*, not wedged.
+Reading the relevant rows: the `gracefulStop()` method moves a `running` VU to `toGracefulStop` (`vu_handle.go:157-158`), and the VU's own run loop later moves `toGracefulStop → stopped` after the in-flight iteration ends. So a VU sitting in `toGracefulStop` is *draining*, not wedged.
 
 The methods that drive these transitions are all present and mutex-guarded:
 
@@ -189,9 +189,9 @@ wrapped with `exitcodes.ExternalAbort` and `errext.AbortedByUser`, then calls `l
 **Duration contexts — `lib/executor/helpers.go`.** `getDurationContexts(...)` (`helpers.go:168`) computes `maxEndTime := startTime.Add(regularDuration + gracefulStop)` (`helpers.go:172`), then `maxDurationCtx, maxDurationCancel = context.WithDeadline(parentCtx, maxEndTime)` (`helpers.go:174`) and `regDurationCtx, _ = context.WithDeadline(maxDurationCtx, startTime.Add(regularDuration))` (`helpers.go:178`). Crucially, its comment explains the abort short-circuit (verbatim, `helpers.go:165-167`):
 
 ```text
-// If the whole test is aborted, the parent context will be cancelled, so
-// that will also cancel these contexts, thus the "general abort" case is
-// handled transparently.
+//   - If the whole test is aborted, the parent context will be cancelled, so
+//     that will also cancel these contexts, thus the "general abort" case is
+//     handled transparently.
 ```
 
 Ctrl+C cancels an **ancestor** of `maxDurationCtx`, so the whole `regDurationCtx → maxDurationCtx → parent` deadline chain is short-circuited immediately — the `gracefulStop`-derived deadline (`regularDuration + gracefulStop`) never gets a chance to be the governing bound.
@@ -260,7 +260,7 @@ In `lib/execution_segment.go` (`package lib`):
   ```
 
 - The underlying striping math lives in `ExecutionSegmentSequenceWrapper.ScaleInt64(segmentIndex int, value int64) int64` (`execution_segment.go:580`).
-- The iterator helper `SegmentedIndex` (`execution_segment.go:768`) carries an explicit thread-safety note in the comment immediately preceding it (verbatim, `execution_segment.go:761-763`):
+- The iterator helper `SegmentedIndex` (`execution_segment.go:768`) carries an explicit thread-safety note in the comment immediately preceding it (verbatim, `execution_segment.go:762-764`):
 
   ```text
   // SegmentedIndex is an iterator that returns both the scaled and the unscaled
@@ -487,7 +487,7 @@ Confirming each distinct ask is addressed:
 
 - **The `gracefulStop` overrun was explained, not timed.** We did **not** exhibit a single iteration provably outliving `gracefulStop` under Ctrl+C, because the reproduction used cooperative `sleep()`, which cancels promptly (VUs dropped `3/3 → 0/3` within one second and the process exited well under the `1s` `gracefulStop`). The "overrun" for non-cooperative work is grounded in the context-cancellation code (`helpers.go:165-174`, `cmd/run.go:349-357`) and corroborated by the maintainer note in issue #2149, but it is an inference from the code path rather than a measured timing.
 - **Line numbers are from the `ddc3b0b1d23c` checkout.** They were verified against this exact commit. If a reviewer opens a different revision, the numbers may drift; re-open the file to pin exact lines before quoting surrounding code.
-- **The built binary self-reports basename `k6bin`.** It was built to `/tmp/k6bin`, and k6 derives its name from `os.Args[0]`; this is cosmetic, not a version discrepancy (the version is `v0.55.0`, `commit/ddc3b0b1d2`, `go1.23.12`, `linux/amd64`).
+- **The built binary self-reports basename `k6bin`, and its embedded `commit/…` depends on the built revision.** It was built to `/tmp/k6bin`, and k6 derives its name from `os.Args[0]`; that basename is cosmetic. The version fields `v0.55.0`, `go1.23.12`, and `linux/amd64` are identical regardless of revision, while the `commit/…` field is the first 10 characters of the built git `HEAD` (`consts.go:31`, `consts.go:35`): it is `commit/ddc3b0b1d2` when building the commit under investigation and reflects a later branch commit's prefix (e.g. `commit/46e149114e` for the doc-only commit `46e149114`) when building the branch tip, which changes only this document. Neither is a version discrepancy.
 - **Run-to-run timing values vary.** The race-suite elapsed time (`~7.06s`) and the segment-test elapsed time (`~0.004s`) fluctuate between runs; the SIGINT timestamp is wall-clock. The invariants that carry the conclusions are stable: `sum == maxVUs`, `DATA RACE occurrences: 0`, and exit code `105`.
 - **Scope was read-only.** No existing source file was modified; the only repository change is this document. Temporary observation programs were written outside the repo (`/tmp/ramp.js`, `/tmp/ramp_long.js`, `/tmp/k6bin`) or deleted from it (the segment test), and `git status --porcelain` was confirmed to report only this new file.
 
