@@ -61,11 +61,12 @@ $ go list ./... | wc -l
 The repository's canonical test target is:
 
 ```makefile
-tests: ## Run unit tests
+## tests: Executes any unit tests.
+tests:
 	go test -race -timeout 210s ./...
 ```
 
-(`Makefile:L28-L29`), aggregated under `check: lint tests` (`Makefile:L32`).
+(`Makefile:L27-L29`), aggregated under `check: lint tests` (`Makefile:L32`).
 
 For this investigation the suite was run as `go test -timeout 600s -json ./...` — the `-race` flag was omitted for speed and `-json` was added so the structured event stream could be parsed for exact pass/fail/skip counts. (The environmental-failure conclusions below hold under both invocations.)
 
@@ -103,7 +104,7 @@ FAIL	go.k6.io/k6/lib/executor	22.081s
 
 > **Remediation is out of scope** for this read-only Q&A. Each failure is *diagnosed* below and classified as **environmental**. The crux: **the sandbox clock is set in the future** — every error timestamp reads `2026/07/01` — so the embedded test certificates are outside their validity window, which is exactly why the TLS/OCSP suites fail. None of these is a genuine logic defect; the project's CI policy is a 100 % pass rate on properly-dated runners.
 
-**(1) gRPC TLS — `go.k6.io/k6/js/modules/k6/grpc`.** The failing test is `TestClient_TlsParameters` (`js/modules/k6/grpc/client_test.go:L1151`) and its subtests (e.g. `ConnectTls`, `ConnectTlsInvokeSuccess`, `ConnectTlsEncryptedKey`). Verbatim error fragments:
+**(1) gRPC TLS — `go.k6.io/k6/js/modules/k6/grpc`.** The failing test is `TestClient_TlsParameters` (`js/modules/k6/grpc/client_test.go:L1151`) and its subtests (e.g. `ConnectTls`, `ConnectTlsInvokeSuccess`, `ConnectTlsEncryptedKey`); the `GoError` surfaces via the `assert.NoError(t, err)` assertion in the shared test helper (`js/modules/k6/grpc/helpers_test.go:L19`). Verbatim error fragments:
 
 ```text
 2026/07/01 04:02:18 http: TLS handshake error from 127.0.0.1:57224: remote error: tls: bad certificate
@@ -112,7 +113,7 @@ GoError: context deadline exceeded: connection error: desc = "transport: authent
 
 Root cause: the embedded `"Acme Co"` test CA / server certificate cannot be verified because the sandbox clock places "now" past its validity window — an **expired-certificate / clock-skew** condition, not a gRPC code defect.
 
-**(2) HTTP OCSP — `go.k6.io/k6/js/modules/k6/http`.** The failing subtest is `TestRequestAndBatchTLS/ocsp_stapled_good` (parent `TestRequestAndBatchTLS` at `js/modules/k6/http/request_test.go:L2053`; the `ocsp_stapled_good` case at `js/modules/k6/http/request_test.go:L2192`). Verbatim:
+**(2) HTTP OCSP — `go.k6.io/k6/js/modules/k6/http`.** The failing subtest is `TestRequestAndBatchTLS/ocsp_stapled_good` (parent `TestRequestAndBatchTLS` at `js/modules/k6/http/request_test.go:L2053`; the `ocsp_stapled_good` case at `js/modules/k6/http/request_test.go:L2192`). The error is thrown by the injected JS and caught by the Go assertion at `js/modules/k6/http/request_test.go:L2206-L2208` — the `throw new Error("wrong ocsp stapled response status: " + res.ocsp.status)` is constructed at `L2206` and surfaces via `assert.NoError(t, err)` at `L2208`. Verbatim:
 
 ```text
 Error: wrong ocsp stapled response status: unknown at <eval>:3:58(22)
@@ -120,7 +121,7 @@ Error: wrong ocsp stapled response status: unknown at <eval>:3:58(22)
 
 Tellingly, the **sibling subtest passes** — `--- PASS: TestRequestAndBatchTLS/cert_expired (0.10s)` (`js/modules/k6/http/request_test.go:L2056`) — which is the expected behavior for a time-sensitive OCSP fixture under a future clock: the "good" stapled response is read as `unknown` because its validity window has lapsed.
 
-**(3) Executor timing — `go.k6.io/k6/lib/executor`.** The failing test is `TestConstantArrivalRateRunCorrectTiming` (`lib/executor/constant_arrival_rate_test.go:L111`); the assertion that trips is a sub-millisecond timing tolerance:
+**(3) Executor timing — `go.k6.io/k6/lib/executor`.** The failing test is `TestConstantArrivalRateRunCorrectTiming` (`lib/executor/constant_arrival_rate_test.go:L111`); the assertion that trips is the `assert.WithinDuration(...)` timing check at `lib/executor/constant_arrival_rate_test.go:L185` (span `L183-L189`), whose `time.Millisecond*24` bound (`L188`) is the invariant `allowed is 24ms` tolerance and whose `"%d expectedTime %s"` message (`L189`) produces the quoted failure:
 
 ```text
 Max difference between ... allowed is 24ms, but difference was -55.373854ms  Messages: 1 expectedTime 20ms
@@ -188,7 +189,7 @@ func (u *ActiveVU) incrIteration() {
 }
 ```
 
-(`js/runner.go:L904-L905`). This index backs the `__ITER` value exposed to the script and the `iter` tag on that iteration's samples (`js/runner.go:L755-L756`). Its purpose is **per-VU identity/tagging**, not reporting.
+(`js/runner.go:L904-L905`). This index backs two things. First, the `__ITER` value exposed to the script — set right after the increment at `js/runner.go:L755-L756` (`u.incrIteration()` then `u.Runtime.Set("__ITER", u.iteration)`). Second, the `iter` **system tag** on that iteration's samples — set later, inside `runFn`, at `js/runner.go:L829-L831` (`tagsAndMeta.SetSystemTagOrMeta(metrics.TagIter, …)`) from `u.state.Iteration`, the field that `incrIteration` updates at `js/runner.go:L906` (`u.state.Iteration = u.iteration`). Its purpose is **per-VU identity/tagging**, not reporting.
 
 **(ii) The `iterations` Counter metric** — at the end of a completed default-function iteration, `iterationSamples()` (`js/runner.go:L879-L902`) emits a sample with `Value: 1` for the built-in `Iterations` counter:
 
@@ -274,14 +275,14 @@ The type registered for each metric (§2.3) determines how its sink aggregates:
 | **Rate** | Tracks how frequently a non-zero value occurs | (custom rate metrics) |
 | **Trend** | Computes statistics — min / max / mean / percentiles | `iteration_duration`, `http_req_duration` |
 
-This four-type model is confirmed by the official Grafana k6 documentation, which states that counters sum values, gauges track the smallest/largest/latest, rates track how frequently a non-zero value occurs, and trends calculate statistics such as mean and percentiles (grafana.com/docs/k6 — *Metrics*). The docs also confirm that an aggregated summary of all built-in and custom metrics is written to stdout at the end of a test — which is precisely the output R3 captures. The primary grounding remains the source (`metrics/builtin.go`, `metrics/sink.go`); the docs are cited only as external corroboration. Consistent with the docs' note that custom metrics are collected from VU threads at the *end* of an iteration, k6 emits `iterationSamples()` only **after** the iteration function returns (`js/runner.go:L871`).
+This four-type model is confirmed by the official Grafana k6 documentation, which states that counters sum values, gauges track the smallest/largest/latest, rates track how frequently a non-zero value occurs, and trends calculate statistics such as mean and percentiles (grafana.com/docs/k6 — *Metrics*). The docs also confirm that an aggregated summary of all built-in and custom metrics is written to stdout at the end of a test — which is precisely the output R3 captures. The primary grounding remains the source (`metrics/builtin.go`, `metrics/sink.go`); the docs are cited only as external corroboration. At the source level the emission *timing* differs by origin: a **custom** sample is pushed the moment `Metric.add()` runs *during* the iteration (`js/modules/k6/metrics/metrics.go:L118-L127`), whereas the built-in `iterations` / `iteration_duration` samples are pushed at **iteration end**, after the default function returns (`js/runner.go:L871`). Both nonetheless travel through the same `state.Samples` channel and the same ingestion path (traced in R3 §3.3).
 
 
 ---
 
 ## R3 — End-to-End Metric-Collection Flow
 
-> **Direct answer:** For a script that runs 3 iterations and increments a custom `Counter` once per iteration, k6 collects the metric like this: `cmd/run.go` creates the shared samples channel and starts the output manager and scheduler on it → the scheduler drives executors → each executor calls `vu.RunOnce()` → `RunOnce` runs the JS default function via the event loop → on iteration end the runner pushes the built-in `Iterations` (and `IterationDuration`) samples, while `myCounter.add(1)` pushes the custom sample — **both through the same `u.state.Samples` channel** → the output manager drains the channel and flushes every 50 ms → the metrics-engine ingester adds each sample to its type sink (`CounterSink.Add` / `TrendSink.Add`) → the end-of-test summary renders the sink values. The observed result: `iterations` and `my_counter` each **summed to 3**.
+> **Direct answer:** For a script that runs 3 iterations and increments a custom `Counter` once per iteration, k6 collects the metric like this: `cmd/run.go` creates the shared samples channel and starts the output manager and scheduler on it → the scheduler drives executors → each executor calls `vu.RunOnce()` → `RunOnce` runs the JS default function via the event loop (during which `myCounter.add(1)` pushes its custom sample) → at iteration end the runner pushes the built-in `Iterations` (and `IterationDuration`) samples — **the custom and built-in samples travel through the same `u.state.Samples` channel** → the output manager drains the channel and flushes every 50 ms → the metrics-engine ingester adds each sample to its type sink (`CounterSink.Add` / `TrendSink.Add`) → the end-of-test summary renders the sink values. The observed result: `iterations` and `my_counter` each **summed to 3**.
 
 ### 3.1 The simple test script
 
@@ -354,7 +355,7 @@ graph TD
 - **Producer/consumer channel pipeline:** the `metrics.SampleContainer` channel (`cmd/run.go:L227`) sits between VUs (producers) and the output manager (consumer), decoupling the VU hot path from metric egress.
 - **Strategy-per-type sink:** the ingester's single call `m.Sink.Add(sample)` (`metrics/engine/ingester.go:L90`) dispatches to `CounterSink` / `GaugeSink` / `TrendSink` / `RateSink` without the engine knowing the concrete type.
 - **Periodic flushing:** reusable `PeriodicFlusher` cadences — 50 ms to outputs (`output/manager.go:L12`), 2 s for thresholds (`metrics/engine/engine.go:L21`), 1 s for the VU gauges (`execution/scheduler.go:L231`).
-- **The unifying insight:** built-in and custom metrics share **one** channel and **one** ingestion path; custom metrics are emitted **only at iteration end**, exactly as the built-in `iterationSamples` are.
+- **The unifying insight:** built-in and custom metrics share **one** channel (`u.state.Samples`) and **one** downstream ingestion path — they differ only in *when* and *where* they are emitted: a **custom** sample is pushed when `Metric.add()` executes *during* the iteration (`js/modules/k6/metrics/metrics.go:L118-L127`, driven by the JS run at `js/runner.go:L840-L843`), whereas the built-in `iterations` / `iteration_duration` samples are pushed at **iteration end** (`js/runner.go:L871`).
 
 
 ---
@@ -376,7 +377,7 @@ go list ./... | wc -l                        # 82
 
 # Run the test suite (structured JSON stream, parsed for counts)
 go test -timeout 600s -json ./...            # exit 1, ~78s
-                                             # canonical repo target: go test -race -timeout 210s ./...  (Makefile:L28-L29)
+                                             # canonical repo target: go test -race -timeout 210s ./...  (Makefile:L27-L29)
 
 # Isolation re-runs proving the marginal failures are flakes (they pass alone)
 go test -count=1 -run '^TestConstantArrivalRateRunCorrectTiming$' ./lib/executor/
