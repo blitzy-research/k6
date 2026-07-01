@@ -20,25 +20,39 @@ source file was modified — all test scripts and helper binaries lived under
 
 ### Build provenance
 
-The k6 binary under test was compiled from source with the exact toolchain
-pinned in `go.mod` (`toolchain go1.21.13`). Reproduction commands:
+The k6 binary under test was compiled from source with the Go toolchain of the
+build environment, **Go 1.23.10**, under `GOTOOLCHAIN=local`. Note that `go.mod`
+declares `toolchain go1.21.13`; with `GOTOOLCHAIN=local` the `go` command uses
+the locally installed 1.23.10 instead of fetching the pinned version. The k6
+source is byte-identical regardless of which of these toolchains compiles it, so
+the observed runtime behavior (R1–R5) is unaffected — only the
+`runtime.Version()` token embedded in the version string differs (see
+`lib/consts/consts.go`, where `FullVersion()` derives the Go token from
+`runtime.Version()` and the commit token from the build's `vcs.revision`).
+Because the version string's commit token is the git `HEAD` at build time, the
+binary is built from a clean checkout at the source commit
+`ddc3b0b1d23c128e34e2792fc9075f9126e32375` so that `commit/ddc3b0b1d2` is stamped
+in. Reproduction commands:
 
 ```
-# Install Go 1.21.13 (matches go.mod `toolchain go1.21.13`)
-curl -sSL -o /tmp/go1.21.13.tar.gz https://dl.google.com/go/go1.21.13.linux-amd64.tar.gz
-tar -C /usr/local -xzf /tmp/go1.21.13.tar.gz
-export PATH=$PATH:/usr/local/go/bin
+# Go 1.23.10 is the build toolchain (GOTOOLCHAIN=local; go.mod pins
+# toolchain go1.21.13, but the local toolchain is used — k6 behavior is identical).
+go version                       # -> go version go1.23.10 linux/amd64
 
-# Build k6 from the repo root (vendor mode; make build wraps `go build`)
-export GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=vendor
+# Build from a clean checkout at the source commit so the version string embeds
+# commit/ddc3b0b1d2 (vendor mode, fully offline; `make build` wraps `go build`).
+git checkout ddc3b0b1d23c128e34e2792fc9075f9126e32375
+export GOFLAGS=-mod=vendor GOPROXY=off
 go build -o /tmp/k6bin .
 ```
 
-Verified binary identity:
+Verified binary identity (the version-string prefix is the output binary's
+basename, `k6bin`; the commit token is the source commit; the Go token is the
+build toolchain reported by `runtime.Version()`):
 
 ```
 $ /tmp/k6bin version
-k6bin v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
+k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)
 ```
 
 ### Read-only guarantee
@@ -55,16 +69,18 @@ commit, so the diff from the source commit to that commit is precisely
 
 ### Environment caveat (applies to R3 & R4)
 
-The observation host had ~3.8 GB RAM and no swap, and `/usr/bin/time -v` was
+The observation host had ~3.8 TiB RAM and no swap, and `/usr/bin/time -v` was
 unavailable, so **peak memory was sampled from `/proc/<pid>/status` `VmHWM`**.
 Consequently:
 
 - **R3**: the number of iterations that complete within the capacity window (and
   therefore the exact drop count) is **timing-dependent**; the invariant is
   `dropped = requested_total − completed`.
-- **R4**: the dataset was sized to `N=25000` (a 50k-row × 100-VU plain array
-  would OOM on this host). The **qualitative** behavior (constant vs. linear
-  growth) is identical and is the point being demonstrated.
+- **R4**: the dataset was sized to `N=25000` rows — a bounded size held identical
+  across the SharedArray and plain-array scripts so the two are directly
+  comparable. The reported RSS figures are approximate (`VmHWM` sampling) and
+  drift a few MB run-to-run; the **qualitative** behavior (constant vs. linear
+  growth) is what is being demonstrated and is independent of `N`.
 
 ---
 
@@ -117,7 +133,7 @@ SIGINT was delivered at ≈ t=8 s, while all 8 VUs were mid-`sleep(30)`:
 `-v` is **required** — the signal-response lines are `level=debug`:
 
 ```
-level=debug msg="k6 version: v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)"
+level=debug msg="k6 version: v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)"
      execution: local
      scenarios: (100.00%) 1 scenario, 8 max VUs, 1m34s max duration (incl. graceful stop):
               * ramp: Up to 8 looping VUs for 1m4s over 2 stages (gracefulRampDown: 30s, gracefulStop: 30s)
@@ -135,7 +151,7 @@ level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 Measured (reported exactly):
 
 - **Exit code = 105.**
-- **Elapsed from SIGINT to process exit ≈ 0.030 s** (the 30-second sleeps did
+- **Elapsed from SIGINT to process exit ≈ 0.032 s** (the 30-second sleeps did
   **not** run to completion).
 - Pre-signal footer: `running (0m07.0s), 8/8 VUs, 0 complete and 0 interrupted iterations`
   (all 8 VUs active).
@@ -277,11 +293,11 @@ with `-mod=mod` (per the Makefile's `grpc-server-run` target) to
 only 30 ms to finish, forcing cancellation (sample for `vuNum=4`, repeated per VU):
 
 ```
-time="2026-07-01T02:50:30Z" level=debug msg="Graceful stop" executor=ramping-vus scenario=server_streaming vuNum=4
-time="2026-07-01T02:50:31Z" level=debug msg="Hard stop" executor=ramping-vus scenario=server_streaming vuNum=4
-time="2026-07-01T02:50:31Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
-time="2026-07-01T02:50:31Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
-time="2026-07-01T02:50:31Z" level=info msg="STREAM_ERROR {\"code\":2,\"details\":[],\"message\":\"canceled by client (k6)\"}" source=console
+time="2026-07-01T09:00:57Z" level=debug msg="Graceful stop" executor=ramping-vus scenario=server_streaming vuNum=4
+time="2026-07-01T09:00:57Z" level=debug msg="Hard stop" executor=ramping-vus scenario=server_streaming vuNum=4
+time="2026-07-01T09:00:57Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-01T09:00:57Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-01T09:00:57Z" level=info msg="STREAM_ERROR {\"code\":2,\"details\":[],\"message\":\"canceled by client (k6)\"}" source=console
 ```
 
 A few VUs also logged variant console errors such as
@@ -294,9 +310,9 @@ these are observed variation, but the canonical cancellation cause is
 
 ```
 running (3.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
-     grpc_streams.................: 5      1.240288/s
-     grpc_streams_msgs_received...: 150    37.208626/s
-     grpc_streams_msgs_sent.......: 5      1.240288/s
+     grpc_streams.................: 5      1.240301/s
+     grpc_streams_msgs_received...: 150    37.20904/s
+     grpc_streams_msgs_sent.......: 5      1.240301/s
 running (4.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
 ```
 
@@ -346,7 +362,7 @@ Scenario line observed:
   cancelled (`js/modules/k6/grpc/stream.go:201`, cause defined at
   `lib/netext/grpcext/stream.go:29`).
 - **Value of gRPC messages received in the final summary:**
-  **`grpc_streams_msgs_received = 150`** (rate `37.208626/s`). This is 5 streams ×
+  **`grpc_streams_msgs_received = 150`** (rate `37.20904/s`). This is 5 streams ×
   ~30 features each received before the 30 ms ramp-down cancelled them (the server
   sends one feature per 100 ms — `service.go:62-63`). The counter is still
   reported in the summary even though the footer shows
@@ -409,16 +425,16 @@ came from the API, not the summary):
 ```
 $ curl -sS -D - http://localhost:6565/v1/metrics
 HTTP/1.1 200 OK
-Date: Wed, 01 Jul 2026 02:52:11 GMT
-Content-Length: 1073
+Date: Wed, 01 Jul 2026 09:15:14 GMT
+Content-Length: 1067
 Content-Type: text/plain; charset=utf-8
 
-{"data":[ ... ,{"type":"metrics","id":"iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":18,"rate":4.498179416983674}}},{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":982,"rate":245.4006770821093}}}]}
+{"data":[ ... ,{"type":"metrics","id":"iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":15,"rate":4.9950137408532305}}},{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":985,"rate":328.00590231602877}}}]}
 ```
 
 The single-metric endpoint was also confirmed:
 `curl -sS -D - http://localhost:6565/v1/metrics/dropped_iterations` →
-`HTTP/1.1 200 OK`, `Content-Length: 169`, `sample.count = 982`.
+`HTTP/1.1 200 OK`, `Content-Length: 170`, `sample.count = 985`.
 
 **Server-side proof the API was hit** (from the k6 `-v` log):
 
@@ -429,9 +445,9 @@ level=debug msg="The test is done, but --linger was enabled, so k6 is waiting fo
 ```
 
 For contrast, the end-of-test summary printed the same value
-(`dropped_iterations...: 982 245.400677/s`) with footer
-`running (04.0s), 0/5 VUs, 18 complete and 0 interrupted iterations` and progress
-`over_capacity ✗ … 0018/1000 shared iters` — but the **reported value comes from
+(`dropped_iterations...: 985 328.005902/s`) with footer
+`running (03.0s), 0/5 VUs, 15 complete and 0 interrupted iterations` and progress
+`over_capacity ✗ … 0015/1000 shared iters` — but the **reported value comes from
 the API query above**, as the user required.
 
 ### 5. Source citations
@@ -450,25 +466,26 @@ the API query above**, as the user required.
 
 ### 6. Reasoned answer
 
-- **Exact `dropped_iterations` value:** **`982`** (rate `245.4006770821093`). The
-  scenario requested 1000 iterations but only **18** could complete within the
+- **Exact `dropped_iterations` value:** **`985`** (rate `328.00590231602877`). The
+  scenario requested 1000 iterations but only **15** could complete within the
   `maxDuration: '3s'` capacity (5 VUs × `sleep(1)`), so
-  `dropped_iterations = 1000 − 18 = 982` (`lib/executor/shared_iterations.go:218-226`).
+  `dropped_iterations = 1000 − 15 = 985` (`lib/executor/shared_iterations.go:218-226`).
   **This value is timing-dependent** — a run that completes a slightly different
   number of iterations yields `1000 − completed`; the invariant is
-  `dropped = requested_total − completed`.
+  `dropped = requested_total − completed`. (In this environment the completed
+  count was a stable **15** across repeated runs, giving `985` every time.)
 - **Reported by querying the API (proof):** yes — the value was read from
   `GET http://localhost:6565/v1/metrics`, which returned **`HTTP/1.1 200 OK`** and
   the JSON:API object
-  `{"type":"metrics","id":"dropped_iterations",…"sample":{"count":982,…}}`
+  `{"type":"metrics","id":"dropped_iterations",…"sample":{"count":985,…}}`
   (`api/v1/metric_routes.go:9-24`, `api/v1/routes.go:23`). The k6 server log
   independently confirms `GET /v1/metrics status=200`. `--linger` kept the API
   alive so the recorded value could be fetched after the test ended.
 
 ### 7. Coverage checklist (R3)
 
-- [x] Exact `dropped_iterations = 982` reported.
-- [x] Derived from an over-capacity run (`1000 − 18`).
+- [x] Exact `dropped_iterations = 985` reported.
+- [x] Derived from an over-capacity run (`1000 − 15`).
 - [x] Obtained via REST API (`GET /v1/metrics`, `HTTP/1.1 200 OK`, JSON:API body).
 - [x] Runtime proof of the API query (server-side `status=200` log + `curl -D -` headers).
 - [x] Timing-dependence noted (`dropped = requested_total − completed`).
@@ -587,9 +604,9 @@ for V in 1 50 100; do ./measure.sh r4_plain.js  $V r4_plain_$V.log;  done
 
 | VUs | SharedArray peak RSS | Plain per-VU array peak RSS |
 |-----|----------------------|-----------------------------|
-| 1   | **79 MB** (81808 KB) | **70 MB** (72288 KB)        |
-| 50  | **87 MB** (90108 KB) | **1167 MB** (1195704 KB)    |
-| 100 | **90 MB** (92312 KB) | **2306 MB** (2362060 KB)    |
+| 1   | **83 MB** (84760 KB) | **80 MB** (82144 KB)        |
+| 50  | **88 MB** (90104 KB) | **1212 MB** (1240840 KB)    |
+| 100 | **89 MB** (91148 KB) | **2307 MB** (2362104 KB)    |
 
 k6 run confirmations, e.g. for the SharedArray script each run logged the marker
 exactly once and reported the expected iteration counts:
@@ -597,7 +614,7 @@ exactly once and reported the expected iteration counts:
 ```
 # r4_shared.js VUS=50
 level=info msg="R4_MARKER: SharedArray constructor building dataset ONCE" source=console
-     iterations...........: 150 49.970637/s
+     iterations...........: 150 49.966521/s
      vus..................: 50  min=50      max=50
 ```
 
@@ -607,7 +624,7 @@ level=info msg="R4_MARKER: SharedArray constructor building dataset ONCE" source
 level=info msg="R4_MARKER: SharedArray constructor invoked — building dataset" source=console
      scenarios: (100.00%) 1 scenario, 10 max VUs, 10m30s max duration (incl. graceful stop):
               * s: 50 iterations shared among 10 VUs (maxDuration: 10m0s, gracefulStop: 30s)
-     iterations...........: 50  935.578795/s
+     iterations...........: 50  967.538989/s
 running (00m00.1s), 00/10 VUs, 50 complete and 0 interrupted iterations
 ```
 
@@ -646,10 +663,10 @@ across all 10 VUs and 50 iterations).
 ### 6. Reasoned answer
 
 - **Constant or per-VU copy?** With `SharedArray`, the footprint is **essentially
-  constant** — **79 → 87 → 90 MB** from 1 → 50 → 100 VUs (only **+11 MB** total).
+  constant** — **83 → 88 → 89 MB** from 1 → 50 → 100 VUs (only **+6 MB** total).
   With a plain module-level array, memory grows **linearly** —
-  **70 → 1167 → 2306 MB**, i.e. **~22.6 MB per additional VU**
-  (`(2306 − 70) / 99`). So the plain array is **copied per VU**, while
+  **80 → 1212 → 2307 MB**, i.e. **~22.5 MB per additional VU**
+  (`(2307 − 80) / 99`). So the plain array is **copied per VU**, while
   `SharedArray` is **not**.
 - **Test-script output proof:** the RSS matrix above, plus the marker logged
   **exactly once** across 10 VUs / 50 iterations (`grep -c` = 1) — the dataset is
@@ -734,21 +751,21 @@ completed `iterations: 40`.
 
 ```
 mock remote-write receiver listening on :9090 (POST /api/v1/write)
-POST #1 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=311
-  NEW __name__=k6_my_custom_trend_p99
+POST #1 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=304
   NEW __name__=k6_my_custom_gauge
   NEW __name__=k6_my_custom_rate_rate
-  NEW __name__=k6_vus
   NEW __name__=k6_data_sent_total
-  NEW __name__=k6_my_custom_counter_total
-  NEW __name__=k6_vus_max
   NEW __name__=k6_data_received_total
+  NEW __name__=k6_vus_max
+  NEW __name__=k6_my_custom_counter_total
+  NEW __name__=k6_my_custom_trend_p99
   NEW __name__=k6_iteration_duration_p99
   NEW __name__=k6_iterations_total
-POST #2 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=310
-POST #3 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=305
-POST #4 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=314
-POST #5 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=206
+  NEW __name__=k6_vus
+POST #2 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=317
+POST #3 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=309
+POST #4 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=312
+POST #5 path=/api/v1/write Content-Encoding="snappy" Content-Type="application/x-protobuf" X-Prometheus-Remote-Write-Version="0.1.0" User-Agent="k6-prometheus-rw-output" bodyBytes=203
 ==== FINAL UNIQUE __name__ SET (10) ====
 NAME k6_data_received_total
 NAME k6_data_sent_total
@@ -847,9 +864,9 @@ Every distinct sub-question of R1–R5 is answered, as summarized below.
 | R1 | Finish vs. mid-execution termination | `0 complete and 8 interrupted`; exit 105; ~0.03 s |
 | R2 | Exact interruption log entries | `Graceful stop`→`Hard stop`→`stream is cancelled/finished`→`is closing`→`STREAM_ERROR` |
 | R2 | gRPC messages received value | `grpc_streams_msgs_received = 150` |
-| R3 | Exact `dropped_iterations` | `982` (1000 − 18) |
+| R3 | Exact `dropped_iterations` | `985` (1000 − 15) |
 | R3 | Proof it came from the API | `GET /v1/metrics` → `HTTP/1.1 200 OK` + JSON:API body; server `status=200` log |
-| R4 | Constant vs. per-VU copy | SharedArray 79→90 MB (constant) vs. plain 70→2306 MB (linear) |
+| R4 | Constant vs. per-VU copy | SharedArray 83→89 MB (constant) vs. plain 80→2307 MB (linear) |
 | R4 | Root cause | shared name-keyed store + read-only wrapper vs. per-VU JS runtime (shared-nothing) |
 | R5 | Name-integrity proof | 10 decoded `__name__` labels; `k6_` + name + type-suffix, no mangling |
 
