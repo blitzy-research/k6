@@ -656,7 +656,9 @@ across all 10 VUs and 50 iterations).
   the **same** `sharedArray` value (`sharedArray: s`, line 28) via
   `rt.NewDynamicArray(...)` — no copy of the backing slice is made.
 - `js/modules/k6/data/share.go:36-42` — `Set` (line 37) and `SetLen` (line 41)
-  both `panic("SharedArray is immutable")`, enforcing read-only access.
+  both `panic(s.rt.NewTypeError("SharedArray is immutable"))` (specifically a JS
+  `TypeError`, per the source's own "this is specifically a type error" comment),
+  enforcing read-only access.
 - `js/modules/k6/data/share.go:44-48` — `Get` reads element `s.arr[index]`
   (line 48) from the shared slice.
 
