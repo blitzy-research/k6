@@ -8,7 +8,7 @@ k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 
 Every answer below is grounded in **two** kinds of evidence: (1) *observed output* captured from a real build-and-run of that binary against a **local** HTTP server (no internet dependency), quoted verbatim; and (2) *exact source citations* given as `` `file:line` `` references verified against the repository at commit `ddc3b0b1d2`. Where a value is something the question asks for (a metric name, a unit, a status code, an exit code, a config key), it is quoted literally rather than paraphrased.
 
-### Question decomposition
+## Question decomposition
 
 The prompt decomposes into six distinct sub-questions, each answered in its own section:
 
@@ -243,7 +243,7 @@ k6 run <script.js>
 
 The observed invocation for the demonstration was `k6 run single_get.js`.
 
-- The `run` subcommand is constructed by `getCmdRun` at `cmd/run.go:462`. Its Cobra command is declared with `Use: "run"` at `cmd/run.go:491` and `Short: "Start a test"` at `cmd/run.go:492`, and it accepts **exactly one** positional argument — the path to the script:
+- The `run` subcommand is constructed by `getCmdRun` at `cmd/run.go:462`. Its Cobra command is declared with `Use: "run"` at `cmd/run.go:491` and `Short: "Start a test"` at `cmd/run.go:492`, and it accepts **exactly one** positional argument — the path to the script — enforced by the Cobra `Args` validator at `cmd/run.go:498`:
 
   ```go
   func getCmdRun(gs *state.GlobalState) *cobra.Command {
@@ -252,6 +252,12 @@ The observed invocation for the demonstration was `k6 run single_get.js`.
   runCmd := &cobra.Command{
       Use:   "run",
       Short: "Start a test",
+  ```
+
+  The one-positional-argument rule is the `Args` field, quoted verbatim from `cmd/run.go:498`:
+
+  ```go
+  Args:    exactArgsWithMsg(1, "arg should either be \"-\", if reading script from stdin, or a path to a script file"),
   ```
 
 - The program entrypoint is `main.go`, whose `main()` calls `cmd.Execute()` (`main.go:8-9`), which wires up the command tree that includes `run`.
@@ -289,7 +295,13 @@ Two mechanisms exist when you *do* want to configure a run:
   WebDashboard  null.Bool `json:"webDashboard" envconfig:"K6_WEB_DASHBOARD"`
   ```
 
-  Other commonly used `K6_*` variables include `K6_NO_SUMMARY`, `K6_VUS`, `K6_ITERATIONS`, and `K6_DURATION`.
+  Other commonly used `K6_*` variables — each grounded in source — include `K6_NO_SUMMARY` (read via `saveBoolFromEnv(environment, "K6_NO_SUMMARY", &opts.NoSummary)` at `cmd/runtime_options.go:94`), and `K6_VUS`, `K6_DURATION`, and `K6_ITERATIONS` (declared as envconfig-bound option fields at `lib/options.go:234-236`):
+
+  ```go
+  VUs        null.Int           `json:"vus" envconfig:"K6_VUS"`
+  Duration   types.NullDuration `json:"duration" envconfig:"K6_DURATION"`
+  Iterations null.Int           `json:"iterations" envconfig:"K6_ITERATIONS"`
+  ```
 
 **Confirming `-e` works.** The demonstration injected a variable and had the script log it back:
 
@@ -385,10 +397,17 @@ Yes — k6 validates the script before and at initialization, and returns **dist
 
 ### (a) No callable `default` export → exit `104` (`InvalidConfig`)
 
-Script `no_default.js` containing only `export function foo() {}` (no `default`):
+Script `no_default.js` containing only `export function foo() {}` (no `default`). Command (run from `/tmp/k6work/`, with exit-code capture):
+
+```bash
+/tmp/k6bin/k6 run no_default.js; echo "exit=$?"
+```
+
+Verbatim stderr, followed by the captured exit code:
 
 ```text
 time="2026-07-01T02:45:44Z" level=error msg="There were problems with the specified script configuration:\n\t- executor default: function 'default' not found in exports"
+exit=104
 ```
 
 Source: `cmd/config.go:287`:
@@ -399,10 +418,17 @@ return fmt.Errorf("executor %s: function '%s' not found in exports", conf.GetNam
 
 ### (b) Empty script (or non-function `default`) → exit `255`
 
-Empty script `empty.js`:
+Empty script `empty.js`. Command (run from `/tmp/k6work/`, with exit-code capture):
+
+```bash
+/tmp/k6bin/k6 run empty.js; echo "exit=$?"
+```
+
+Verbatim stderr, followed by the captured exit code:
 
 ```text
 time="2026-07-01T02:45:44Z" level=error msg="could not initialize 'empty.js': could not load JS test 'file:///tmp/k6work/empty.js': no exported functions in script"
+exit=255
 ```
 
 Source: `js/bundle.go:237-238`:
@@ -415,18 +441,34 @@ if len(b.callableExports) == 0 {
 
 ### (c) JavaScript syntax error → exit `107` (`ScriptException`)
 
-Script `syntax.js` with a deliberate syntax error:
+Script `syntax.js` with a deliberate syntax error. Command (run from `/tmp/k6work/`, with exit-code capture):
+
+```bash
+/tmp/k6bin/k6 run syntax.js; echo "exit=$?"
+```
+
+Verbatim stderr, followed by the captured exit code:
 
 ```text
 time="2026-07-01T02:45:44Z" level=error msg="GoError: file:///tmp/k6work/syntax.js: Line 1:34 Unexpected identifier (and 5 more errors)\n" hint="script exception"
+exit=107
 ```
+
+(The specific `Line 1:34` column and token reflect the exact contents of the deliberately-broken `syntax.js`; the deterministic, question-relevant fact is that any JavaScript parse error surfaces as a `GoError … script exception` and exit `107`.)
 
 ### (d) Missing file → exit `255`
 
-Running a path that does not exist:
+Running a path that does not exist. Command (run from `/tmp/k6work/`, with exit-code capture):
+
+```bash
+/tmp/k6bin/k6 run does_not_exist.js; echo "exit=$?"
+```
+
+Verbatim stderr, followed by the captured exit code:
 
 ```text
 time="2026-07-01T02:45:44Z" level=error msg="The moduleSpecifier \"does_not_exist.js\" couldn't be found on local disk. Make sure that you've specified the right path to the file. If you're running k6 using the Docker image make sure you have mounted the local directory (-v /local/path/:/inside/docker/path) containing your script and modules so that they're accessible by k6 from inside of the container, see https://grafana.com/docs/k6/latest/using-k6/modules/#using-local-modules-with-docker."
+exit=255
 ```
 
 ### (e) Threshold breach → exit `99` (`ThresholdsHaveFailed`)
@@ -437,10 +479,17 @@ Adding an impossible threshold to the script's options, e.g.:
 export const options = { thresholds: { http_req_duration: ['p(95)<0.0001'] } };
 ```
 
-makes the summary mark the metric with a `✗`, and k6 exits `99` with stderr:
+makes the summary mark the metric with a `✗`, and k6 exits `99`. The demonstration ran a `threshold_fail.js` (a single `http.get(...)` plus the impossible threshold shown above). Command (run from `/tmp/k6work/`, with exit-code capture):
+
+```bash
+/tmp/k6bin/k6 run threshold_fail.js; echo "exit=$?"
+```
+
+Verbatim stderr, followed by the captured exit code:
 
 ```text
 level=error msg="thresholds on metrics 'http_req_duration' have been crossed"
+exit=99
 ```
 
 ### Exit-code enumeration
@@ -531,7 +580,7 @@ Every sub-question is answered above:
 | Sub-question | Answered in section | Key grounded evidence |
 |--------------|---------------------|-----------------------|
 | **O1** — How to test a single HTTP request | [O1](#o1--testing-a-single-http-request-minimal-workflow) | `examples/http_get.js:1-5`; `http.get` → `GET` at `js/modules/k6/http/http.go:71`; `README.md:55-83` |
-| **O2** — Output (METRICS, UNITS, PROTOCOLS) | [O2](#o2--output-anatomy-metrics-units-protocols) | Verbatim end-of-test summary; metric types `metrics/builtin.go:80-109`; units `metrics/value_type.go:6-9` + `js/summary.js:134-150,204-207`; tags `metrics/system_tag.go:47-49`, `transport.go:118/143`, `response.go:61`, `response_callback.go:12-13`; observed `proto=HTTP/1.0`, `565.62µs`, `1.1ms`, `193 B`, `818.294445/s`, `100.00%` |
+| **O2** — Output (METRICS, UNITS, PROTOCOLS) | [O2](#o2--output-anatomy-metrics-units-protocols) | Verbatim end-of-test summary; metric types `metrics/builtin.go:80-109`; units `metrics/value_type.go:6-9` + `js/summary.js:134-150,204-207`; tags `metrics/system_tag.go:47-49`, `lib/netext/httpext/transport.go:118/143`, `lib/netext/httpext/response.go:61`, `js/modules/k6/http/response_callback.go:12-13`; observed `proto=HTTP/1.0`, `565.62µs`, `1.1ms`, `193 B`, `818.294445/s`, `100.00%` |
 | **O3** — The run command | [O3](#o3--the-run-command) | `k6 run <script.js>`; `cmd/run.go:462/491/492`; `main.go:8-9` |
 | **O4** — Configuration / env vars | [O4](#o4--configuration--environment-variables) | None required (defaults 1 VU / 1 iteration); `-e`/`--env` at `cmd/runtime_options.go:32`; `K6_*` at `cmd/config.go:45-48`; verbatim `injected TARGET=...` log line |
 | **O5** — External files | [O5](#o5--external-files) | `output: -` (none by default); `--out json/csv` → verbatim `result.json` JSON-lines + 19-column `result.csv`; `output/json/json.go:156`, `output/json/wrapper.go:27`, `output/csv/output.go:212`; `handleSummary()` via `cmd/run.go:508/518` |
