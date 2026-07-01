@@ -2,8 +2,8 @@
 
 **Codebase:** `go.k6.io/k6` (module declared at `go.mod:1`)
 **Version under test:** `const Version = "0.55.0"` — `lib/consts/consts.go:12`
-**Binary built for this investigation self-reports:** `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`
-**Repository HEAD:** `ddc3b0b1d23c128e34e2792fc9075f9126e32375`
+**Source commit under investigation:** `ddc3b0b1d23c128e34e2792fc9075f9126e32375` — every k6 source file cited below is read at this commit, and the run-first build was performed against it. A binary built from this exact source tree self-reports `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`; `commit/ddc3b0b1d2` is this commit's own hash truncated to 10 characters.
+**Delivered documentation branch HEAD:** `ef05fa4fbe4ca99475ea360b105f758f10650077` — the branch HEAD *after* this answer document is committed on top of the source commit (and advanced again by any later correction to this file). Every such commit adds **only** `blitzy/documentation/k6_ddc3b0b1d23c.md` and changes **no** source code, so a binary rebuilt at this HEAD self-reports the same version with a different embedded commit (`commit/ef05fa4fbe`) and byte-for-byte identical behaviour. Because the `commit/` field simply mirrors the git commit built (see [Build and version check](#build-and-version-check)), the source commit above — not the moving branch HEAD — is the authoritative anchor for the version self-report quoted throughout this document.
 
 This document was written **run-first**: the k6 binary was built from the vendored
 sources in this repository, a set of conflicting configurations was executed, and the
@@ -17,8 +17,10 @@ this build is treated as authoritative** and the disagreement is called out expl
 
 The binary under test was built **from the vendored sources** with the exact command
 below — this is the run-first build step referenced above. `go build` prints nothing on
-success (exit `0`); `/tmp/k6bin version` then prints the self-report that is quoted
-throughout this document:
+success (exit `0`); `/tmp/k6bin version` then prints the self-report. The self-report
+quoted throughout this document is the one produced at the **source commit under
+investigation** (the state of every source file cited below); the delivered-branch build is
+shown alongside it below so the two can be compared directly:
 
 **Build, then version check:**
 ```
@@ -26,9 +28,20 @@ GOTOOLCHAIN=local GOFLAGS=-mod=vendor CGO_ENABLED=0 go build -o /tmp/k6bin .
 /tmp/k6bin version
 ```
 
-**Observed (verbatim) — printed by `/tmp/k6bin version`, exit `0`:**
+**Observed (verbatim) at the source commit `ddc3b0b1d23c…` — printed by `/tmp/k6bin version`, exit `0`:**
 ```
 k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
+```
+
+This is the self-report quoted throughout the rest of this document, because it is the
+build of the exact source tree that every citation below refers to. Re-running the **same**
+build command from the delivered documentation branch — whose HEAD sits one or more
+docs-only commits ahead of the source commit — self-reports the identical version and
+toolchain but a different embedded commit hash:
+
+**Observed (verbatim) at delivered-branch HEAD `ef05fa4fbe…` — printed by `/tmp/k6bin version`, exit `0`:**
+```
+k6bin v0.55.0 (commit/ef05fa4fbe, go1.23.12, linux/amd64)
 ```
 
 **Why these flags, and what the output means:**
@@ -42,10 +55,17 @@ k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
   the binary's own name — `gs.BinaryName`, set to `filepath.Base(os.Executable())`
   (`cmd/state/state.go:101`, `:112`) and consumed at `cmd/root.go:45` — which is why building
   to `-o /tmp/k6bin` self-reports as `k6bin`, not `k6`.
-- `commit/ddc3b0b1d2` is `vcs.revision` truncated to its first 10 characters
-  (`lib/consts/consts.go:30-35`): the repository HEAD this document answers against,
-  `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (see **Repository HEAD** above). The build was
-  clean (`vcs.modified=false`), so no `-dirty` suffix is appended (`lib/consts/consts.go:48-50`).
+- The `commit/…` field is `vcs.revision` — the git commit at build time — truncated to its
+  first 10 characters (`lib/consts/consts.go:30-35`). Because `vcs.revision` is simply
+  whatever the build's `HEAD` points at, the field tracks the commit that was built, **not**
+  any change in behaviour: building the **source commit under investigation**
+  `ddc3b0b1d23c128e34e2792fc9075f9126e32375` yields `commit/ddc3b0b1d2`, while building the
+  **delivered documentation branch** (HEAD `ef05fa4fbe4ca99475ea360b105f758f10650077` — the
+  source commit plus docs-only commits that add only this file) yields `commit/ef05fa4fbe`.
+  Run `git rev-parse HEAD` to see the current value; it is always a docs-only descendant of
+  the source commit, so the two binaries are behaviourally identical. Each build here was
+  clean (`vcs.modified=false`), so no `-dirty` suffix is appended (`lib/consts/consts.go:48-50`)
+  — had the working tree carried uncommitted edits the hash would gain a `-dirty` suffix.
   `go1.23.12, linux/amd64` is `runtime.Version()` with `GOOS`/`GOARCH` (`lib/consts/consts.go:17`).
 
 ---
@@ -460,8 +480,8 @@ environment, file, or script after this point.
 
 ## 6. Proof — six real conflicting runs (A–F)
 
-All runs use the locally built `/tmp/k6bin` (`k6bin v0.55.0 (commit/ddc3b0b1d2,
-go1.23.12, linux/amd64)`; built exactly as shown in
+All runs use the locally built `/tmp/k6bin` (the source-commit build,
+`k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`; built exactly as shown in
 [Build and version check](#build-and-version-check) above) and are executed under a
 **clean environment** so ambient `K6_*` variables cannot leak in:
 
@@ -469,9 +489,14 @@ go1.23.12, linux/amd64)`; built exactly as shown in
 env -i HOME=/tmp/k6home PATH=/usr/bin:/bin /tmp/k6bin run <flags> <script>
 ```
 
-The exit code was captured for every run with `echo "EXIT=$?"`. Only timestamps and
-sub-second timings/rates vary between runs; banners, warnings, errors, and exit codes are
-reproduced **verbatim**.
+The exit code was captured for every run with `echo "EXIT=$?"`. Between repeat runs the
+`time="…"` timestamps and the sub-second timings/rates vary, and — for the concurrent
+multi-VU runs — the **relative order** in which the per-VU `VU=<n>` console lines are
+emitted is **nondeterministic** (the VUs execute in parallel, so no fixed print order is
+guaranteed; across repeat runs the five lines of Experiment A were observed in orders such
+as `VU=3,1,5,4,2`, `VU=5,2,4,1,3`, and `VU=4,5,3,2,1`). Each per-VU line is nonetheless
+identical modulo its `VU=<n>` prefix and the timestamp. Banners, warnings, errors, and exit
+codes are reproduced **verbatim**.
 
 > **Console-output note (logging artifact):** `console.log(...)` is emitted inside a
 > logrus record as the `msg="..."` field with a trailing `source=console`, so the JSON
@@ -730,8 +755,11 @@ reached `__ENV` but did **not** reach the option tier.
 
 **State explicitly:** the belief that "`-e` only sets `__ENV` and never options" holds
 **only** when `--include-system-env-vars=false`; it does **not** hold for a default
-`k6 run`. (For completeness, `archive`/`cloud`/`inspect` build their flag set with
-`runtimeOptionFlagSet(false)`, where `-e` does not set options.)
+`k6 run`. (For completeness, the `archive` (`cmd/archive.go:63`), `cloud`
+(`cmd/cloud.go:336`), `cloud upload` (`cmd/cloud_upload.go:66`), and `inspect`
+(`cmd/inspect.go:53`) commands build their flag set with `runtimeOptionFlagSet(false)`,
+where `-e` does **not** set options — in contrast to `k6 run`'s
+`runtimeOptionFlagSet(true)` at `cmd/run.go:441`.)
 
 
 ---
