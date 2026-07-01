@@ -1,10 +1,12 @@
 # k6 — Behavior When Exercising a Single HTTP Request
 
-This document answers, in a grounded and reproducible way, **how the [k6](https://grafana.com/docs/k6/latest/) load-testing tool behaves when it exercises a single HTTP request**. The system under study is **k6 v0.55.0, commit `ddc3b0b1d2`**, built from this repository (`go.k6.io/k6`) with **Go 1.23.12**. The built binary reports its identity verbatim as:
+This document answers, in a grounded and reproducible way, **how the [k6](https://grafana.com/docs/k6/latest/) load-testing tool behaves when it exercises a single HTTP request**. The system under study is the **k6 source at commit `ddc3b0b1d2`** (semantic version **k6 v0.55.0**), built from this repository (`go.k6.io/k6`) with **Go 1.23.12**. Built from that source commit, the binary reports its identity verbatim as:
 
 ```text
 k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
+
+> **Build-identity note — the `commit/…` label vs. the source commit.** The `commit/…` field is **build metadata that Go stamps from the git `HEAD` at build time**, not a property of the source snapshot: `FullVersion()` copies the first ten characters of the `vcs.revision` build setting [`lib/consts/consts.go:30-35`] into the `commit/<hash>` string [`lib/consts/consts.go:52`], and appends `-dirty` when the working tree has uncommitted changes [`lib/consts/consts.go:48-49`]. The verbatim identity above is what the binary prints when built from the **source commit `ddc3b0b1d2`** under study; the exact offline clone-and-build commands are in the [Reproduction appendix](#reproduction-appendix). Building instead from the delivered documentation branch's working copy stamps *that branch's* current `HEAD` — a different, evolving hash (for example `commit/32396bd430`, or with a `-dirty` suffix while this file is uncommitted) — because the branch adds only *this documentation file* on top of the source commit: `git diff --name-status ddc3b0b1d2..HEAD` returns only `A blitzy/documentation/k6_ddc3b0b1d23c.md`. The k6 **runtime source is therefore byte-for-byte identical** to `ddc3b0b1d2`, and every behavior documented below is unchanged regardless of which of the two builds produced the binary.
 
 Every answer below is grounded in **two** kinds of evidence: (1) *observed output* captured from a real build-and-run of that binary against a **local** HTTP server (no internet dependency), quoted verbatim; and (2) *exact source citations* given as `` `file:line` `` references verified against the repository at commit `ddc3b0b1d2`. Where a value is something the question asks for (a metric name, a unit, a status code, an exit code, a config key), it is quoted literally rather than paraphrased.
 
@@ -518,13 +520,29 @@ The observations above can be reproduced end-to-end as follows.
 
 ### Build
 
-The repository was compiled with **Go 1.23.12**. (`go.mod` declares `go 1.21` at `go.mod:3` and `toolchain go1.21.13` at `go.mod:5`; the project's CI and Docker images standardize on Go 1.23.x.) Dependencies are **vendored** (`vendor/` is present), so the build needs no network:
+The repository was compiled with **Go 1.23.12**. (`go.mod` declares `go 1.21` at `go.mod:3` and `toolchain go1.21.13` at `go.mod:5`; the project's CI and Docker images standardize on Go 1.23.x.) Dependencies are **vendored** (`vendor/` is present), so the build needs no network.
+
+The `commit/…` field in the version string is **Go's VCS stamp of the git `HEAD` at build time**, not a property of the source snapshot: `FullVersion()` copies the first ten characters of the `vcs.revision` build setting [`lib/consts/consts.go:30-35`] into the `commit/<hash>` string [`lib/consts/consts.go:52`], and appends `-dirty` when the working tree has uncommitted changes [`lib/consts/consts.go:48-49`]. To reproduce the **source-commit identity `commit/ddc3b0b1d2`** quoted at the top of this document — the identity of the k6 tree under study — build from a checkout whose `HEAD` *is* that commit. A standalone (non-worktree) clone does this offline:
 
 ```bash
-GOFLAGS=-mod=vendor go build -o /tmp/k6bin/k6 .
-/tmp/k6bin/k6 version
+# Reproduce the quoted source-commit identity (offline; hardlinked objects; real .git directory):
+git clone --local . /tmp/k6src && cd /tmp/k6src
+git checkout --detach ddc3b0b1d2
+GOFLAGS=-mod=vendor go build -o /tmp/k6src/k6 .
+/tmp/k6src/k6 version
 # => k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
+
+Building instead from the **delivered documentation branch's working copy** (i.e. `go build` at the repository root) stamps that branch's current `HEAD`. That hash differs from the source commit and evolves with each commit on the branch (and gains a `-dirty` suffix while this file is uncommitted), so it is shown below as a placeholder rather than a fixed value. The branch adds only this documentation file on top of the source commit — `git diff --name-status ddc3b0b1d2..HEAD` returns only `A blitzy/documentation/k6_ddc3b0b1d23c.md` — so the runtime source, and every behavior documented here, is identical; only the embedded label differs:
+
+```bash
+# Build from the delivered branch working copy (run at the repository root):
+GOFLAGS=-mod=vendor go build -o /tmp/k6bin/k6 .
+/tmp/k6bin/k6 version
+# => k6 v0.55.0 (commit/<HEAD>, go1.23.12, linux/amd64)   # <HEAD> = first 10 chars of `git rev-parse HEAD` (e.g. commit/32396bd430), plus "-dirty" if the tree is modified
+```
+
+A `git worktree`-based checkout of the source commit is **not** stamped by Go — a linked worktree's top-level `.git` is a gitdir-pointer file rather than a real directory — so it prints `k6 v0.55.0 (go1.23.12, linux/amd64)` with no `commit/…`; use a real clone as shown above.
 
 ### Local target (offline-safe)
 
