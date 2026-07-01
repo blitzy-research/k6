@@ -15,7 +15,7 @@ For each objective (O1–O5) a purpose-built temporary scenario was run against 
 
 **Question restated → Scenario/command run → Verbatim observed evidence → `file:line` grounding → Rationale → explicit named-item answer.**
 
-Deterministic facts (log strings, the `105`/`ExternalAbort` exit code, `15 complete and 5 interrupted iterations`, the final `dropped_iterations` total, the exported `__name__` formats) are stable across runs. Magnitude- and timing-dependent values (the O2 gRPC message count, the O3 mid-run drop snapshots, and the O4 memory figures) are reported as **observed in a representative run** with an explanation of how they arise; they are not universal constants.
+Deterministic facts (log strings, the `105`/`ExternalAbort` exit code, `15 complete and 5 interrupted iterations`, the exported `__name__` formats) are stable across runs. Magnitude- and timing-dependent values (the O2 gRPC message count, the O3 mid-run drop snapshots and its final `dropped_iterations` total, and the O4 memory figures) are reported as **observed in a representative run** with an explanation of how they arise; they are not universal constants.
 
 ---
 
@@ -187,7 +187,7 @@ time="2026-07-01T21:56:43Z" level=warning msg="Insufficient VUs, reached 2 activ
 
 **`file:line` grounding.** The metric name is `DroppedIterationsName = "dropped_iterations"` [`metrics/builtin.go:L10`], registered as a `Counter` [`metrics/builtin.go:L84`]. In the executor, `droppedIterationMetric := car.executionState.Test.BuiltinMetrics.DroppedIterations` [`lib/executor/constant_arrival_rate.go:L324`]; when the scheduler ticks (`case <-timer.C:` [`lib/executor/constant_arrival_rate.go:L331`]) and `TryRunIteration()` finds no free VU, a `dropped_iterations` sample with `Value: 1` [`lib/executor/constant_arrival_rate.go:L345`] is pushed, and once unplanned VUs are exhausted it warns `Warningf("Insufficient VUs, reached %d active VUs and cannot initialize more", maxVUs)` [`lib/executor/constant_arrival_rate.go:L352`].
 
-### Claim D — the final end-of-test summary value (deterministic for this config)
+### Claim D — the final end-of-test summary value (a stable, representative ≈981)
 
 Verbatim from the final summary:
 
@@ -195,13 +195,13 @@ Verbatim from the final summary:
      dropped_iterations...: 981 97.114972/s
 ```
 
-For this exact configuration (`rate: 100`, `duration: '10s'`, `maxVUs: 2`, `sleep(1)`) the final total is a stable **`981`** — the run schedules ~1000 iterations over 10s and completes only ~19 of them, dropping the remaining `981`. The mid-run API polls (284 / 490 / 686) are representative snapshots along the way toward that total.
+For this exact configuration (`rate: 100`, `duration: '10s'`, `maxVUs: 2`, `sleep(1)`) the final total is a stable, representative **`≈981`** — observed as **`980` or `981`** across repeated runs. The run schedules `1000` or `1001` iterations over 10s (the arrival-rate boundary slot at exactly `t=10.0 s` is sometimes emitted and sometimes not) and completes a consistent **`20`** of them, dropping the remaining **`980`–`981`**. The mid-run API polls (284 / 490 / 686) are representative snapshots along the way toward that total.
 
 **Related-behavior note (so this is not presented as unique to `constant-arrival-rate`).** The `dropped_iterations` counter is also emitted by the other capacity-bounded executors: `ramping-arrival-rate` [`lib/executor/ramping_arrival_rate.go:L472`], `shared-iterations` [`lib/executor/shared_iterations.go:L222`], and `per-vu-iterations` [`lib/executor/per_vu_iterations.go:L202`].
 
 ### Explicit answer (O3)
 
-Queried via `GET http://localhost:6565/v1/metrics/dropped_iterations`, the **`dropped_iterations`** value is read from `attributes.sample.count` (e.g. **`284`** at ~3 s mid-run). The proof it came from the API — not the terminal summary — is k6's own server-side log line `level=debug msg="GET /v1/metrics/dropped_iterations" status=200`. The final end-of-test total for this configuration is a deterministic **`981`**.
+Queried via `GET http://localhost:6565/v1/metrics/dropped_iterations`, the **`dropped_iterations`** value is read from `attributes.sample.count` (e.g. **`284`** at ~3 s mid-run). The proof it came from the API — not the terminal summary — is k6's own server-side log line `level=debug msg="GET /v1/metrics/dropped_iterations" status=200`. The final end-of-test total for this configuration is a stable, representative **`≈981`** — observed as **`980` or `981`** across repeated runs (completed iterations is consistently `20`; the total scheduled is `1000` or `1001` depending on arrival-rate boundary timing at `t=10.0 s`).
 
 ---
 
@@ -302,7 +302,7 @@ Every distinct sub-question and every named item is answered explicitly and by n
 - **O1(b) — finish vs. terminate:** answered — active VUs are **terminated mid-execution** (not allowed to finish), proven by `15 complete and 5 interrupted iterations` and grounded in `lib/executor/base_config.go:L95-96`.
 - **O2(a) — exact gRPC-streaming interrupt log entries:** provided verbatim (same two shutdown lines) with exit code **`105`**.
 - **O2(b) — `grpc_streams_msgs_received`:** provided from the final summary — **`220`** (representative), with the ×5-streams / 100 ms-interval derivation.
-- **O3 — `dropped_iterations` via the REST API:** value read from the `curl` JSON:API body `attributes.sample.count` (e.g. **`284`** mid-run); API-origin proof is k6's own `level=debug msg="GET /v1/metrics/dropped_iterations" status=200` log line; final end-of-test total **`981`**.
+- **O3 — `dropped_iterations` via the REST API:** value read from the `curl` JSON:API body `attributes.sample.count` (e.g. **`284`** mid-run); API-origin proof is k6's own `level=debug msg="GET /v1/metrics/dropped_iterations" status=200` log line; final end-of-test total a representative **`≈981`** (observed as **`980`–`981`** across runs).
 - **O4 — constant vs. per-VU copy:** answered — **constant** with `SharedArray`, **per-VU copy** otherwise (linear growth) — with the peak-RSS table and the **root cause** named and grounded (`js/modules/k6/data/data.go:L46,L56,L152-162`; `js/modules/k6/data/share.go:L44-58`).
 - **O5 — Prometheus name integrity:** exported `__name__` labels shown verbatim; prefix (`k6_`) + type/stat suffix behavior explained; **no mangling or truncation**; custom names intact.
 - **Attribution:** all findings are from `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`.
