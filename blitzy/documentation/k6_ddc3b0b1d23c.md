@@ -3,7 +3,7 @@
 **Codebase:** `go.k6.io/k6` (module declared at `go.mod:1`)
 **Version under test:** `const Version = "0.55.0"` — `lib/consts/consts.go:12`
 **Source commit under investigation:** `ddc3b0b1d23c128e34e2792fc9075f9126e32375` — every k6 source file cited below is read at this commit, and the run-first build was performed against it. A binary built from this exact source tree self-reports `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`; `commit/ddc3b0b1d2` is this commit's own hash truncated to 10 characters.
-**Delivered documentation branch HEAD:** `ef05fa4fbe4ca99475ea360b105f758f10650077` — the branch HEAD *after* this answer document is committed on top of the source commit (and advanced again by any later correction to this file). Every such commit adds **only** `blitzy/documentation/k6_ddc3b0b1d23c.md` and changes **no** source code, so a binary rebuilt at this HEAD self-reports the same version with a different embedded commit (`commit/ef05fa4fbe`) and byte-for-byte identical behaviour. Because the `commit/` field simply mirrors the git commit built (see [Build and version check](#build-and-version-check)), the source commit above — not the moving branch HEAD — is the authoritative anchor for the version self-report quoted throughout this document.
+**Delivered documentation branch HEAD:** a **moving target** — the branch HEAD *after* this answer document is committed on top of the source commit advances with every commit that touches this file (including any later correction to it). Every such commit adds or edits **only** `blitzy/documentation/k6_ddc3b0b1d23c.md` and changes **no** source code, so a binary rebuilt at the current HEAD self-reports the same version with a different embedded commit (`commit/<current-HEAD-prefix>`, i.e. whatever `git rev-parse HEAD` resolves to, truncated to 10 characters) and byte-for-byte identical behaviour. Because the `commit/` field simply mirrors the git commit built (see [Build and version check](#build-and-version-check)), the source commit above — not the moving branch HEAD — is the authoritative anchor for the version self-report quoted throughout this document.
 
 This document was written **run-first**: the k6 binary was built from the vendored
 sources in this repository, a set of conflicting configurations was executed, and the
@@ -19,8 +19,8 @@ The binary under test was built **from the vendored sources** with the exact com
 below — this is the run-first build step referenced above. `go build` prints nothing on
 success (exit `0`); `/tmp/k6bin version` then prints the self-report. The self-report
 quoted throughout this document is the one produced at the **source commit under
-investigation** (the state of every source file cited below); the delivered-branch build is
-shown alongside it below so the two can be compared directly:
+investigation** (the state of every source file cited below); how the embedded commit hash of
+a delivered-branch rebuild differs is explained below:
 
 **Build, then version check:**
 ```
@@ -37,12 +37,11 @@ This is the self-report quoted throughout the rest of this document, because it 
 build of the exact source tree that every citation below refers to. Re-running the **same**
 build command from the delivered documentation branch — whose HEAD sits one or more
 docs-only commits ahead of the source commit — self-reports the identical version and
-toolchain but a different embedded commit hash:
-
-**Observed (verbatim) at delivered-branch HEAD `ef05fa4fbe…` — printed by `/tmp/k6bin version`, exit `0`:**
-```
-k6bin v0.55.0 (commit/ef05fa4fbe, go1.23.12, linux/amd64)
-```
+toolchain but a different embedded commit hash. That hash is not a fixed literal: it simply
+mirrors whatever `git rev-parse HEAD` resolves to at build time, truncated to 10 characters
+(`lib/consts/consts.go:30-35`), so at any delivered-branch HEAD the `version` output reads
+`k6bin v0.55.0 (commit/<current-HEAD-prefix>, go1.23.12, linux/amd64)` — behaviourally
+identical to the source-commit build above because only this document changed.
 
 **Why these flags, and what the output means:**
 
@@ -60,8 +59,9 @@ k6bin v0.55.0 (commit/ef05fa4fbe, go1.23.12, linux/amd64)
   whatever the build's `HEAD` points at, the field tracks the commit that was built, **not**
   any change in behaviour: building the **source commit under investigation**
   `ddc3b0b1d23c128e34e2792fc9075f9126e32375` yields `commit/ddc3b0b1d2`, while building the
-  **delivered documentation branch** (HEAD `ef05fa4fbe4ca99475ea360b105f758f10650077` — the
-  source commit plus docs-only commits that add only this file) yields `commit/ef05fa4fbe`.
+  **delivered documentation branch** (whose HEAD is the source commit plus docs-only commits
+  that add or edit only this file) yields `commit/<current-HEAD-prefix>` — i.e. whatever
+  `git rev-parse HEAD` currently resolves to, truncated to 10 characters.
   Run `git rev-parse HEAD` to see the current value; it is always a docs-only descendant of
   the source commit, so the two binaries are behaviourally identical. Each build here was
   clean (`vcs.modified=false`), so no `-dirty` suffix is appended (`lib/consts/consts.go:48-50`)
@@ -306,13 +306,43 @@ flags.StringVarP(&gs.Flags.ConfigFilePath, "config", "c", gs.Flags.ConfigFilePat
 ```
 — `cmd/root.go:173`
 
-When no `--config` is given, the default path is `~/loadimpact/k6/config.json`, built from
-`defaultConfigFileName = "config.json"` (`cmd/state/state.go:20`) and the path join at
-`cmd/state/state.go:152`:
+When no `--config` is given, the default path is **`os.UserConfigDir()/loadimpact/k6/config.json`**
+— on Linux `~/.config/loadimpact/k6/config.json`, **not** `~/loadimpact/k6/config.json`. The path
+is built from `defaultConfigFileName = "config.json"` (`cmd/state/state.go:20`) and the join at
+`cmd/state/state.go:152`, whose first argument is a parameter **misleadingly named `homeDir`**
+(`cmd/state/state.go:148`) — it is *not* `$HOME`. That argument is populated from
+`os.UserConfigDir()` at `cmd/state/state.go:96` (falling back to the literal `".config"` at
+`cmd/state/state.go:98` only if that call errors) and passed in via `GetDefaultFlags(confDir)` at
+`cmd/state/state.go:106`:
 
 ```go
-const defaultConfigFileName = "config.json"                                       // cmd/state/state.go:20
+const defaultConfigFileName = "config.json"                                        // cmd/state/state.go:20
+confDir, err := os.UserConfigDir()                                                 // :96  (Linux: $XDG_CONFIG_HOME, else $HOME/.config)
+    confDir = ".config"                                                            // :98  (fallback only if os.UserConfigDir() errors)
+defaultFlags := GetDefaultFlags(confDir)                                           // :106 (confDir is passed as the homeDir arg)
+func GetDefaultFlags(homeDir string) GlobalFlags {                                 // :148 (param named homeDir, but receives confDir)
 ConfigFilePath: filepath.Join(homeDir, "loadimpact", "k6", defaultConfigFileName), // :152
+```
+
+Because `os.UserConfigDir()` returns `$XDG_CONFIG_HOME` when set and otherwise `$HOME/.config` on
+Linux — and never a bare `$HOME` on any platform (macOS `~/Library/Application Support`, Windows
+`%AppData%`) — the default config-file lookup honors `XDG_CONFIG_HOME`. Verified **run-first**
+(built binary `/tmp/k6bin`, empty script `b.js` = `export default function () {}`, config JSON
+`{"vus":9,"duration":"9s"}` — or `{"vus":11,"duration":"11s"}` for the XDG case):
+
+**Observed (verbatim) — a config file only takes effect at the `os.UserConfigDir()` path:**
+```
+# (a) at ~/loadimpact/k6/config.json — the WRONG path — the file is IGNORED (defaults win):
+env -i HOME=/tmp/k6home PATH=/usr/bin:/bin /tmp/k6bin run b.js
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+# (b) at ~/.config/loadimpact/k6/config.json — the ACTUAL path — the file IS read:
+env -i HOME=/tmp/k6home PATH=/usr/bin:/bin /tmp/k6bin run b.js
+              * default: 9 looping VUs for 9s (gracefulStop: 30s)
+
+# (c) with XDG_CONFIG_HOME=/tmp/k6xdg, config at $XDG_CONFIG_HOME/loadimpact/k6/config.json:
+env -i HOME=/tmp/k6home XDG_CONFIG_HOME=/tmp/k6xdg PATH=/usr/bin:/bin /tmp/k6bin run b.js
+              * default: 11 looping VUs for 11s (gracefulStop: 30s)
 ```
 
 It is overridable via the `K6_CONFIG` environment variable at `cmd/state/state.go:163`:
