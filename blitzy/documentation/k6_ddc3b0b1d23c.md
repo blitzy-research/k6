@@ -153,24 +153,74 @@ FAIL	go.k6.io/k6/js/modules/k6/grpc	65.690s
 
 So the two failing packages are **`go.k6.io/k6/js/modules/k6/http`** and **`go.k6.io/k6/js/modules/k6/grpc`**.
 
-### Root cause of the failures — expired test TLS certificates (reported, not fixed)
+### Root cause of the failures — TLS test-fixture drift (grpc) and an external OCSP dependency (http), *not* certificate expiry (reported, not fixed)
 
-Every failure is **TLS/certificate**‑related. Representative verbatim evidence from the `http` package's fresh run:
+Both failing packages are **TLS-related, but for two distinct and clock-independent reasons**. I traced each to its actual mechanism by re-running the failing subtests verbosely and decoding the certificates involved. **Neither failure is a certificate-expiry problem, and an earlier local clock would fix neither** — the certs in play are valid until the years **2084/3021**.
+
+**(1) `js/modules/k6/grpc` — a Go-toolchain test-fixture mismatch (`crypto/rsa: verification error`), not expiry.**
+
+All three failing gRPC subtests (`ConnectTls`, `ConnectTlsEncryptedKey`, `ConnectTlsInvokeSuccess`) fail with the *same* error — verbatim from a verbose re-run:
 
 ```
-2026/07/01 21:37:09 http: TLS handshake error from 127.0.0.1:56664: remote error: tls: bad certificate
+$ go test -mod=vendor -race -run 'TestClient_TlsParameters' ./js/modules/k6/grpc/
+    --- FAIL: TestClient_TlsParameters/ConnectTlsInvokeSuccess (5.09s)
+    --- FAIL: TestClient_TlsParameters/ConnectTlsEncryptedKey (60.09s)
+    --- FAIL: TestClient_TlsParameters/ConnectTls (60.09s)
+FAIL	go.k6.io/k6/js/modules/k6/grpc	60.123s
 ```
 
-**Reasoning:** the wall clock in this sandbox is **`Wed Jul  1 21:36:31 UTC 2026`** (`date -u`; note the embedded log date `2026/07/01`). k6's baked‑in **test** certificates were issued for an earlier validity window, so at this date they read as **expired/invalid**. Two independent observations corroborate this being an environment/clock issue rather than a product defect:
+Each of those three subtests prints the identical error (shown once here, verbatim):
 
-- The subtest that *expects* an expired certificate **passes**, while the one that *expects a valid* certificate **fails**:
-  ```
-  --- PASS: TestRequestAndBatchTLS/cert_expired (0.01s)
-  --- FAIL: TestRequestAndBatchTLS/ocsp_stapled_good (0.19s)
-  ```
-- The gRPC `ConnectTls` and `ConnectTlsEncryptedKey` subtests **time out at `60.01s`** — the TLS handshake never completes because the peer rejects the (now-invalid) certificate.
+```
+GoError: context deadline exceeded: connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority (possibly because of \"crypto/rsa: verification error\" while trying to verify candidate authority certificate \"Acme Co\")" at reflect.methodValueCall (native)
+```
 
-**Conclusion:** these are **time/environment‑sensitive failures, not product bugs.** An environment with valid certs (or an earlier clock) would pass them. Per the read‑only directive, they are **reported, not remediated**.
+That is an **`x509: certificate signed by unknown authority` / `crypto/rsa: verification error`** — a *key mismatch*, **not** the expiry error (which would read `x509: certificate has expired or is not yet valid`). The mechanism:
+
+- The test server is `tb.ServerHTTP2`, an `httptest.NewUnstartedServer(cmux)` `[lib/testutils/httpmultibin/httpmultibin.go:L333]` started with `http2Srv.StartTLS()` `[lib/testutils/httpmultibin/httpmultibin.go:L338]`. Go's `httptest.StartTLS()` serves the toolchain's built-in `net/http/internal/testcert.LocalhostCert` (the Go 1.23.10 standard library does `tls.X509KeyPair(testcert.LocalhostCert, testcert.LocalhostKey)`).
+- The client (the VU script) is told to trust **only** k6's hard-coded `localHostCert` as its CA — `cacerts: ["…"]` at `[js/modules/k6/grpc/client_test.go:L1217]`, where `localHostCert` is defined at `[js/modules/k6/grpc/client_test.go:L1160]`.
+
+Decoding both certs shows they share the **same subject (`O=Acme Co`)** and both are valid **until 2084**, but they carry **different serial numbers and different public keys**:
+
+```
+$ openssl x509 -noout -subject -serial -enddate   # Go 1.23.10 net/http/internal/testcert.LocalhostCert (the server's cert)
+subject=O=Acme Co
+serial=10FFE677DEF41F2B1D053A6ECC339FD0
+notAfter=Jan 29 16:00:00 2084 GMT
+$ openssl x509 -noout -subject -serial -enddate   # k6 hard-coded localHostCert  [js/modules/k6/grpc/client_test.go:L1160]
+subject=O=Acme Co
+serial=49126B12904615CEED35BD5F6F9A4A17
+notAfter=Jan 29 16:00:00 2084 GMT
+```
+
+Because the hard-coded CA (`49126B12…`) is a *different key* from the one that actually signed the server's cert (`10FFE677…`), the RSA signature check fails (`crypto/rsa: verification error`) and the client aborts the handshake. The server only logs the client's abort:
+
+```
+2026/07/01 23:14:21 http: TLS handshake error from 127.0.0.1:33300: remote error: tls: bad certificate
+```
+
+`remote error: tls: bad certificate` is the generic TLS alert the **client** sends when it rejects the server's cert; it is *not* an expiry signal. k6's `localHostCert` fixture was copied from an **older** Go toolchain's `testcert.LocalhostCert`; Go has since regenerated that built-in cert with a new key, so the fixture and the toolchain's current server cert no longer match. This is **Go-toolchain-version drift against a hard-coded test fixture** — completely independent of the wall clock. (The `ConnectTls`/`ConnectTlsEncryptedKey` subtests report `60.09s` because their `connect()` calls set no timeout and hit the default context deadline; `ConnectTlsInvokeSuccess` fails in `5.09s` because its script sets `timeout: '5s'`.)
+
+**(2) `js/modules/k6/http` — a live external OCSP-stapling dependency (`ocsp status: unknown`), not expiry.**
+
+The single failing http subtest is `ocsp_stapled_good` `[js/modules/k6/http/request_test.go:L2192]`. It makes a **request to the public internet** — `website := "https://www.wikipedia.org/"` `[js/modules/k6/http/request_test.go:L2197]` — and asserts the stapled OCSP status equals `OCSP_STATUS_GOOD` `[js/modules/k6/http/request_test.go:L2206]`. Verbatim from a verbose re-run:
+
+```
+$ go test -mod=vendor -race -run 'TestRequestAndBatchTLS/ocsp_stapled_good' ./js/modules/k6/http/
+Error: wrong ocsp stapled response status: unknown at <eval>:3:58(22)
+```
+
+The network is reachable — `curl -sI https://www.wikipedia.org/` returns `HTTP/2 200` — so the request *does* reach Wikipedia; it simply no longer receives a **`good`** stapled OCSP response (it gets `unknown`). This is an **external-dependency change** (OCSP stapling has been widely deprecated), not a k6 certificate and not a clock effect.
+
+**Why the "expired certificate" reading is wrong (correction of the earlier analysis).** The neighbouring `cert_expired` subtest passing does **not** corroborate a clock-driven expiry, because that cert is expired *by construction at any clock*: `GenerateTLSCertificate(t, "expired.localhost", time.Now().Add(-time.Hour), 0)` `[js/modules/k6/http/request_test.go:L2062]`, and `GenerateTLSCertificate` sets `notAfter := notBefore.Add(validFor)` `[js/modules/k6/http/request_test.go:L2278]` — i.e. one hour *before* `time.Now()`. It therefore passes on every clock:
+
+```
+--- PASS: TestRequestAndBatchTLS/cert_expired (0.09s)
+```
+
+The http package's other TLS certs are likewise generated dynamically from `time.Now()` (`[js/modules/k6/http/request_test.go:L2105]`, `[js/modules/k6/http/request_test.go:L2162]`) — they are **not** baked-in fixed-window certs, so no 2026 wall clock renders them expired.
+
+**Conclusion:** both failures are **environment-sensitive, not product bugs**, but the mechanisms are (a) grpc: a hard-coded httptest cert fixture that has drifted from the current Go toolchain's cert (a key mismatch; both certs valid to 2084/3021), and (b) http: an external `www.wikipedia.org` OCSP staple that is no longer `good`. **An earlier local clock fixes neither** — the grpc case needs the fixture regenerated to match the toolchain (or the toolchain aligned to the fixture), and the http case depends on an external service. Per the read-only directive, they are **reported, not remediated**.
 
 ### Skipped tests — static (source) vs runtime (observed)
 
@@ -231,7 +281,7 @@ Two nuances worth calling out:
 | Packages | 82 total → **52 ok**, **2 FAIL**, **28** no‑test‑files |
 | Tests + subtests | **4419 PASS**, **6 FAIL**, **1 SKIP** |
 | Broken (build/compile) packages | **0** (stderr was empty) |
-| Failing packages | `js/modules/k6/http`, `js/modules/k6/grpc` — **all TLS/cert‑expiry**, environment‑sensitive |
+| Failing packages | `js/modules/k6/http`, `js/modules/k6/grpc` — TLS-related but **not expiry**: grpc = Go-toolchain httptest cert-fixture drift (`crypto/rsa: verification error` key mismatch; certs valid to 2084/3021); http = external `www.wikipedia.org` OCSP staple `unknown`. Environment-sensitive, not product bugs |
 | Skipped at runtime | **1** (`TestTC39`, corpus absent) |
 
 **Reproducible aggregation recap** — every number in the table above is the verbatim output of these commands run against the single `-json` capture:
@@ -253,7 +303,7 @@ $ grep '"Test":' /tmp/test.json | grep '"Elapsed":' | grep -oE '"Action":"(pass|
       1 "Action":"skip"
 ```
 
-These results are **reproducible** with the exact command above. **Caveat:** the TLS failures are **clock/cert‑sensitive** — on a machine with valid certificates (or an earlier date) both packages are expected to pass.
+These results are **reproducible** with the exact command above. **Caveat:** the two TLS failures are **environment-sensitive but not clock-sensitive**. grpc fails because k6's hard-coded httptest cert fixture no longer matches the Go toolchain's regenerated server cert (a `crypto/rsa: verification error` key mismatch; both certs valid to 2084/3021); http `ocsp_stapled_good` depends on the external `www.wikipedia.org` OCSP staple (observed status `unknown`). An earlier date would fix neither — the grpc fixture must be regenerated to match the toolchain, and the http staple is served by an external site.
 
 ---
 
@@ -471,7 +521,7 @@ A **producer** (the JS VU) writes a `Value:1` sample onto a **buffered channel**
 **Caveats & honesty notes:**
 
 - **Measured values vary.** Timing‑derived figures — the `iterations` rate (`97.73205/s`), `iteration_duration` (`10.12ms`), and per‑test elapsed times (e.g. `7.995s`, `65.690s`) — are from this specific run and will differ slightly on re‑runs. The *counts* (52/2/28 packages; 4419/6/1 tests) and the emitted `iterations` **value of `1`** are stable.
-- **The 2 failing packages are environment‑sensitive, not defects.** They fail only because the sandbox clock (`2026‑07‑01`) is past the validity window of k6's baked‑in **test** certificates (`remote error: tls: bad certificate`). This is reported, **not fixed**, per the read‑only directive.
+- **The 2 failing packages are environment-sensitive, not defects.** grpc's `ConnectTls*` fail with `x509: certificate signed by unknown authority … crypto/rsa: verification error … "Acme Co"` because k6's hard-coded httptest cert fixture (`serial 49126B12…`) no longer matches the Go 1.23.10 toolchain's server cert (`serial 10FFE677…`) — same subject `O=Acme Co`, different key, **both valid to 2084**, so not expiry; http's `ocsp_stapled_good` fails with `wrong ocsp stapled response status: unknown` from the live `www.wikipedia.org`. An earlier clock fixes neither. This is reported, **not fixed**, per the read-only directive.
 - **Attribution nuance (tc39).** The `TestTC39` skip is reported at `js/tc39/tc39_test.go:L799` (the call site) rather than the `t.Skipf` at `js/tc39/tc39_test.go:L807`, because `runTestTC39` calls `t.Helper()` `[js/tc39/tc39_test.go:L804]`.
 - **Source is the source of truth.** Grafana's public k6 docs corroborate the four‑type metric taxonomy and the "built‑ins are summarized at end of test" behavior, but every claim here is grounded in the k6 source at commit `ddc3b0b1d2` and in observed runtime output.
 - **Repository untouched.** The only file added is this document; the built binary and the trace script lived under `/tmp` and were removed. `go.mod`/`go.sum`/`vendor/` and all `.go`, test, build, and CI files are unchanged.
