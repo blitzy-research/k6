@@ -20,7 +20,7 @@ Every behavioral claim below is paired with the exact command that produced it a
 k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)
 ```
 
-  The `commit/ddc3b0b1d2` segment proves the binary matches the branch under study (`k6_ddc3b0b1d23c`, HEAD `ddc3b0b1d23c…`).
+  The `commit/ddc3b0b1d2` segment proves the binary matches the branch under study (`k6_ddc3b0b1d23c`, full commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375`).
 
 - **Read-only guarantee:** the compiled binary, the temporary scripts, and the temporary config file all lived under `/tmp/k6scratch` (outside the repository) and were deleted afterward; the repository working tree stayed clean (`git status --porcelain` was empty before, during, and after the investigation).
 
@@ -95,9 +95,9 @@ Because the *last* writer for a given field wins, the terminal `.Apply(cliConf)`
 **Supporting readers and the merge primitive:**
 
 - `readDiskConfig` (`cmd/config.go:131`) reads and JSON-unmarshals the config file into a `Config`.
-- `readEnvConfig` (`cmd/config.go:170`) reads `K6_*` variables via `envconfig.Process("", &conf, …)`.
-- `applyDefault` (`cmd/config.go:222`) fills only unset fields — each assignment is guarded, e.g. `if !conf.DNS.TTL.Valid { … }` and `if conf.SystemTags == nil { … }`, so it never overwrites a value a higher tier already set.
-- `Config.Apply` (`cmd/config.go:70`) delegates option merging to `Options.Apply` and otherwise copies a field only when the incoming tier set it (`if cfg.Linger.Valid { … }`, etc.). Its doc comment states plainly: *"The provided config has priority."*
+- `readEnvConfig` (`cmd/config.go:170`) reads `K6_*` variables by calling `envconfig.Process` with an empty prefix, the destination `&conf`, and a lookup closure `func(key string) (string, bool)` over the environment map (`cmd/config.go:173`).
+- `applyDefault` (`cmd/config.go:222`) fills only unset fields — each assignment is guarded, e.g. `if conf.SystemTags == nil { conf.SystemTags = &metrics.DefaultSystemTagSet }` (`cmd/config.go:223`) and `if !conf.DNS.TTL.Valid { conf.DNS.TTL = defDNS.TTL }` (`cmd/config.go:230`), so it never overwrites a value a higher tier already set.
+- `Config.Apply` (`cmd/config.go:70`) delegates option merging to `Options.Apply` and otherwise copies a field only when the incoming tier set it — e.g. `if cfg.Linger.Valid { c.Linger = cfg.Linger }` (`cmd/config.go:76`). Its doc comment states plainly: *"The provided config has priority."*
 - `Options.Apply` (`lib/options.go:357`) is the field-by-field merge primitive:
 
 ```go
@@ -171,7 +171,13 @@ Banner:
 * default: 1 looping VUs for 5s (gracefulStop: 30s)
 ```
 
-The measured wall-clock time of the run was `5.06s`, matching the `5s` from the CLI (not the script's `3s`). **Conclusion:** CLI `--duration 5s` won over the script's `duration: '3s'`.
+k6's own end-of-run progress line reports the elapsed test time as `05.0s` — matching the CLI `5s`, not the script's `3s` (quoted verbatim from the same run):
+
+```
+running (05.0s), 0/1 VUs, 10 complete and 0 interrupted iterations
+```
+
+**Conclusion:** CLI `--duration 5s` won over the script's `duration: '3s'` — the banner reads `for 5s` and k6's final progress line reads `running (05.0s)`.
 
 ### B3 — Script beats the JSON config file (duration)
 
@@ -187,7 +193,13 @@ Banner:
 * default: 1 looping VUs for 3s (gracefulStop: 30s)
 ```
 
-Measured wall-clock time was `3.07s` — **not** ~7s. **Conclusion:** the script's `duration: '3s'` beat the config file's `"duration":"7s"`, exactly as the ladder predicts (script layer at `cmd/config.go:201` is applied on top of the file base at `cmd/config.go:199`).
+k6's final progress line confirms the elapsed test time was `03.0s` (the script's `3s`), **not** ~7s (quoted verbatim from the same run):
+
+```
+running (03.0s), 0/1 VUs, 6 complete and 0 interrupted iterations
+```
+
+**Conclusion:** the script's `duration: '3s'` beat the config file's `"duration":"7s"`, exactly as the ladder predicts (script layer at `cmd/config.go:201` is applied on top of the file base at `cmd/config.go:199`).
 
 ### B4 — Real environment variable beats script (duration)
 
@@ -203,7 +215,13 @@ Banner:
 * default: 1 looping VUs for 6s (gracefulStop: 30s)
 ```
 
-Measured wall-clock time was `6.07s`. **Conclusion:** the `K6_DURATION=6s` environment variable won over the script's `duration: '3s'` (env is applied at `cmd/config.go:203`, above the script layer at `cmd/config.go:201`).
+k6's final progress line confirms the elapsed test time was `06.0s` (the env var's `6s`), quoted verbatim from the same run:
+
+```
+running (06.0s), 0/1 VUs, 12 complete and 0 interrupted iterations
+```
+
+**Conclusion:** the `K6_DURATION=6s` environment variable won over the script's `duration: '3s'` (env is applied at `cmd/config.go:203`, above the script layer at `cmd/config.go:201`).
 
 *(The lowest tier — built-in defaults — is demonstrated in section (e): an empty script falls through to the `per-vu-iterations` default of 1 VU / 1 iteration because no other layer set any execution option.)*
 
@@ -225,7 +243,7 @@ Iterations null.Int           `json:"iterations" envconfig:"K6_ITERATIONS"`
 Stages     []Stage            `json:"stages" envconfig:"K6_STAGES"`
 ```
 
-The proof is run **B4** above: `K6_DURATION=6s` produced the banner `* default: 1 looping VUs for 6s (gracefulStop: 30s)` and a `6.07s` wall time, overriding the script's `3s`. That is a real option being set from the environment.
+The proof is run **B4** above: `K6_DURATION=6s` produced the banner `* default: 1 looping VUs for 6s (gracefulStop: 30s)` and the final progress line `running (06.0s), 0/1 VUs, 12 complete and 0 interrupted iterations`, overriding the script's `3s`. That is a real option being set from the environment.
 
 ### The `-e/--env` flag does NOT configure options
 
@@ -238,7 +256,7 @@ $ /tmp/k6scratch/k6bin run --no-color -e DURATION=9s s_dur_env.js
 The `setup()` console line proves the value was injected into `__ENV` (quoted verbatim):
 
 ```
-time="2026-07-01T21:30:41Z" level=info msg="SETUP sees __ENV.DURATION=9s" source=console
+time="2026-07-01T22:11:40Z" level=info msg="SETUP sees __ENV.DURATION=9s" source=console
 ```
 
 But the banner is **unchanged** at the script's `3s`:
@@ -247,7 +265,13 @@ But the banner is **unchanged** at the script's `3s`:
 * default: 1 looping VUs for 3s (gracefulStop: 30s)
 ```
 
-and the measured wall time was `3.07s`. **Conclusion:** `-e DURATION=9s` injected `__ENV.DURATION=9s` into the script, yet the duration *option* stayed at the script's `3s`. Contrast this directly with **B4**, where the real `K6_DURATION=6s` *did* change the option to `6s`. Same-looking string, entirely different effect: `K6_DURATION` is decoded by `readEnvConfig` into `Options.Duration`; `-e DURATION=…` is not.
+and k6's final progress line confirms the elapsed test time was `03.0s`, not 9s (quoted verbatim from the same run):
+
+```
+running (03.0s), 0/1 VUs, 6 complete and 0 interrupted iterations
+```
+
+**Conclusion:** `-e DURATION=9s` injected `__ENV.DURATION=9s` into the script, yet the duration *option* stayed at the script's `3s`. Contrast this directly with **B4**, where the real `K6_DURATION=6s` *did* change the option to `6s`. Same-looking string, entirely different effect: `K6_DURATION` is decoded by `readEnvConfig` into `Options.Duration`; `-e DURATION=9s` is not.
 
 ### `scenarios` has no environment-variable (or CLI-flag) form
 
@@ -331,24 +355,39 @@ Banner — the run uses the **frozen** `2` VUs and `6` iterations:
 * default: 6 iterations shared among 2 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 ```
 
-The console output was **exactly 6 lines**, with VU ids **only `1` and `2`** (never `999`), while each line confirms the JS-side object was in fact mutated to `999`:
+The raw console output (quoted verbatim from this run, including the full k6 log prefix — `time=`, `level=info`, `msg=`, `source=console`) is **six lines**, each confirming the JS-side object was in fact mutated to `999`:
 
 ```
-time="2026-07-01T21:30:44Z" level=info msg="obs VU=2 ITER=0 script_reads_options.vus=999" source=console
-time="2026-07-01T21:30:44Z" level=info msg="obs VU=1 ITER=0 script_reads_options.vus=999" source=console
-time="2026-07-01T21:30:44Z" level=info msg="obs VU=2 ITER=1 script_reads_options.vus=999" source=console
-time="2026-07-01T21:30:44Z" level=info msg="obs VU=2 ITER=2 script_reads_options.vus=999" source=console
-time="2026-07-01T21:30:44Z" level=info msg="obs VU=2 ITER=3 script_reads_options.vus=999" source=console
-time="2026-07-01T21:30:44Z" level=info msg="obs VU=1 ITER=1 script_reads_options.vus=999" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=0 script_reads_options.vus=999" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=0 script_reads_options.vus=999" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=1 script_reads_options.vus=999" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=2 script_reads_options.vus=999" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=3 script_reads_options.vus=999" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=1 script_reads_options.vus=999" source=console
+```
+
+The interleaving order varies between runs, so the invariants are extracted deterministically from a captured run. There are exactly **6** console lines; the executing VU ids are **only `1` and `2`**; the VU id `999` never appears; yet every one of the 6 lines shows the object was mutated to `vus=999`:
+
+```
+$ /tmp/k6scratch/k6bin run --no-color s_freeze.js 2>&1 | tee /tmp/freeze.out >/dev/null
+$ grep -c source=console /tmp/freeze.out
+6
+$ grep source=console /tmp/freeze.out | grep -oE 'VU=[0-9]+' | sort -u
+VU=1
+VU=2
+$ grep -c 'VU=999' /tmp/freeze.out
+0
+$ grep -c 'script_reads_options.vus=999' /tmp/freeze.out
+6
 ```
 
 Summary — exactly `6` iterations total:
 
 ```
-iterations...........: 6   13611.337337/s
+iterations...........: 6   16557.936219/s
 ```
 
-**Conclusion:** the script *did* mutate its own `options` object (every line reads `script_reads_options.vus=999`), yet the run still executed with the frozen values — exactly **2** VUs (the six lines carry only VU ids `1` and `2`) running exactly **6** shared iterations (here dynamically split as four for VU `2` and two for VU `1`). Mutating `options` at runtime has no effect because the effective options were frozen into `TestRunState.Options` (`cmd/test_load.go:280`) before `execution.NewScheduler` (`execution/scheduler.go:38`) ever read them.
+**Conclusion:** the script *did* mutate its own `options` object (every line reads `script_reads_options.vus=999`), yet the run still executed with the frozen values — exactly **2** VUs (the executing ids are only `1` and `2`; `grep -c 'VU=999'` returns `0`) running exactly **6** shared iterations (in this run dynamically split as four for VU `1` and two for VU `2`). Mutating `options` at runtime has no effect because the effective options were frozen into `TestRunState.Options` (`cmd/test_load.go:280`) before `execution.NewScheduler` (`execution/scheduler.go:38`) ever read them.
 
 
 ---
@@ -363,9 +402,9 @@ The key insight: `vus`, `duration`, `iterations`, and `stages` are **convenience
 
 `DeriveScenariosFromShortcuts` maps shortcuts to executor types as follows:
 
-- **`iterations` (+ `vus`) → `shared-iterations`** — call site `lib/executor/execution_config_shortcuts.go:67`, built by `getSharedIterationsScenario` (declared `…:39`).
-- **`duration` (+ `vus`) → `constant-vus`** — call site `lib/executor/execution_config_shortcuts.go:86`, built by `getConstantVUsScenario` (declared `…:21`).
-- **`stages` → `ramping-vus`** — call site `lib/executor/execution_config_shortcuts.go:94`, built by `getRampingVUsScenario` (declared `…:28`).
+- **`iterations` (+ `vus`) → `shared-iterations`** — call site `lib/executor/execution_config_shortcuts.go:67`, built by `getSharedIterationsScenario` (declared `lib/executor/execution_config_shortcuts.go:39`).
+- **`duration` (+ `vus`) → `constant-vus`** — call site `lib/executor/execution_config_shortcuts.go:86`, built by `getConstantVUsScenario` (declared `lib/executor/execution_config_shortcuts.go:21`).
+- **`stages` → `ramping-vus`** — call site `lib/executor/execution_config_shortcuts.go:94`, built by `getRampingVUsScenario` (declared `lib/executor/execution_config_shortcuts.go:28`).
 - **nothing set → `per-vu-iterations` with 1 VU / 1 iteration** — default branch `lib/executor/execution_config_shortcuts.go:117-119`:
 
 ```go
@@ -374,41 +413,63 @@ result.Scenarios = lib.ScenarioConfigs{
 }
 ```
 
-The scenario is keyed by `DefaultScenarioName`, the literal `"default"` (`lib/options.go:21`) — which is why the banner in single-scenario runs reads `* default: …`.
+The scenario is keyed by `DefaultScenarioName`, the literal `"default"` (`lib/options.go:21`) — which is why the banner in single-scenario runs begins with the `* default:` prefix seen in every banner quoted above.
 
-Each mapping is proven by inspecting the *derived* execution requirements (`duration` shortcut, `s_dur.js`):
-
-```
-$ /tmp/k6scratch/k6bin inspect --execution-requirements s_dur.js
-```
-
-The derived scenario is keyed `default` with executor `constant-vus`:
+Each mapping is proven by inspecting the *derived* execution requirements. `k6 inspect --execution-requirements` prints the **full** derived `Options` as a pretty-printed JSON object; extracting just the derived `scenarios` block for `s_dur.js` with `sed` gives (verbatim):
 
 ```
-{"default": {"executor": "constant-vus", "startTime": null, "gracefulStop": null, "env": null, "exec": null, "tags": null, "vus": 1, "duration": "3s"}}
+$ /tmp/k6scratch/k6bin inspect --execution-requirements s_dur.js | sed -n '/"scenarios": {/,/^  },/p'
+  "scenarios": {
+    "default": {
+      "executor": "constant-vus",
+      "startTime": null,
+      "gracefulStop": null,
+      "env": null,
+      "exec": null,
+      "tags": null,
+      "vus": 1,
+      "duration": "3s"
+    }
+  },
 ```
 
-The other three shortcuts derive as claimed:
+So the `duration` shortcut derived into a scenario keyed `default` (the literal from `lib/options.go:21`) with executor `constant-vus`, carrying the effective `"vus": 1` and `"duration": "3s"`.
+
+All four shortcut forms derive as claimed. Filtering the same command's raw output through `grep '"executor"'` prints exactly the derived executor line for each script (verbatim raw lines):
 
 ```
-$ /tmp/k6scratch/k6bin inspect --execution-requirements s_iters.js   # {vus:3, iterations:9}
-scenario_name=default executor=shared-iterations
-
-$ /tmp/k6scratch/k6bin inspect --execution-requirements s_stages.js  # {stages:[…]}
-scenario_name=default executor=ramping-vus
-
-$ /tmp/k6scratch/k6bin inspect --execution-requirements s_empty.js   # {}
-scenario_name=default executor=per-vu-iterations
+$ for s in s_iters.js s_dur.js s_stages.js s_empty.js; do printf '%s: ' "$s"; /tmp/k6scratch/k6bin inspect --execution-requirements "$s" | grep '"executor"'; done
+s_iters.js:       "executor": "shared-iterations",
+s_dur.js:       "executor": "constant-vus",
+s_stages.js:       "executor": "ramping-vus",
+s_empty.js:       "executor": "per-vu-iterations",
 ```
 
-**Inspect nuance (avoid a common confusion):** *plain* `k6 inspect` prints the **raw, pre-derivation** options, where `scenarios` is `null`; only `--execution-requirements` shows the derived scenarios. For `s_dur.js`:
+(The scripts are `s_iters.js` = `{vus:3, iterations:9}`, `s_dur.js` = `{vus:1, duration:'3s'}`, `s_stages.js` = `{stages:[{duration:'2s',target:3},{duration:'2s',target:0}]}`, and `s_empty.js` = `{}`; see the [Appendix](#appendix-temporary-observation-scripts).)
+
+**Inspect nuance (avoid a common confusion):** *plain* `k6 inspect` prints the **raw, pre-derivation** options, where `scenarios` is `null`; only `--execution-requirements` derives and populates them. Plain inspect also emits a full pretty-printed JSON object; its first seven lines for `s_dur.js` are (verbatim):
 
 ```
-$ /tmp/k6scratch/k6bin inspect s_dur.js
-{"scenarios": null, "vus": 1, "duration": "3s"}
+$ /tmp/k6scratch/k6bin inspect s_dur.js | sed -n '1,7p'
+{
+  "paused": null,
+  "vus": 1,
+  "duration": "3s",
+  "iterations": null,
+  "stages": null,
+  "scenarios": null,
 ```
 
-So `scenarios: null` from plain `inspect` does **not** mean "no scenario will run" — it means the shortcut has not been derived into a scenario *yet*. The `--execution-requirements` view above shows the same script deriving into a `constant-vus` scenario.
+The one field that differs between the two commands is `scenarios` itself — `null` before derivation, an object after — which `grep` shows directly:
+
+```
+$ /tmp/k6scratch/k6bin inspect s_dur.js | grep '"scenarios"'
+  "scenarios": null,
+$ /tmp/k6scratch/k6bin inspect --execution-requirements s_dur.js | grep '"scenarios"'
+  "scenarios": {
+```
+
+So `"scenarios": null` from plain `inspect` does **not** mean "no scenario will run" — it means the shortcut has not been derived into a scenario *yet*. With `--execution-requirements`, the same `s_dur.js` derives into the `constant-vus` scenario shown above (`"vus": 1`, `"duration": "3s"`).
 
 ### Surprise #1 — `vus` alone is silently ignored (with a warning)
 
@@ -421,7 +482,7 @@ $ /tmp/k6scratch/k6bin run --no-color s_vusalone.js
 The warning is emitted verbatim (its format string is at `lib/executor/execution_config_shortcuts.go:102-105`):
 
 ```
-time="2026-07-01T21:31:23Z" level=warning msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"
+time="2026-07-01T22:11:43Z" level=warning msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"
 ```
 
 and the run falls through to the 1-VU / 1-iteration default:
@@ -431,7 +492,7 @@ and the run falls through to the 1-VU / 1-iteration default:
 ```
 
 ```
-iterations...........: 1   9247.272055/s
+iterations...........: 1   9236.339454/s
 ```
 
 **Conclusion:** `vus: 5` alone was ignored — the run used the `per-vu-iterations` default of 1 VU / 1 iteration. The warning fires from the `default:` branch only when `opts.VUs.Valid && opts.VUs.Int64 != 1` (`lib/executor/execution_config_shortcuts.go:101`), which is exactly why a lone `vus` produces this message.
@@ -461,7 +522,19 @@ $ /tmp/k6scratch/k6bin run --no-color s_scenarios.js
 * my_named_scenario: 2 iterations for each of 3 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 ```
 
-(The scenarios summary line reported `3 max VUs`, and the run executed `6` iterations = 2 per VU × 3 VUs.) The script's `my_named_scenario` is exactly what ran.
+The end-of-test progress line for the named scenario proves both quantities — `3 VUs` and `6/6 iters, 2 per VU` (quoted verbatim from the same run):
+
+```
+my_named_scenario ✓ [ 100% ] 3 VUs  00m00.0s/10m0s  6/6 iters, 2 per VU
+```
+
+and the summary confirms the `6` total iterations:
+
+```
+iterations...........: 6   38328.616784/s
+```
+
+The script's `my_named_scenario` is exactly what ran — `3` VUs each running `2` iterations for `6` total.
 
 **Now add a higher-tier execution shortcut on the CLI — the named scenario is discarded:**
 
@@ -473,7 +546,14 @@ $ /tmp/k6scratch/k6bin run --no-color --vus 4 --duration 2s s_scenarios.js
 * default: 4 looping VUs for 2s (gracefulStop: 30s)
 ```
 
-The string `my_named_scenario` appeared **0 times** in the entire output. **Conclusion:** because the CLI supplied `--duration` (a higher tier), the cross-tier reset at `lib/options.go:371-377` cleared the script's lower-tier `scenarios`, and the run instead used a freshly derived `constant-vus` scenario keyed `default`. The script's carefully named scenario was silently thrown away — precisely the "scenario settings came from a place I didn't expect" surprise. (Note the interaction with section (c): since `scenarios` has no env/CLI form, you cannot re-supply it from the CLI to win it back — only a lower/equal tier that isn't overridden by an execution shortcut keeps it.)
+Counting occurrences of the named scenario in the entire run output returns `0` (command and verbatim output):
+
+```
+$ /tmp/k6scratch/k6bin run --no-color --vus 4 --duration 2s s_scenarios.js 2>&1 | grep -c my_named_scenario
+0
+```
+
+**Conclusion:** because the CLI supplied `--duration` (a higher tier), the cross-tier reset at `lib/options.go:371-377` cleared the script's lower-tier `scenarios`, and the run instead used a freshly derived `constant-vus` scenario keyed `default`. The script's carefully named scenario was silently thrown away — precisely the "scenario settings came from a place I didn't expect" surprise. (Note the interaction with section (c): since `scenarios` has no env/CLI form, you cannot re-supply it from the CLI to win it back — only a lower/equal tier that isn't overridden by an execution shortcut keeps it.)
 
 
 ---
@@ -499,28 +579,42 @@ Banner — the CLI `--vus 5` froze the VU count over the script's `2`, and `iter
 * default: 10 iterations shared among 5 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 ```
 
-The console output contained **five distinct executing VU ids — `1`, `2`, `3`, `4`, `5`** — proving the frozen VU count of `5` governed the run:
+The raw console output (quoted verbatim from this run, including the full k6 log prefix — `time=`, `level=info`, `msg=`, `source=console`) shows VU ids up to `5` executing:
 
 ```
-obs VU=3 ITER=0
-obs VU=5 ITER=0
-obs VU=5 ITER=1
-obs VU=4 ITER=0
-obs VU=4 ITER=1
-obs VU=4 ITER=2
-obs VU=2 ITER=0
-obs VU=1 ITER=0
-obs VU=5 ITER=2
-obs VU=3 ITER=1
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=5 ITER=0" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=0" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=1" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=2" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=0" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=1" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=5 ITER=1" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=0" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=4 ITER=0" source=console
+time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=3" source=console
 ```
 
-There were exactly **10** such iteration lines, and the summary confirms the frozen iteration budget:
+The interleaving order varies between runs; the frozen invariants — the **set of VU ids** and the **total count** — are extracted deterministically from a captured run. The console lines carry **five distinct VU ids (`1`–`5`)**, matching the banner's frozen `5 VUs`, and there are exactly **10** of them, matching the frozen `iterations: 10` budget:
 
 ```
-iterations...........: 10  18333.889461/s
+$ /tmp/k6scratch/k6bin run --no-color --vus 5 s_multivu.js 2>&1 | tee /tmp/mv.out >/dev/null
+$ grep source=console /tmp/mv.out | grep -oE 'VU=[0-9]+' | sort -u
+VU=1
+VU=2
+VU=3
+VU=4
+VU=5
+$ grep -c source=console /tmp/mv.out
+10
 ```
 
-**Conclusion:** once frozen, the same effective options govern every VU — all **5** VUs drew from the single `shared-iterations` scenario and *together* executed exactly the frozen **10** iterations (dynamically distributed: VU `4` and VU `5` ran three each, VU `3` two, VUs `1` and `2` one each — summing to 10). This connects directly back to the freeze in section (d): the VU count and the iteration budget were both fixed into `TestRunState.Options` (`cmd/test_load.go:280`) *before* `execution.NewScheduler` (`execution/scheduler.go:38`) built the execution plan via `options.Scenarios.GetFullExecutionRequirements(et)` (`execution/scheduler.go:44`), so no individual VU can deviate from them.
+and the summary confirms the same frozen iteration budget:
+
+```
+iterations...........: 10  20243.447702/s
+```
+
+**Conclusion:** once frozen, the same effective options govern every VU — all **5** VUs drew from the single `shared-iterations` scenario and *together* executed exactly the frozen **10** iterations (in this run dynamically distributed as VU `3` four, VUs `2` and `5` two each, and VUs `1` and `4` one each — summing to 10). This connects directly back to the freeze in section (d): the VU count and the iteration budget were both fixed into `TestRunState.Options` (`cmd/test_load.go:280`) *before* `execution.NewScheduler` (`execution/scheduler.go:38`) built the execution plan via `options.Scenarios.GetFullExecutionRequirements(et)` (`execution/scheduler.go:44`), so no individual VU can deviate from them.
 
 ---
 
@@ -534,21 +628,21 @@ The authoritative evidence in this document is the locally observed output from 
 
 | Item the question named | Where answered | Code reference | Observed proof line |
 |---|---|---|---|
-| Consolidation mechanism | (a) | `getConsolidatedConfig` `cmd/config.go:189`; apply order `cmd/config.go:199-204` | version banner `k6bin v0.55.0 (commit/ddc3b0b1d2, …)` ties evidence to commit |
+| Consolidation mechanism | (a) | `getConsolidatedConfig` `cmd/config.go:189`; apply order `cmd/config.go:199-204` | version banner `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)` ties evidence to commit |
 | Precedence ladder (CLI > `K6_*` env > script > config file > defaults) | (b) | `.Apply(cliConf)` last `cmd/config.go:203`; `applyDefault` `cmd/config.go:204` | B1–B4 banners (below) |
-| **VUs** — CLI beats script | (b) B1 | `if opts.VUs.Valid` `lib/options.go:361` | `* default: 5 looping VUs for 2s (gracefulStop: 30s)`; `vus…: 5   min=5      max=5` |
-| **duration** — CLI beats script | (b) B2 | `cmd/config.go:203` | `* default: 1 looping VUs for 5s (gracefulStop: 30s)` (wall 5.06s) |
-| **duration** — script beats config file | (b) B3 | `cmd/config.go:201` over `:199` | `* default: 1 looping VUs for 3s (gracefulStop: 30s)` (wall 3.07s) |
-| **duration** — real env beats script | (b) B4 / (c) | `readEnvConfig` `cmd/config.go:170` | `* default: 1 looping VUs for 6s (gracefulStop: 30s)` (wall 6.07s) |
+| **VUs** — CLI beats script | (b) B1 | `if opts.VUs.Valid` `lib/options.go:361` | `* default: 5 looping VUs for 2s (gracefulStop: 30s)`; `vus..................: 5   min=5      max=5` |
+| **duration** — CLI beats script | (b) B2 | `cmd/config.go:203` | banner `* default: 1 looping VUs for 5s (gracefulStop: 30s)`; elapsed proven in (b) B2 by `running (05.0s), 0/1 VUs, 10 complete and 0 interrupted iterations` |
+| **duration** — script beats config file | (b) B3 | `cmd/config.go:201` over `:199` | banner `* default: 1 looping VUs for 3s (gracefulStop: 30s)`; elapsed proven in (b) B3 by `running (03.0s), 0/1 VUs, 6 complete and 0 interrupted iterations` |
+| **duration** — real env beats script | (b) B4 / (c) | `readEnvConfig` `cmd/config.go:170` | banner `* default: 1 looping VUs for 6s (gracefulStop: 30s)`; elapsed proven in (b) B4 by `running (06.0s), 0/1 VUs, 12 complete and 0 interrupted iterations` |
 | `K6_*` env layer | (c) | envconfig tags `lib/options.go:234-237` | (same B4 line) |
-| `-e/--env` vs real env-var nuance | (c) | — | `level=info msg="SETUP sees __ENV.DURATION=9s" source=console` + unchanged `… for 3s` banner |
+| `-e/--env` vs real env-var nuance | (c) | — | `level=info msg="SETUP sees __ENV.DURATION=9s" source=console` + unchanged `* default: 1 looping VUs for 3s (gracefulStop: 30s)` banner |
 | `scenarios` has no env/CLI form | (c) | `ignored:"true"` `lib/options.go:245` | derivation only via script/config (see (e)) |
-| Freeze point | (d) | `derivedConfig` `cmd/test_load.go:226`; `TestRunState.Options` `cmd/test_load.go:280`; `NewScheduler` `execution/scheduler.go:38` | banner `* default: 6 iterations shared among 2 VUs …` |
-| Runtime-mutation-ignored proof | (d) | freeze comment `cmd/test_load.go:280` | 6 lines, VU ids only `1`/`2`, each `script_reads_options.vus=999`; `iterations…: 6` |
+| Freeze point | (d) | `derivedConfig` `cmd/test_load.go:226`; `TestRunState.Options` `cmd/test_load.go:280`; `NewScheduler` `execution/scheduler.go:38` | banner `* default: 6 iterations shared among 2 VUs (maxDuration: 10m0s, gracefulStop: 30s)` |
+| Runtime-mutation-ignored proof | (d) | freeze comment `cmd/test_load.go:280` | 6 lines, VU ids only `1`/`2`, each `script_reads_options.vus=999`; `iterations...........: 6   16557.936219/s` |
 | **scenarios** — shortcut derivation | (e) | `DeriveScenariosFromShortcuts` `lib/executor/execution_config_shortcuts.go:52` | `constant-vus` / `shared-iterations` / `ramping-vus` / `per-vu-iterations` from `inspect` |
-| **scenarios** — vus-alone warning | (e) | `…/execution_config_shortcuts.go:101-105` | `msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"` |
+| **scenarios** — vus-alone warning | (e) | `lib/executor/execution_config_shortcuts.go:101-105` | `msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"` |
 | **scenarios** — cross-tier reset | (e) | `lib/options.go:371-377` | `my_named_scenario` alone → survives; with `--vus 4 --duration 2s` → `* default: 4 looping VUs for 2s`, 0 occurrences |
-| Multi-VU behavior | (f) | `execution/scheduler.go:44` | `* default: 10 iterations shared among 5 VUs …`; VU ids `1,2,3,4,5`; `iterations…: 10` |
+| Multi-VU behavior | (f) | `execution/scheduler.go:44` | `* default: 10 iterations shared among 5 VUs (maxDuration: 10m0s, gracefulStop: 30s)`; VU ids `1,2,3,4,5`; `iterations...........: 10  20243.447702/s` |
 | Corroboration (non-authoritative) | (g) | `cmd/config.go:199-204` | official docs match; observed output is authoritative |
 
 **Repository integrity:** the source tree was **not** modified. All temporary scripts, the config file, and the compiled binary lived under `/tmp/k6scratch` (outside the repository) and were removed after observation; `git status --porcelain` reported an empty (clean) working tree before, during, and after the investigation. The only net-new file is this document.
@@ -581,8 +675,9 @@ export const options = { vus: 1, duration: '3s' };
 export default function () { sleep(0.5); }
 ```
 
+**`config.json`:**
+
 ```json
-// config.json
 {"duration":"7s"}
 ```
 
