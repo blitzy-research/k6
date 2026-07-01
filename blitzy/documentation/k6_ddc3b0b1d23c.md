@@ -6,7 +6,7 @@ This document answers five questions about how the Grafana **k6** Go engine orch
 
 - **Build under test:** `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`. The repository version constant is `const Version = "0.55.0"` [`lib/consts/consts.go:L12`].
 - **How it was built:** from source with `go build`, which is exactly what the `build` target runs [`Makefile:L7-8`]. The binary was written to `/tmp/k6` to keep the repository tree clean.
-- **Where logs go:** k6 writes its logs to **`stderr`** using a logrus text formatter. The shutdown log lines examined in O1/O2 and the REST request-log lines in O3 are emitted at **debug** level, so every run that needs them uses the `-v`/`--verbose` flag. The flag is registered at [`cmd/root.go:L184`] (`flags.BoolVarP(&gs.Flags.Verbose, "verbose", "v", ...)`), and it raises the log level to debug at [`cmd/root.go:L209-210`] (`if c.globalState.Flags.Verbose { c.globalState.Logger.SetLevel(logrus.DebugLevel) }`).
+- **Where logs go:** k6 writes its logs to **`stderr`** using a logrus text formatter — the default log output is `LogOutput: "stderr"` [`cmd/state/state.go:L153`], for which the logger output is set via `c.globalState.Logger.SetOutput(c.globalState.Stderr)` [`cmd/root.go:L220-222`], and the text formatter is applied via `c.globalState.Logger.SetFormatter(&logrus.TextFormatter{...})` [`cmd/root.go:L255-258`]. The shutdown log lines examined in O1/O2 and the REST request-log lines in O3 are emitted at **debug** level, so every run that needs them uses the `-v`/`--verbose` flag. The flag is registered at [`cmd/root.go:L184`] (`flags.BoolVarP(&gs.Flags.Verbose, "verbose", "v", ...)`), and it raises the log level to debug at [`cmd/root.go:L209-210`] (`if c.globalState.Flags.Verbose { c.globalState.Logger.SetLevel(logrus.DebugLevel) }`).
 - **Read-only guarantee:** all temporary scenario scripts, the large data file, the example gRPC server, and the remote-write receiver lived **outside** the repository tree, under `/tmp/k6obs`, and were removed afterward. No repository source, configuration, test, example, vendored, or documentation file was modified or deleted. `git status --porcelain` is empty apart from this document, and `examples/grpc_server/go.mod`/`go.sum` were never touched (the example server was built from a `/tmp` copy).
 
 ## Methodology
@@ -216,13 +216,15 @@ Queried via `GET http://localhost:6565/v1/metrics/dropped_iterations`, the **`dr
 
 ### Claim A — `SharedArray` footprint is ≈constant across VU counts; the per-VU copy grows ≈linearly
 
-Verbatim peak-RSS measurements (representative magnitudes):
+Verbatim peak-RSS measurements (representative magnitudes), sampled from `/proc/<pid>/status` `VmRSS` and quoted exactly as observed:
 
-| VUs | `SharedArray` peak RSS   | Per-VU `open()`/`JSON.parse` peak RSS |
-|----:|--------------------------|----------------------------------------|
-| 1   | `413376 kB` (~404 MB)    | `351852 kB` (~344 MB)                  |
-| 50  | `433536 kB` (~423 MB)    | `9744596 kB` (~9.3 GB)                 |
-| 100 | `415032 kB` (~405 MB)    | `18522776 kB` (~17.7 GB)               |
+```text
+VUs    SharedArray peak RSS        Per-VU open()/JSON.parse peak RSS
+----   -------------------------   ---------------------------------
+  1    413376 kB   (~404 MB)       351852 kB    (~344 MB)
+ 50    433536 kB   (~423 MB)       9744596 kB   (~9.3 GB)
+100    415032 kB   (~405 MB)       18522776 kB  (~17.7 GB)
+```
 
 With `SharedArray`, the footprint stays **≈constant** as VUs increase (~404 → 423 → 405 MB). With a plain per-VU `open()` + `JSON.parse`, it grows **≈linearly** at roughly ~180 MB per VU — i.e. **each VU creates its own copy** of the data. At 100 VUs that is ~405 MB versus ~17.7 GB, a ≈**44.6×** difference. These magnitudes are **representative** (they scale with the ~35.7 MB file, per-object Sobek overhead, and peak-RSS/GC timing); the **constant-vs-linear behavior** and its **root cause** are what is invariant.
 
@@ -282,9 +284,9 @@ k6_waiting_time_p99           (custom Trend 'waiting_time', stat p(99) → _p99)
 
 **Metric-name integrity is maintained.** Each original metric name is preserved **verbatim** as the core of the exported name; only a deterministic `k6_` prefix and a type/stat suffix are added. Names are **not truncated** and **not character-mangled**: the custom names `my_custom_counter`, `waiting_time`, `my_gauge`, and `my_rate` all pass through intact.
 
-**`file:line` grounding.** The label key is `const namelbl = "__name__"` [`.../remotewrite/prometheus.go:L11`]. `MapSeries` [`.../remotewrite/prometheus.go:L39`] builds the value as `v := defaultMetricPrefix + series.Metric.Name` [`.../remotewrite/prometheus.go:L40`], then appends the suffix only if present — `if suffix != "" { v += "_" + suffix }` [`.../remotewrite/prometheus.go:L41-42`] — and sets it as the `__name__` label [`.../remotewrite/prometheus.go:L44-47`]. The prefix is `defaultMetricPrefix = "k6_"` [`.../remotewrite/config.go:L24`], and the default trend stats are `defaultTrendStats = []string{"p(99)"}` [`.../remotewrite/config.go:L28`] (hence `_p99`). The per-type suffix is assigned in `MapPrompb` [`.../remotewrite/remotewrite.go:L316`] through the `mapMonoSeries` closure [`.../remotewrite/remotewrite.go:L319`] / `MapSeries(s, suffix)` [`.../remotewrite/remotewrite.go:L321`]: Counter → `"total"` [`.../remotewrite/remotewrite.go:L331`], Gauge → `""` (no suffix) [`.../remotewrite/remotewrite.go:L336`], Rate → `"rate"` [`.../remotewrite/remotewrite.go:L341`], and Trend → `trend.MapPrompb(...)` [`.../remotewrite/remotewrite.go:L347`] producing the stat suffix (e.g. `p(99)` → `p99`).
+**`file:line` grounding.** The label key is `const namelbl = "__name__"` [`.../remotewrite/prometheus.go:L11`]. `MapSeries` [`.../remotewrite/prometheus.go:L39`] builds the value as `v := defaultMetricPrefix + series.Metric.Name` [`.../remotewrite/prometheus.go:L40`], then appends the suffix only if present — `if suffix != "" { v += "_" + suffix }` [`.../remotewrite/prometheus.go:L41-42`] — and sets it as the `__name__` label [`.../remotewrite/prometheus.go:L44-47`]. The prefix is `defaultMetricPrefix = "k6_"` [`.../remotewrite/config.go:L24`], and the default trend stats are `defaultTrendStats = []string{"p(99)"}` [`.../remotewrite/config.go:L28`] (hence `_p99`). The per-type suffix is assigned in `MapPrompb` [`.../remotewrite/remotewrite.go:L316`] through the `mapMonoSeries` closure [`.../remotewrite/remotewrite.go:L319`] / `MapSeries(s, suffix)` [`.../remotewrite/remotewrite.go:L321`]: Counter → `"total"` [`.../remotewrite/remotewrite.go:L331`], Gauge → `""` (no suffix) [`.../remotewrite/remotewrite.go:L336`], Rate → `"rate"` [`.../remotewrite/remotewrite.go:L341`], and Trend → `trend.MapPrompb(...)` [`.../remotewrite/remotewrite.go:L356`] producing the stat suffix (e.g. `p(99)` → `p99`). For the Trend case that call resolves to `(*extendedTrendSink).MapPrompb` [`.../remotewrite/trend.go:L36`], which iterates the configured stats and, per stat, appends the suffix to the `__name__` label via `ts.Labels[tg.ixname].Value += "_" + suffix` [`.../remotewrite/trend.go:L89`] inside `(*trendAsGauges).Append` [`.../remotewrite/trend.go:L78`].
 
-> The full vendored paths are `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/{prometheus.go,config.go,remotewrite.go}`.
+> The full vendored paths are `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/{prometheus.go,config.go,remotewrite.go,trend.go}`.
 
 ### Explicit answer (O5)
 
@@ -301,7 +303,7 @@ Every distinct sub-question and every named item is answered explicitly and by n
 - **O2(a) — exact gRPC-streaming interrupt log entries:** provided verbatim (same two shutdown lines) with exit code **`105`**.
 - **O2(b) — `grpc_streams_msgs_received`:** provided from the final summary — **`220`** (representative), with the ×5-streams / 100 ms-interval derivation.
 - **O3 — `dropped_iterations` via the REST API:** value read from the `curl` JSON:API body `attributes.sample.count` (e.g. **`284`** mid-run); API-origin proof is k6's own `level=debug msg="GET /v1/metrics/dropped_iterations" status=200` log line; final end-of-test total **`981`**.
-- **O4 — constant vs. per-VU copy:** answered — **constant** with `SharedArray`, **per-VU copy** otherwise (linear growth) — with the peak-RSS table and the **root cause** named and grounded (`data.go:L46,L56,L152-162`; `share.go:L44-58`).
+- **O4 — constant vs. per-VU copy:** answered — **constant** with `SharedArray`, **per-VU copy** otherwise (linear growth) — with the peak-RSS table and the **root cause** named and grounded (`js/modules/k6/data/data.go:L46,L56,L152-162`; `js/modules/k6/data/share.go:L44-58`).
 - **O5 — Prometheus name integrity:** exported `__name__` labels shown verbatim; prefix (`k6_`) + type/stat suffix behavior explained; **no mangling or truncation**; custom names intact.
 - **Attribution:** all findings are from `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`.
 - **Read-only confirmation:** no repository source file was modified or deleted; all temporary scripts, binaries, and data files lived under `/tmp/k6obs` and were removed; `git status --porcelain` is empty apart from this document (`blitzy/documentation/k6_ddc3b0b1d23c.md`), and `examples/grpc_server/go.mod`/`go.sum` were never touched.
