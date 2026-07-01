@@ -13,6 +13,41 @@ official documentation and the observed behaviour disagree, the **observed behav
 this build is treated as authoritative** and the disagreement is called out explicitly
 (see [§7](#7-the--e--env-reality-vs-the-docs-claim-g1g3)).
 
+### Build and version check
+
+The binary under test was built **from the vendored sources** with the exact command
+below — this is the run-first build step referenced above. `go build` prints nothing on
+success (exit `0`); `/tmp/k6bin version` then prints the self-report that is quoted
+throughout this document:
+
+**Build, then version check:**
+```
+GOTOOLCHAIN=local GOFLAGS=-mod=vendor CGO_ENABLED=0 go build -o /tmp/k6bin .
+/tmp/k6bin version
+```
+
+**Observed (verbatim) — printed by `/tmp/k6bin version`, exit `0`:**
+```
+k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
+```
+
+**Why these flags, and what the output means:**
+
+- `GOTOOLCHAIN=local` pins the installed Go toolchain (no auto-download); `GOFLAGS=-mod=vendor`
+  forces an **offline** build from the committed `vendor/` tree; `CGO_ENABLED=0` produces a
+  static binary. The `Makefile` `build` target is itself a plain `go build` (`Makefile:7-8`)
+  and every dependency is vendored, so the build needs no network access.
+- The version line is produced by `FullVersion()` (`lib/consts/consts.go:16`) rendered
+  through the root command's version template (`cmd/root.go:54-56`). The leading `k6bin` is
+  the binary's own name — `gs.BinaryName`, set to `filepath.Base(os.Executable())`
+  (`cmd/state/state.go:101`, `:112`) and consumed at `cmd/root.go:45` — which is why building
+  to `-o /tmp/k6bin` self-reports as `k6bin`, not `k6`.
+- `commit/ddc3b0b1d2` is `vcs.revision` truncated to its first 10 characters
+  (`lib/consts/consts.go:30-35`): the repository HEAD this document answers against,
+  `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (see **Repository HEAD** above). The build was
+  clean (`vcs.modified=false`), so no `-dirty` suffix is appended (`lib/consts/consts.go:48-50`).
+  `go1.23.12, linux/amd64` is `runtime.Version()` with `GOOS`/`GOARCH` (`lib/consts/consts.go:17`).
+
 ---
 
 ## Table of contents
@@ -426,8 +461,9 @@ environment, file, or script after this point.
 ## 6. Proof — six real conflicting runs (A–F)
 
 All runs use the locally built `/tmp/k6bin` (`k6bin v0.55.0 (commit/ddc3b0b1d2,
-go1.23.12, linux/amd64)`) and are executed under a **clean environment** so ambient
-`K6_*` variables cannot leak in:
+go1.23.12, linux/amd64)`; built exactly as shown in
+[Build and version check](#build-and-version-check) above) and are executed under a
+**clean environment** so ambient `K6_*` variables cannot leak in:
 
 ```
 env -i HOME=/tmp/k6home PATH=/usr/bin:/bin /tmp/k6bin run <flags> <script>
