@@ -4,7 +4,7 @@
 
 ## Orientation — what is k6?
 
-k6 is Grafana's load‑testing tool. Its own README describes it as <cite index="30-0">"Like unit testing, for performance"</cite> `[README.md:L16]` and <cite index="30-1">"Modern load testing for developers and testers in the DevOps era."</cite> `[README.md:L17]`. It is a single Go module — `module go.k6.io/k6` `[go.mod:L1]` — declaring `go 1.21` `[go.mod:L3]` with a pinned `toolchain go1.21.13` `[go.mod:L5]`.
+k6 is Grafana's load‑testing tool. Its own README describes it as "Like unit testing, for performance" `[README.md:L16]` and "Modern load testing for developers and testers in the DevOps era." `[README.md:L17]`. It is a single Go module — `module go.k6.io/k6` `[go.mod:L1]` — declaring `go 1.21` `[go.mod:L3]` with a pinned `toolchain go1.21.13` `[go.mod:L5]`.
 
 The exact binary under investigation, built from this checkout:
 
@@ -51,10 +51,10 @@ tests:
 
 ```
 # .github/workflows/test.yml:L38-L46
-export GOMAXPROCS=2                       # test.yml:L38
-args=("-p" "2" "-race")                   # test.yml:L39
+export GOMAXPROCS=2                       # .github/workflows/test.yml:L38
+args=("-p" "2" "-race")                   # .github/workflows/test.yml:L39
 ...
-go test "${args[@]}" -timeout 800s ./...  # test.yml:L46
+go test "${args[@]}" -timeout 800s ./...  # .github/workflows/test.yml:L46
 ```
 
 The workflow defines **three** test jobs: `test-prev` `[.github/workflows/test.yml:L13]`, `test-tip` `[.github/workflows/test.yml:L48]`, and a coverage job `test-current-cov` `[.github/workflows/test.yml:L85]` that runs a per‑package `-coverprofile` `[.github/workflows/test.yml:L118]` and uploads to Codecov `[.github/workflows/test.yml:L122]`.
@@ -76,7 +76,12 @@ $ go test -mod=vendor ./metrics/
 ok  	go.k6.io/k6/metrics	0.008s
 ```
 
-The total number of packages (`go list -mod=vendor ./... | wc -l`) is **82**.
+The total number of packages is **82** — verbatim:
+
+```
+$ go list -mod=vendor ./... | wc -l
+82
+```
 
 ### Results — pass vs fail
 
@@ -86,6 +91,31 @@ I aggregated the standard Go markers at two granularities: **package level** (`o
 |-------------|------|------|--------------|
 | **Packages** (82 total) | **52** `ok` | **2** `FAIL` | **28** `?  [no test files]` |
 | **Tests + subtests** | **4419** `--- PASS` | **6** `--- FAIL` | **1** `--- SKIP` |
+
+**Verbatim aggregation that produced those counts** (jq is not installed in this environment, so these use only `grep`/`sort`/`uniq`; both read the exact `/tmp/test.json` captured by the `-json` command above). A **package-level** result event has an `"Elapsed"` field but no `"Test"` field; a **test-level** result event has both:
+
+```
+$ grep -v '"Test":' /tmp/test.json | grep '"Elapsed":' | grep -oE '"Action":"(pass|fail|skip)"' | sort | uniq -c
+      2 "Action":"fail"
+     52 "Action":"pass"
+     28 "Action":"skip"
+```
+→ **52 `ok`, 2 `FAIL`, 28 `?  [no test files]`** (package `pass`/`fail`/`skip` = `ok`/`FAIL`/no‑test‑files; 52+2+28 = 82).
+
+```
+$ grep '"Test":' /tmp/test.json | grep '"Elapsed":' | grep -oE '"Action":"(pass|fail|skip)"' | sort | uniq -c
+      6 "Action":"fail"
+   4419 "Action":"pass"
+      1 "Action":"skip"
+```
+→ **4419 `--- PASS`, 6 `--- FAIL`, 1 `--- SKIP`** (tests + subtests).
+
+The **28** `?  [no test files]` packages are corroborated by the canonical marker itself:
+
+```
+$ grep -c '\[no test files\]' /tmp/test.json
+28
+```
 
 - **Pass vs fail (packages): 52 pass, 2 fail.** The 28 `?` packages simply contain no `*_test.go` files (they are not failures).
 - **Pass vs fail (tests): 4419 pass, 6 fail** (2 top‑level tests + 4 subtests), **1 skipped** at runtime.
@@ -148,6 +178,20 @@ Every failure is **TLS/certificate**‑related. Representative verbatim evidence
 
 ```
 $ grep -rnE "t\.Skip\(|t\.Skipf\(" --include="*_test.go" . | grep -v "/vendor/"
+./js/modules/k6/http/request_test.go:2195:			t.Skip("this doesn't work on windows for some reason")
+./js/tc39/tc39_test.go:383:		t.Skip("Excluded")
+./js/tc39/tc39_test.go:456:				t.Skip("Test threw IgnorableTestError")
+./js/tc39/tc39_test.go:531:				t.Skipf("Blocklisted feature %s", feature)
+./js/tc39/tc39_test.go:770:					t.Skipf("Skip %s because %s is not supported", newName, skipWord)
+./js/tc39/tc39_test.go:778:					t.Skipf("Skip %s because of path based block", newName)
+./js/tc39/tc39_test.go:796:		t.Skip()
+./js/tc39/tc39_test.go:807:		t.Skipf("If you want to run tc39 tests, you need to run the 'checkout.sh` script in the directory to get  https://github.com/tc39/test262 at the correct last tested commit (%v)", err)
+./lib/executor/constant_arrival_rate_test.go:113:		t.Skipf("this test is very flaky on the Windows GitHub Action runners...")
+./lib/netext/httpext/request_test.go:376:		t.Skipf("dial timeout doesn't get returned on windows") // or we don't match it correctly
+$ grep -rnE "t\.Skip\(|t\.Skipf\(" --include="*_test.go" . | grep -v "/vendor/" | wc -l   # total skip call-sites
+10
+$ grep -rlE "t\.Skip\(|t\.Skipf\(" --include="*_test.go" . | grep -v "/vendor/" | wc -l   # distinct files
+4
 ```
 
 | File | Line(s) | Literal |
@@ -159,9 +203,11 @@ $ grep -rnE "t\.Skip\(|t\.Skipf\(" --include="*_test.go" . | grep -v "/vendor/"
 | `js/tc39/tc39_test.go` | L770 | `t.Skipf("Skip %s because %s is not supported", newName, skipWord)` |
 | `js/tc39/tc39_test.go` | L778 | `t.Skipf("Skip %s because of path based block", newName)` |
 | `js/tc39/tc39_test.go` | L796 | `t.Skip()` |
-| `js/tc39/tc39_test.go` | L807 | `t.Skipf("If you want to run tc39 tests, ...")` |
+| `js/tc39/tc39_test.go` | L807 | `` t.Skipf("If you want to run tc39 tests, you need to run the 'checkout.sh` script in the directory to get  https://github.com/tc39/test262 at the correct last tested commit (%v)", err) `` |
 | `lib/executor/constant_arrival_rate_test.go` | L113 | `t.Skipf("this test is very flaky on the Windows GitHub Action runners...")` |
 | `lib/netext/httpext/request_test.go` | L376 | `t.Skipf("dial timeout doesn't get returned on windows")` |
+
+> The `L807` cell is the **exact source literal** — note the stray back‑tick after `checkout.sh` and the double space before the URL, both verbatim from source — and the identical line appears **byte‑for‑byte in the grep output above** (`./js/tc39/tc39_test.go:807:…`); no ellipsis substitutes for the literal. (The trailing `...` inside the `L113` message is part of the developer's own skip string, not a truncation.)
 
 **Runtime view.** On this `linux/amd64` run, **exactly one** test actually skipped — `go.k6.io/k6/js/tc39.TestTC39`:
 
@@ -187,6 +233,25 @@ Two nuances worth calling out:
 | Broken (build/compile) packages | **0** (stderr was empty) |
 | Failing packages | `js/modules/k6/http`, `js/modules/k6/grpc` — **all TLS/cert‑expiry**, environment‑sensitive |
 | Skipped at runtime | **1** (`TestTC39`, corpus absent) |
+
+**Reproducible aggregation recap** — every number in the table above is the verbatim output of these commands run against the single `-json` capture:
+
+```
+$ GOMAXPROCS=2 go test -mod=vendor -p 8 -race -timeout 800s -json ./... > /tmp/test.json 2> /tmp/test.stderr; echo "EXIT_CODE=$?"
+EXIT_CODE=1
+$ wc -c /tmp/test.stderr                                   # 0 bytes => 0 build/compile-broken packages
+0 /tmp/test.stderr
+$ go list -mod=vendor ./... | wc -l                        # total packages
+82
+$ grep -v '"Test":' /tmp/test.json | grep '"Elapsed":' | grep -oE '"Action":"(pass|fail|skip)"' | sort | uniq -c   # packages: ok / FAIL / no-test
+      2 "Action":"fail"
+     52 "Action":"pass"
+     28 "Action":"skip"
+$ grep '"Test":' /tmp/test.json | grep '"Elapsed":' | grep -oE '"Action":"(pass|fail|skip)"' | sort | uniq -c       # tests+subtests: PASS / FAIL / SKIP
+      6 "Action":"fail"
+   4419 "Action":"pass"
+      1 "Action":"skip"
+```
 
 These results are **reproducible** with the exact command above. **Caveat:** the TLS failures are **clock/cert‑sensitive** — on a machine with valid certificates (or an earlier date) both packages are expected to pass.
 
@@ -234,13 +299,13 @@ The two iteration counters are **built‑in metrics** declared and registered in
 
 | Executor type | Type constant | Registration file |
 |---------------|---------------|-------------------|
-| `constant-vus` | `constant_vus.go:L18` | `constant_vus.go:L21` |
-| `ramping-vus` | `ramping_vus.go:L19` | `ramping_vus.go:L22` |
-| `shared-iterations` | `shared_iterations.go:L19` | `shared_iterations.go:L22` |
-| `per-vu-iterations` | `per_vu_iterations.go:L19` | `per_vu_iterations.go:L22` |
-| `constant-arrival-rate` | `constant_arrival_rate.go:L21` | `constant_arrival_rate.go:L24` |
-| `ramping-arrival-rate` | `ramping_arrival_rate.go:L20` | `ramping_arrival_rate.go:L23` |
-| `externally-controlled` | `externally_controlled.go:L21` | `externally_controlled.go:L24` |
+| `constant-vus` | `lib/executor/constant_vus.go:L18` | `lib/executor/constant_vus.go:L21` |
+| `ramping-vus` | `lib/executor/ramping_vus.go:L19` | `lib/executor/ramping_vus.go:L22` |
+| `shared-iterations` | `lib/executor/shared_iterations.go:L19` | `lib/executor/shared_iterations.go:L22` |
+| `per-vu-iterations` | `lib/executor/per_vu_iterations.go:L19` | `lib/executor/per_vu_iterations.go:L22` |
+| `constant-arrival-rate` | `lib/executor/constant_arrival_rate.go:L21` | `lib/executor/constant_arrival_rate.go:L24` |
+| `ramping-arrival-rate` | `lib/executor/ramping_arrival_rate.go:L20` | `lib/executor/ramping_arrival_rate.go:L23` |
+| `externally-controlled` | `lib/executor/externally_controlled.go:L21` | `lib/executor/externally_controlled.go:L24` |
 
 The executors invoke each iteration through a common helper — `err := vu.RunOnce()` `[lib/executor/helpers.go:L108]` — and emit the `dropped_iterations` counter when they cannot start a scheduled iteration in time. The four emission sites (each referencing `...BuiltinMetrics.DroppedIterations`):
 
@@ -345,7 +410,7 @@ default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  1/1 shared iters
 
 - `* default: 1 iterations shared among 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)` — the default executor selected by `--iterations` is **`shared-iterations`** (`lib/executor/shared_iterations.go`).
 - **`     iterations...........: 1   97.73205/s`** — the traced built‑in `iterations` `Counter`, accumulated to **exactly `1`** (the rate `97.73205/s` reflects the ~10 ms iteration and will vary run‑to‑run).
-- `     iteration_duration...: avg=10.12ms ...` — the *paired* `iteration_duration` `Trend` sample built alongside `iterations` in the same `iterationSamples(...)` call (see step 8 below), corroborating the ~10 ms `sleep(0.01)`.
+- `     iteration_duration...: avg=10.12ms ...` — the *paired* `iteration_duration` `Trend` sample built alongside `iterations` in the same `iterationSamples(...)` call (see step 14 below), corroborating the ~10 ms `sleep(0.01)`.
 - `running (00m00.0s), 0/1 VUs, 1 complete and 0 interrupted iterations` and `default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  1/1 shared iters`.
 
 ### The ordered function‑call chain (from run start to output)
@@ -357,18 +422,19 @@ Every step is verified against commit `ddc3b0b1d2`.
 3. **`cmd/run.go:L220`** — `outputManager := output.NewManager(outputs, logger, ...)` (→ `output/manager.go:L23`).
 4. **`cmd/run.go:L227`** — `samples := make(chan metrics.SampleContainer, test.derivedConfig.MetricSamplesBufferSize.Int64)` — the **buffered sample channel**.
 5. **`cmd/run.go:L228`** — `outputManager.Start(samples)` starts the consumer goroutine (→ `output/manager.go:L42`).
-6. **`cmd/run.go:L367` / `:L397`** — `execScheduler.Init(runCtx, samples)` then `execScheduler.Run(globalCtx, runCtx, samples)`.
+6. **`cmd/run.go:L367`** then **`cmd/run.go:L397`** — `execScheduler.Init(runCtx, samples)` then `execScheduler.Run(globalCtx, runCtx, samples)`.
 7. *(Setup, earlier)* the built‑in `iterations` `Counter` was created via `cmd/test_load.go:L75` → `metrics/builtin.go:L82`.
-8. **`execution/scheduler.go:L419`** — `func (e *Scheduler) Run(globalCtx, runCtx context.Context, samplesOut chan<- metrics.SampleContainer)` receives the channel; at **`execution/scheduler.go:L133`** it constructs the VU: `e.state.Test.Runner.NewVU(ctx, vuIDLocal, vuIDGlobal, samplesOut)`.
-9. **`js/runner.go:L226`** — `Samples: samplesOut` stores the channel on the VU, and **`js/runner.go:L241`** copies it into the VU's `lib.State`: `Samples: vu.Samples` (the field is `Samples chan<- metrics.SampleContainer` at `lib/vu_state.go:L59`).
-10. **`lib/executor/helpers.go:L108`** — the shared‑iterations executor drives the iteration: `err := vu.RunOnce()`.
-11. **`js/runner.go:L724`** — `func (u *ActiveVU) RunOnce() error` runs the default function; **`js/runner.go:L755`** bumps the per‑VU counter via `u.incrIteration()` (defined at `js/runner.go:L904`).
-12. **`js/runner.go:L870`** — the guard `if isFullIteration && isDefault {` → **`js/runner.go:L871`** `u.state.Samples <- iterationSamples(startTime, endTime, ctm, builtinMetrics)` sends the sample onto the channel.
-13. **`js/runner.go:L879`–`L902`** — `iterationSamples(...)` builds the sample with `Metric: builtinMetrics.Iterations` `[js/runner.go:L894]` and `Value: 1` `[js/runner.go:L899]` (and the paired `IterationDuration` sample).
-14. **`output/manager.go:L64`** — the manager goroutine reads it: `case sampleContainer, ok := <-samplesChan:`.
-15. **`output/manager.go:L52`** — it fans the batch out to every output: `out.AddMetricSamples(sampleContainers)` (one of those outputs is the engine ingester).
-16. **`metrics/engine/ingester.go:L90`** — `m.Sink.Add(sample)` routes the value into the metric's own sink.
-17. **`metrics/sink.go:L53`–`L54`** — `func (c *CounterSink) Add(s Sample) { c.Value += s.Value }` accumulates `1`, which is finally surfaced in the end‑of‑test summary as `iterations...........: 1`.
+8. **`execution/scheduler.go:L419`** — `func (e *Scheduler) Run(globalCtx, runCtx context.Context, samplesOut chan<- metrics.SampleContainer)` receives the channel.
+9. **`execution/scheduler.go:L133`** — it constructs the VU passing that same channel: `e.state.Test.Runner.NewVU(ctx, vuIDLocal, vuIDGlobal, samplesOut)`.
+10. **`js/runner.go:L226`** — `Samples: samplesOut` stores the channel on the VU, and **`js/runner.go:L241`** copies it into the VU's `lib.State`: `Samples: vu.Samples` (the field is `Samples chan<- metrics.SampleContainer` at `lib/vu_state.go:L59`).
+11. **`lib/executor/helpers.go:L108`** — the shared‑iterations executor drives the iteration: `err := vu.RunOnce()`.
+12. **`js/runner.go:L724`** — `func (u *ActiveVU) RunOnce() error` runs the default function; **`js/runner.go:L755`** bumps the per‑VU counter via `u.incrIteration()` (defined at `js/runner.go:L904`).
+13. **`js/runner.go:L870`** — the guard `if isFullIteration && isDefault {` → **`js/runner.go:L871`** `u.state.Samples <- iterationSamples(startTime, endTime, ctm, builtinMetrics)` sends the sample onto the channel.
+14. **`js/runner.go:L879`–`L902`** — `iterationSamples(...)` builds the sample with `Metric: builtinMetrics.Iterations` `[js/runner.go:L894]` and `Value: 1` `[js/runner.go:L899]` (and the paired `IterationDuration` sample).
+15. **`output/manager.go:L64`** — the manager goroutine reads it: `case sampleContainer, ok := <-samplesChan:`.
+16. **`output/manager.go:L52`** — it fans the batch out to every output: `out.AddMetricSamples(sampleContainers)` (one of those outputs is the engine ingester).
+17. **`metrics/engine/ingester.go:L90`** — `m.Sink.Add(sample)` routes the value into the metric's own sink.
+18. **`metrics/sink.go:L53`–`L54`** — `func (c *CounterSink) Add(s Sample) { c.Value += s.Value }` accumulates `1`, which is finally surfaced in the end‑of‑test summary as `iterations...........: 1`.
 
 ```mermaid
 graph TD
@@ -406,7 +472,7 @@ A **producer** (the JS VU) writes a `Value:1` sample onto a **buffered channel**
 
 - **Measured values vary.** Timing‑derived figures — the `iterations` rate (`97.73205/s`), `iteration_duration` (`10.12ms`), and per‑test elapsed times (e.g. `7.995s`, `65.690s`) — are from this specific run and will differ slightly on re‑runs. The *counts* (52/2/28 packages; 4419/6/1 tests) and the emitted `iterations` **value of `1`** are stable.
 - **The 2 failing packages are environment‑sensitive, not defects.** They fail only because the sandbox clock (`2026‑07‑01`) is past the validity window of k6's baked‑in **test** certificates (`remote error: tls: bad certificate`). This is reported, **not fixed**, per the read‑only directive.
-- **Attribution nuance (tc39).** The `TestTC39` skip is reported at `tc39_test.go:L799` (the call site) rather than the `t.Skipf` at `L807`, because `runTestTC39` calls `t.Helper()` `[js/tc39/tc39_test.go:L804]`.
+- **Attribution nuance (tc39).** The `TestTC39` skip is reported at `js/tc39/tc39_test.go:L799` (the call site) rather than the `t.Skipf` at `js/tc39/tc39_test.go:L807`, because `runTestTC39` calls `t.Helper()` `[js/tc39/tc39_test.go:L804]`.
 - **Source is the source of truth.** Grafana's public k6 docs corroborate the four‑type metric taxonomy and the "built‑ins are summarized at end of test" behavior, but every claim here is grounded in the k6 source at commit `ddc3b0b1d2` and in observed runtime output.
 - **Repository untouched.** The only file added is this document; the built binary and the trace script lived under `/tmp` and were removed. `go.mod`/`go.sum`/`vendor/` and all `.go`, test, build, and CI files are unchanged.
 
