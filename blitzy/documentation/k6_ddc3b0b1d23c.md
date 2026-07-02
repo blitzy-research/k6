@@ -53,7 +53,7 @@ The five VU states are declared `stopped, starting, running, toGracefulStop, toH
 
 `gracefulStop()` transitions `running → toGracefulStop` via `vh.changeState(toGracefulStop)` [`lib/executor/vu_handle.go:158`] and logs `"Graceful stop"` [`lib/executor/vu_handle.go:161`] (the method spans [`lib/executor/vu_handle.go:147-161`]).
 
-The window during which such a VU is kept alive is produced by `reserveVUsForGracefulRampDowns` [`lib/executor/ramping_vus.go:307-417`], and the relevant default is `GracefulRampDown: types.NewNullDuration(30*time.Second, false)` [`lib/executor/ramping_vus.go:52`] — i.e. `30s`. The raw active-target steps that drive it come from `getRawExecutionSteps` [`lib/executor/ramping_vus.go:171`].
+The window during which such a VU is kept alive is produced by `reserveVUsForGracefulRampDowns` [`lib/executor/ramping_vus.go:307-414`], and the relevant default is `GracefulRampDown: types.NewNullDuration(30*time.Second, false)` [`lib/executor/ramping_vus.go:52`] — i.e. `30s`. The raw active-target steps that drive it come from `getRawExecutionSteps` [`lib/executor/ramping_vus.go:171`].
 
 **Observed evidence.** A temporary `ramping-vus` scenario mirroring the user's config (`startVUs` `0`, `gracefulRampDown` `'30s'`, `stages` `3s→10, 2s→1, 3s→10, 2s→0`, iteration body `sleep(5)`) was run with `--verbose`:
 
@@ -61,7 +61,7 @@ The window during which such a VU is kept alive is produced by `reserveVUsForGra
 ./k6 run --verbose oscillate.js
 ```
 
-Across the whole run the debug log contained **20x `"Start"`**, **19x `"Graceful stop"`**, and **0x `"Hard stop"`**. This Q1 run produced **0 hard stops** because every VU's `sleep(5)` iteration completed within the `30s` `gracefulRampDown` reserve, so each ramped-down VU reached `stopped` on its own before the reserve shrank. This is **not** a general guarantee for the executor: `maxAllowedVUsHandlerStrategy` *can* hard-stop VUs — it calls `rs.vuHandles[cur-1].hardStop()` once the reserved/max-allowed count itself shrinks [`lib/executor/ramping_vus.go:668-676`] (which would occur if an iteration outlived its `gracefulRampDown` window).
+Across the whole run the debug log contained **19x `"Start"`**, **19x `"Graceful stop"`**, and **0x `"Hard stop"`** VU events — counted with `grep -c 'msg=Start executor=ramping-vus'` (and the analogous `"Graceful stop"` / `"Hard stop"` patterns), which excludes the one unrelated `msg=Starting...` engine line. The 19 starts are deterministic across repeated runs: VU 0 starts once and VUs 1–9 start twice each (`1 + 9×2 = 19`), matching the ramp shape `0→10→1→10→0` (10 starts on the first ramp-up, 9 more on the second). This Q1 run produced **0 hard stops** because every VU's `sleep(5)` iteration completed within the `30s` `gracefulRampDown` reserve, so each ramped-down VU reached `stopped` on its own before the reserve shrank. This is **not** a general guarantee for the executor: `maxAllowedVUsHandlerStrategy` *can* hard-stop VUs — it calls `rs.vuHandles[cur-1].hardStop()` once the reserved/max-allowed count itself shrinks [`lib/executor/ramping_vus.go:668-676`] (which would occur if an iteration outlived its `gracefulRampDown` window).
 
 The lifecycle of VU 1 shows the lingering `toGracefulStop → running` transition directly (verbatim):
 
@@ -193,7 +193,7 @@ Observed: `SIGINT` was sent at `19:57:08.635` and the process exited at `19:57:0
 **Answer (two parts).**
 
 - **(a) The per-segment skew is REAL and deterministic.** When the total is not divisible by 3, the **first** segment `0:1/3` receives the round-up extra VU — this is the "one instance consistently shows more VUs than the others".
-- **(b) A true simultaneous sum-over-max is NOT reproduced.** Striping guarantees the per-segment maxes sum **exactly** to the global max. The perceived overflow is the ±1 skew read at **non-identical sampling instants** (different instances sampled at slightly different times).
+- **(b) A true simultaneous sum-over-max is NOT reproduced.** Striping guarantees the per-segment maxes sum **exactly** to the global max (measured: aligned peak `[4,3,3]=10`, **0** samples `> 10`, for both the active `vus` and the reserved `vus_max`). The impression of "exceeding the maximum" comes from the round-up **skew** (one instance shows `4`), possibly read across instances at **non-identical sampling instants**, rather than any instant where the true simultaneous total is `> 10`.
 
 Per-segment striping is seeded by `index = lib.NewSegmentedIndex(et)` [`lib/executor/ramping_vus.go:176`]. Scaling rounds up: `Scale` ends `return roundUp(toValue).Int64()` [`lib/execution_segment.go:253-273`] (helper `roundUp` at [`lib/execution_segment.go:242`]). The striping primitive constructor is `NewSegmentedIndex` [`lib/execution_segment.go:776`]. Each instance builds its tuple with `lib.NewExecutionTuple(options.ExecutionSegment, options.ExecutionSegmentSequence)` [`execution/scheduler.go:40`]; an executor with no work on a segment is disabled with `"Executor '%s' is disabled for segment %s due to lack of work!"` [`execution/scheduler.go:57`] (guarded at [`execution/scheduler.go:54-58`]).
 
@@ -205,13 +205,13 @@ Per-segment striping is seeded by `index = lib.NewSegmentedIndex(et)` [`lib/exec
 
 Ramping to a peak of 10, the per-segment `vus_max` values were **4, 3, 3** for segments `0:1/3`, `1/3:2/3`, `2/3:1` respectively, while the **global `vus_max` = 10** (`4+3+3 = 10` — the first segment gets the round-up extra).
 
-Aligning the per-second `vus` time-series across the three instances, the **maximum simultaneous sum across segments = 9** (≤ 10). The peak aligned per-second sample (verbatim, `instance-0,instance-1,instance-2`) was:
+Aligning the per-second `vus` time-series across the three instances (one CSV sample per Unix second, via `--out csv=`), the **maximum simultaneous sum across segments equals the global max of 10 and never exceeds it**. Across repeated concurrent runs, **0 aligned samples had a sum `> 10`**. When the three instances are launched near-simultaneously they reach their plateau together, so the peak aligned per-second sample (verbatim, `instance-0,instance-1,instance-2`) is:
 
 ```
-20:00:01 -> [4,3,2]=9
+[4,3,3]=10
 ```
 
-There is **no true overflow**.
+If instead the instances are offset in wall-clock time (as three independent processes generally are), the observed peak reads *lower* than 10 — e.g. `[4,3,2]=9` when segment `2/3:1` has not yet reached its own peak at that sampled instant — but the sum is **never `> 10`**. There is **no true overflow** either way.
 
 A `constant-vus` sweep of the sum of per-segment `vus_max` against the global `N` (verbatim):
 
@@ -238,8 +238,8 @@ ok  	go.k6.io/k6/lib/executor	2.838s
 **Claim ↔ evidence.**
 
 - "The first segment gets the extra VU (deterministic skew)" ↔ the per-segment `vus_max = 4, 3, 3` and the sweep line (`N=10→[4,3,3]=10`, `N=1→[1,0,0]=1`, …).
-- "No true instantaneous sum-over-max" ↔ the aligned time-series max sum `= 9 (≤ 10)` at `20:00:01 → [4,3,2]=9`, the sweep where every sum equals `N`, and the `TestSumRandomSegmentSequenceMatchesNoSegment` PASS.
-- **Rationale (the "why"):** `Scale` rounds up [`lib/execution_segment.go:253-273`] and striping via `NewSegmentedIndex` [`lib/executor/ramping_vus.go:176`, `lib/execution_segment.go:776`] deterministically assigns the extra VU to the earliest segment; because the segments partition `(0,1]` exactly, the rounded per-segment counts still sum to the global `N`. A naive observer summing instances sampled at different instants sees a transient ±1 that *looks* like "over max" but is not simultaneous.
+- "No true instantaneous sum-over-max" ↔ the aligned time-series peak `[4,3,3]=10` with **0 samples `> 10`** (well-synchronized instances reach exactly the global max; offset instances read lower, e.g. `[4,3,2]=9`), the sweep where every sum equals `N`, and the `TestSumRandomSegmentSequenceMatchesNoSegment` PASS.
+- **Rationale (the "why"):** `Scale` rounds up [`lib/execution_segment.go:253-273`] and striping via `NewSegmentedIndex` [`lib/executor/ramping_vus.go:176`, `lib/execution_segment.go:776`] deterministically assigns the extra VU to the earliest segment; because the segments partition `(0,1]` exactly, the striped per-segment counts still sum to the global `N` (this holds for the reserved `vus_max` too — measured max aligned sum `10`, `0` samples `> 10`). The impression of "exceeding the maximum" comes from the round-up skew — one instance shows `4` where a naive `10/3 ≈ 3.33` split would suggest `3` — possibly combined with reading the three instances at non-identical instants; but summing each instance's peak gives `4+3+3 = 10`, i.e. **exactly** the configured maximum and never above it.
 
 ---
 
@@ -330,7 +330,7 @@ Explicit confirmation that every sub-question, the central deliverable, and the 
 - [x] **Q2 — handler-count mismatch** answered as by-design `vus` vs `vus_max`; strategies [`ramping_vus.go:678-689`, `:668-676`] plus the observed `vus`/`vus_max` block.
 - [x] **Q3 — interrupt vs `gracefulStop`** answered, with the user's expectation explicitly **contradicted** and reported as-observed: Run A `0.031 s` vs `60 s`, `K6_EXIT_CODE=105`; Run B `0.035 s`, `EXIT_CODE=105` — each with adjacent command/script provenance.
 - [x] **Q4 — segment skew** answered: the first segment gets the round-up extra (`vus_max = 4, 3, 3`; sweep `N=10→[4,3,3]=10`).
-- [x] **Q4 — sum-over-max** answered: no true simultaneous overflow (aligned `20:00:01 -> [4,3,2]=9`; every sweep sum `= N`; `--- PASS: TestSumRandomSegmentSequenceMatchesNoSegment`).
+- [x] **Q4 — sum-over-max** answered: no true simultaneous overflow (aligned peak `[4,3,3]=10` with 0 samples `> 10`; every sweep sum `= N`; `--- PASS: TestSumRandomSegmentSequenceMatchesNoSegment`).
 - [x] **Q5 — race vs leak** answered: no data race (`--- PASS`, no `WARNING: DATA RACE`) and no VU-buffer leak (1:1 `getVU`/`returnVU`); goleak-scope nuance stated.
 - [x] **Q6 — simultaneous-modification trace** delivered: serialized dispatch [`ramping_vus.go:620-642`, `:549-558`] + mutex/atomic per-VU guards [`vu_handle.go:115-181`].
 - [x] **Every named item** (functions, states, handlers, VU buffer, flags/config, signals, literals, files, nuances) swept by name in §8, each grounded at `file:line`.
