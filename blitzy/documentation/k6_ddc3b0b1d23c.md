@@ -11,14 +11,14 @@ The exact binary under investigation, built from this checkout:
 ```
 $ go build -mod=vendor -o /tmp/k6bin/k6 .
 $ /tmp/k6bin/k6 version
-k6 v0.55.0 (commit/f4e7b4145a, go1.23.10, linux/amd64)
-$ git rev-parse --short=10 HEAD          # the "commit/…" segment is exactly this
-f4e7b4145a
+k6 v0.55.0 (commit/<HEAD>, go1.23.10, linux/amd64)   # <HEAD> = git rev-parse --short=10 HEAD
+$ git rev-parse --short=10 HEAD          # prints exactly the "commit/…" segment shown above
+<HEAD>
 ```
 
-This confirms **version `v0.55.0`** and **toolchain `go1.23.10`** — both are fixed values. The **commit segment is deliberately *not* a fixed string**: k6 stamps it from the **current `git HEAD`** at build time, so it always equals `git rev-parse --short=10 HEAD` (the block above is a snapshot captured at `HEAD` `f4e7b4145a`; **your checkout's `HEAD` will differ** — the two values above just have to match each other) and it changes with **every** commit on the branch. This is exactly why the commit differs from the source commit `ddc3b0b1d2` — so, to be precise about the mechanism: k6 does **not** hard‑code the commit. Only the *version* is a constant — `const Version = "0.55.0"` `[lib/consts/consts.go:L12]`. The *commit* is read at build time from Go's build info: `debug.ReadBuildInfo()` `[lib/consts/consts.go:L19]` → the `vcs.revision` setting `[lib/consts/consts.go:L30]`, truncated to the first 10 characters (`commitLen := 10` `[lib/consts/consts.go:L31]`) and rendered at `[lib/consts/consts.go:L52]`. Because `vcs.revision` is the current `HEAD`, the **reproducible reading of the line is: the `commit/…` segment *is* your checkout's `HEAD`** — verify it with the `git rev-parse` shown above.
+This confirms **version `v0.55.0`** and **toolchain `go1.23.10`** — both are fixed values. The **commit segment is deliberately *not* a fixed string**: k6 stamps it from the **current `git HEAD`** at build time, so it always equals `git rev-parse --short=10 HEAD` (the block above shows this as `<HEAD>` precisely because the value is simply whatever your checkout's current `HEAD` is — the two `<HEAD>` lines above are equal by construction) and it changes with **every** commit on the branch. This is exactly why the commit differs from the source commit `ddc3b0b1d2` — so, to be precise about the mechanism: k6 does **not** hard‑code the commit. Only the *version* is a constant — `const Version = "0.55.0"` `[lib/consts/consts.go:L12]`. The *commit* is read at build time from Go's build info: `debug.ReadBuildInfo()` `[lib/consts/consts.go:L19]` → the `vcs.revision` setting `[lib/consts/consts.go:L30]`, truncated to the first 10 characters (`commitLen := 10` `[lib/consts/consts.go:L31]`) and rendered at `[lib/consts/consts.go:L52]`. Because `vcs.revision` is the current `HEAD`, the **reproducible reading of the line is: the `commit/…` segment *is* your checkout's `HEAD`** — verify it with the `git rev-parse` shown above.
 
-**Why `HEAD` is `f4e7b4145a` and not the source commit `ddc3b0b1d2`, and why citations still pin to `ddc3b0b1d2`:** this deliverable adds documentation‑only commits on top of source commit `ddc3b0b1d2`, and those commits touch **only this file**. Using `--name-status` (whose output is stable and does **not** drift as this document itself grows), the diff reports exactly one changed path — added, marked `A` — and a `.go`‑filtered diff reports **zero** source files changed (the same holds for test, build, and config files):
+**Why the built‑binary `HEAD` differs from the source commit `ddc3b0b1d2`, and why citations still pin to `ddc3b0b1d2`:** this deliverable adds documentation‑only commits on top of source commit `ddc3b0b1d2`, and those commits touch **only this file**. Using `--name-status` (whose output is stable and does **not** drift as this document itself grows), the diff reports exactly one changed path — added, marked `A` — and a `.go`‑filtered diff reports **zero** source files changed (the same holds for test, build, and config files):
 
 ```
 $ git diff ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD --name-status
@@ -27,7 +27,7 @@ $ git diff ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD --name-only -- '*.go' 
 0
 ```
 
-So a build from the delivered checkout stamps **that checkout's `HEAD`** into the `commit/…` segment (confirm with `git rev-parse --short=10 HEAD`), while every `file:line` citation in this document remains pinned to, and byte‑for‑byte valid at, source commit `ddc3b0b1d2` (no cited source file changed — see the `--name-status` diff above). In short: the **version, the toolchain, and every citation reproduce exactly**, and the **commit segment reproduces as `= HEAD` by construction**. (Aside: building with *uncommitted* changes in the tree sets `vcs.modified=true` `[lib/consts/consts.go:L36]`, appending a `-dirty` suffix `[lib/consts/consts.go:L49]` — e.g. `commit/f4e7b4145a-dirty` — so a clean checkout is required to reproduce the un‑suffixed form.)
+So a build from the delivered checkout stamps **that checkout's `HEAD`** into the `commit/…` segment (confirm with `git rev-parse --short=10 HEAD`), while every `file:line` citation in this document remains pinned to, and byte‑for‑byte valid at, source commit `ddc3b0b1d2` (no cited source file changed — see the `--name-status` diff above). In short: the **version, the toolchain, and every citation reproduce exactly**, and the **commit segment reproduces as `= HEAD` by construction**. (Aside: building with *uncommitted* changes in the tree sets `vcs.modified=true` `[lib/consts/consts.go:L36]`, appending a `-dirty` suffix `[lib/consts/consts.go:L49]` — e.g. `commit/<HEAD>-dirty` — so a clean checkout is required to reproduce the un‑suffixed form.)
 
 ## Environment & reproducibility
 
@@ -37,11 +37,11 @@ So a build from the delivered checkout stamps **that checkout's `HEAD`** into th
 | C compiler (needed by `-race`) | `gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0` |
 | Module / version | `go.k6.io/k6` `[go.mod:L1]`, k6 `v0.55.0` |
 | Source commit under investigation (all `file:line` citations pinned here) | `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (short `ddc3b0b1d2`) |
-| Built‑binary commit (what `k6 version` prints) | `= git rev-parse --short=10 HEAD` (the current `HEAD`; `f4e7b4145a` at the tested HEAD). Documentation‑only commits sit on top of `ddc3b0b1d2`; see the explanation above |
+| Built‑binary commit (what `k6 version` prints) | `= git rev-parse --short=10 HEAD` (i.e. whatever the current `HEAD` is — written as `<HEAD>` throughout). Documentation‑only commits sit on top of `ddc3b0b1d2`; see the explanation above |
 | Dependencies | **vendored** (`vendor/`), so every command uses `-mod=vendor` (offline) |
 | Wall clock during the run | `Wed Jul  1 21:36:31 UTC 2026` (`date -u`) — relevant to Q1's TLS findings |
 
-All commands below are runnable as-is from the repository root. Every `file:line` citation is pinned to **source commit `ddc3b0b1d2`**; those anchors are unaffected by the documentation‑only commits (which change no source file, as the `git diff --name-status` above shows). Building from the delivered checkout therefore reproduces the version, the toolchain, and every citation exactly, and stamps **that checkout's `HEAD`** into the `commit/…` segment (it was `f4e7b4145a` at the tested HEAD; confirm yours with `git rev-parse --short=10 HEAD`). Temporary artifacts (the built binary and a throwaway script) were written **outside** the repository under `/tmp` and removed afterward, so the working tree is left byte‑for‑byte unchanged.
+All commands below are runnable as-is from the repository root. Every `file:line` citation is pinned to **source commit `ddc3b0b1d2`**; those anchors are unaffected by the documentation‑only commits (which change no source file, as the `git diff --name-status` above shows). Building from the delivered checkout therefore reproduces the version, the toolchain, and every citation exactly, and stamps **that checkout's `HEAD`** into the `commit/…` segment (written as `<HEAD>`; confirm yours with `git rev-parse --short=10 HEAD`). Temporary artifacts (the built binary and a throwaway script) were written **outside** the repository under `/tmp` and removed afterward, so the working tree is left byte‑for‑byte unchanged.
 
 ---
 
@@ -306,7 +306,7 @@ Two nuances worth calling out:
 
 | Metric | Result |
 |--------|--------|
-| Build (`k6 version`) | ✅ `k6 v0.55.0 (commit/<HEAD>, go1.23.10, linux/amd64)` where `<HEAD>` = `git rev-parse --short=10 HEAD` (`f4e7b4145a` at the tested HEAD); source commit under investigation is `ddc3b0b1d2` — see *Environment & reproducibility* |
+| Build (`k6 version`) | ✅ `k6 v0.55.0 (commit/<HEAD>, go1.23.10, linux/amd64)` where `<HEAD>` = `git rev-parse --short=10 HEAD`; source commit under investigation is `ddc3b0b1d2` — see *Environment & reproducibility* |
 | Packages | 82 total → **52 ok**, **2 FAIL**, **28** no‑test‑files |
 | Tests + subtests | **4419 PASS**, **6 FAIL**, **1 SKIP** |
 | Broken (build/compile) packages | **0** (stderr was empty) |
@@ -429,7 +429,7 @@ The executors invoke each iteration through a common helper — `err := vu.RunOn
 - `output/helpers.go`: reusable `type SampleBuffer struct` `[output/helpers.go:L15]` and `type PeriodicFlusher struct` `[output/helpers.go:L55]`.
 - Concrete backends present in the tree: **`output/json`**, **`output/csv`**, **`output/influxdb`**, **`output/cloud`**.
 
-**Live metrics over REST — `api/v1/`.** During a run, metrics are exposed via an HTTP control surface: `type ControlSurface struct` `[api/v1/control_surface.go:L14]` holds `MetricsEngine *engine.MetricsEngine` `[api/v1/control_surface.go:L17]` and `RunState *lib.TestRunState` `[api/v1/control_surface.go:L19]`. Routes `/v1/metrics` and `/v1/metrics/{id}` are wired in `api/v1/routes.go` `[api/v1/routes.go:L23,L31]` to the handlers `func handleGetMetrics(...)` `[api/v1/metric_routes.go:L9]` and `func handleGetMetric(...)` `[api/v1/metric_routes.go:L27]`; the JSON‑API serialization lives in `api/v1/metric.go` and `api/v1/metric_jsonapi.go`.
+**Live metrics over REST — `api/v1/`.** During a run, metrics are exposed via an HTTP control surface: `type ControlSurface struct` `[api/v1/control_surface.go:L14]` holds `MetricsEngine *engine.MetricsEngine` `[api/v1/control_surface.go:L17]` and `RunState *lib.TestRunState` `[api/v1/control_surface.go:L19]`. Routes `/v1/metrics` `[api/v1/routes.go:L23]` and `/v1/metrics/` `[api/v1/routes.go:L31]` (the second is a trailing‑slash prefix; the metric id is the remaining path segment, extracted at `[api/v1/routes.go:L37]` via `id := r.URL.Path[len("/v1/metrics/"):]`) are wired to the handlers `func handleGetMetrics(...)` `[api/v1/metric_routes.go:L9]` and `func handleGetMetric(...)` `[api/v1/metric_routes.go:L27]`; the JSON‑API serialization lives in `api/v1/metric.go` and `api/v1/metric_jsonapi.go`.
 
 **Where the built‑in metrics get registered.** Two entry points call `RegisterBuiltinMetrics`:
 
@@ -494,7 +494,7 @@ default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  1/1 shared iters
 
 ### The ordered function‑call chain (from run start to output)
 
-Every step is verified against source commit `ddc3b0b1d2` (the `file:line` anchors below; recall the built binary stamps whatever the current `HEAD` is — e.g. `f4e7b4145a` at the tested HEAD — but no cited source changed).
+Every step is verified against source commit `ddc3b0b1d2` (the `file:line` anchors below; recall the built binary stamps whatever the current `HEAD` is — written as `<HEAD>` — but no cited source changed).
 
 1. **`cmd/run.go:L170`** — `metricsEngine, err := engine.NewMetricsEngine(testRunState.Registry, logger)` builds the engine (→ `metrics/engine/engine.go:L44`).
 2. **`cmd/run.go:L187`** — `metricsIngester = metricsEngine.CreateIngester()` creates the sample→sink ingester (→ `metrics/engine/engine.go:L56`).
