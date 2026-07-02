@@ -12,30 +12,51 @@ Every behavioral claim below is paired with the exact command that produced it a
 
 ## Environment and build provenance (why this evidence is attributable)
 
-- **Repository commit:** branch `k6_ddc3b0b1d23c`, HEAD `ddc3b0b1d23c128e34e2792fc9075f9126e32375`; Go module `go.k6.io/k6` (`go.mod` declares `go 1.21` with `toolchain go1.21.13`).
-- **Binary under study:** built from *this* checked-out commit with Go 1.23.4, using the repository's vendored dependencies (`GOFLAGS=-mod=vendor`), into a scratch path **outside** the repository (`/tmp/k6scratch/k6bin`) so the working tree is never dirtied.
+Two distinct commits matter here, and conflating them is exactly what makes provenance confusing:
+
+- **The k6 *source* commit under study** is `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (branch `k6_ddc3b0b1d23c`, after which this file is named). Go module `go.k6.io/k6` (`go.mod` declares `go 1.21` with `toolchain go1.21.13`).
+- **The branch *tip*** carries this answer document committed *on top of* that source commit, so the tip is a **different, later** commit than the source commit. Obtain the tip with `git rev-parse --short=10 HEAD`; it does **not** equal `ddc3b0b1d2`.
+
+**Why the distinction matters — k6 stamps the git HEAD, not the source-tree state.** k6's version string is produced by `FullVersion()` (`lib/consts/consts.go:16`), which reads Go's build info and takes the first ten characters of the `vcs.revision` build setting (`case "vcs.revision":` at `lib/consts/consts.go:30`; `commit = s.Value[:commitLen]` at `lib/consts/consts.go:35`), appending `-dirty` only when `vcs.modified` is `true` (`lib/consts/consts.go:36`). `vcs.revision` is the **git HEAD at build time**, so the short hash in the banner equals whatever commit is checked out when you build — *not* the state of the k6 source files. Building at the branch tip stamps the tip's hash; building at the pinned source commit stamps `ddc3b0b1d2`.
+
+**The k6 source is byte-identical to that source commit — only this document was added on top.** Every k6 `.go` file is unchanged, so every behavior observed below is identical whether you build the tip or the source commit. Proof — the diff outside `blitzy/` is empty, and the only net-new file is this document (run from any checkout of this branch):
+
+```
+$ git diff --stat ddc3b0b1d23c128e34e2792fc9075f9126e32375 HEAD -- . ':(exclude)blitzy/'
+$ git diff --name-only ddc3b0b1d23c128e34e2792fc9075f9126e32375 HEAD
+blitzy/documentation/k6_ddc3b0b1d23c.md
+```
+
+The first command prints nothing (no k6 source file differs); the second shows the sole net-new file is this answer document.
+
+- **Binary under study:** built from the **pinned source commit** `ddc3b0b1d23c` with Go 1.23.4, using the repository's vendored dependencies (`GOFLAGS=-mod=vendor`), into a scratch path **outside** the repository (`/tmp/k6scratch/k6bin`) so the working tree is never dirtied.
 - **Version banner (quoted verbatim):**
 
 ```
 k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)
 ```
 
-  The `commit/ddc3b0b1d2` segment proves the binary matches the branch under study (`k6_ddc3b0b1d23c`, full commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375`).
+  The `commit/ddc3b0b1d2` segment is the first ten characters of the source commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375`, confirming the binary was built from the source under study. (The banner's leading token, `k6bin`, is just the binary's filename.)
 
 - **Read-only guarantee:** the compiled binary, the temporary scripts, and the temporary config file all lived under `/tmp/k6scratch` (outside the repository) and were deleted afterward; the repository working tree stayed clean (`git status --porcelain` was empty before, during, and after the investigation).
 
 ### Reproduction harness
 
-A reader can reproduce every result below with the following steps (no temporary files from this investigation are required — they are described in the appendix):
+Because the banner stamps the git HEAD, building directly at the branch tip yields the *tip's* hash (whatever `git rev-parse --short=10 HEAD` reports), not `ddc3b0b1d2`. To reproduce the exact `commit/ddc3b0b1d2` banner — and, because the source is identical, every run below — build from the **pinned source commit** in a fresh clone with a real `.git` directory. From any checkout of this branch:
 
 ```
-# 1. Build k6 from the checked-out commit, vendored deps, into a scratch path
-#    OUTSIDE the repository so the source tree stays clean.
-mkdir -p /tmp/k6scratch
-cd <repo-root>
-GOFLAGS=-mod=vendor go build -o /tmp/k6scratch/k6bin .
+# 1. Make a fresh clone of THIS repository and check out the pinned SOURCE commit,
+#    so the git HEAD (which k6 stamps into its banner) is exactly ddc3b0b1d23c.
+#    (A linked `git worktree` does NOT get VCS-stamped by Go; a fresh clone does.)
+git clone --no-hardlinks <repo-root> /tmp/k6clone
+git -C /tmp/k6clone checkout ddc3b0b1d23c128e34e2792fc9075f9126e32375
 
-# 2. Confirm the binary matches the commit under study.
+# 2. Build from that pinned commit, vendored deps, into a scratch path
+#    OUTSIDE the repository so the source tree stays clean. Name the output `k6bin`.
+mkdir -p /tmp/k6scratch
+( cd /tmp/k6clone && GOFLAGS=-mod=vendor go build -o /tmp/k6scratch/k6bin . )
+
+# 3. Confirm the binary matches the SOURCE commit under study.
 /tmp/k6scratch/k6bin version
 # => k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)
 ```
@@ -253,10 +274,11 @@ The `-e`/`--env` flag only injects a value into the script's `__ENV` object; it 
 $ /tmp/k6scratch/k6bin run --no-color -e DURATION=9s s_dur_env.js
 ```
 
-The `setup()` console line proves the value was injected into `__ENV` (quoted verbatim):
+The `setup()` console line proves the value was injected into `__ENV`. k6 prefixes every console line with a volatile wall-clock `time="…"`; stripping only that prefix leaves a stable, reproducible line (command and verbatim output):
 
 ```
-time="2026-07-01T22:11:40Z" level=info msg="SETUP sees __ENV.DURATION=9s" source=console
+$ /tmp/k6scratch/k6bin run --no-color -e DURATION=9s s_dur_env.js 2>&1 | grep 'SETUP sees' | sed 's/^time="[^"]*" //'
+level=info msg="SETUP sees __ENV.DURATION=9s" source=console
 ```
 
 But the banner is **unchanged** at the script's `3s`:
@@ -355,18 +377,18 @@ Banner — the run uses the **frozen** `2` VUs and `6` iterations:
 * default: 6 iterations shared among 2 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 ```
 
-The raw console output (quoted verbatim from this run, including the full k6 log prefix — `time=`, `level=info`, `msg=`, `source=console`) is **six lines**, each confirming the JS-side object was in fact mutated to `999`:
+The console output is **six lines**, each confirming the JS-side object was in fact mutated to `999`. Below is a **sample from one run with the volatile `time="…"` prefix stripped** (`… 2>&1 | grep source=console | sed 's/^time="[^"]*" //'`). This block is **illustrative, not reproducible verbatim** — both the line order and the per-VU iteration split vary between runs (the `shared-iterations` executor hands iterations to whichever VU is free); the reproducible proof is the deterministic extraction that follows it:
 
 ```
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=0 script_reads_options.vus=999" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=0 script_reads_options.vus=999" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=1 script_reads_options.vus=999" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=2 script_reads_options.vus=999" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=3 script_reads_options.vus=999" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=1 script_reads_options.vus=999" source=console
+level=info msg="obs VU=2 ITER=0 script_reads_options.vus=999" source=console
+level=info msg="obs VU=1 ITER=0 script_reads_options.vus=999" source=console
+level=info msg="obs VU=2 ITER=1 script_reads_options.vus=999" source=console
+level=info msg="obs VU=1 ITER=1 script_reads_options.vus=999" source=console
+level=info msg="obs VU=2 ITER=2 script_reads_options.vus=999" source=console
+level=info msg="obs VU=1 ITER=2 script_reads_options.vus=999" source=console
 ```
 
-The interleaving order varies between runs, so the invariants are extracted deterministically from a captured run. There are exactly **6** console lines; the executing VU ids are **only `1` and `2`**; the VU id `999` never appears; yet every one of the 6 lines shows the object was mutated to `vus=999`:
+The reproducible invariants are extracted deterministically from a captured run. There are exactly **6** console lines; the executing VU ids are **only `1` and `2`**; the VU id `999` never appears; yet every one of the 6 lines shows the object was mutated to `vus=999`:
 
 ```
 $ /tmp/k6scratch/k6bin run --no-color s_freeze.js 2>&1 | tee /tmp/freeze.out >/dev/null
@@ -381,13 +403,14 @@ $ grep -c 'script_reads_options.vus=999' /tmp/freeze.out
 6
 ```
 
-Summary — exactly `6` iterations total:
+Summary — exactly `6` iterations total. k6's summary appends a volatile throughput rate (`…/s`) after the count, so only the stable integer count is quoted, extracted deterministically:
 
 ```
-iterations...........: 6   16557.936219/s
+$ /tmp/k6scratch/k6bin run --no-color s_freeze.js 2>&1 | grep -oE 'iterations\.+: [0-9]+'
+iterations...........: 6
 ```
 
-**Conclusion:** the script *did* mutate its own `options` object (every line reads `script_reads_options.vus=999`), yet the run still executed with the frozen values — exactly **2** VUs (the executing ids are only `1` and `2`; `grep -c 'VU=999'` returns `0`) running exactly **6** shared iterations (in this run dynamically split as four for VU `1` and two for VU `2`). Mutating `options` at runtime has no effect because the effective options were frozen into `TestRunState.Options` (`cmd/test_load.go:280`) before `execution.NewScheduler` (`execution/scheduler.go:38`) ever read them.
+**Conclusion:** the script *did* mutate its own `options` object (every line reads `script_reads_options.vus=999`), yet the run still executed with the frozen values — exactly **2** VUs (the executing ids are only `1` and `2`; `grep -c 'VU=999'` returns `0`) running exactly **6** shared iterations (the 6 iterations are dynamically split between the 2 VUs, with the exact per-VU split varying between runs). Mutating `options` at runtime has no effect because the effective options were frozen into `TestRunState.Options` (`cmd/test_load.go:280`) before `execution.NewScheduler` (`execution/scheduler.go:38`) ever read them.
 
 
 ---
@@ -479,10 +502,11 @@ Setting `vus` **without** `iterations`/`duration`/`stages` does nothing to the r
 $ /tmp/k6scratch/k6bin run --no-color s_vusalone.js
 ```
 
-The warning is emitted verbatim (its format string is at `lib/executor/execution_config_shortcuts.go:102-105`):
+The warning is emitted (its format string is at `lib/executor/execution_config_shortcuts.go:102-105`). Stripping only the volatile `time="…"` prefix leaves the stable, reproducible warning line (command and verbatim output):
 
 ```
-time="2026-07-01T22:11:43Z" level=warning msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"
+$ /tmp/k6scratch/k6bin run --no-color s_vusalone.js 2>&1 | grep 'will be ignored' | sed 's/^time="[^"]*" //'
+level=warning msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"
 ```
 
 and the run falls through to the 1-VU / 1-iteration default:
@@ -491,8 +515,11 @@ and the run falls through to the 1-VU / 1-iteration default:
 * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 ```
 
+The summary confirms the stable iteration count of `1` (the volatile `…/s` rate is dropped, count extracted deterministically):
+
 ```
-iterations...........: 1   9236.339454/s
+$ /tmp/k6scratch/k6bin run --no-color s_vusalone.js 2>&1 | grep -oE 'iterations\.+: [0-9]+'
+iterations...........: 1
 ```
 
 **Conclusion:** `vus: 5` alone was ignored — the run used the `per-vu-iterations` default of 1 VU / 1 iteration. The warning fires from the `default:` branch only when `opts.VUs.Valid && opts.VUs.Int64 != 1` (`lib/executor/execution_config_shortcuts.go:101`), which is exactly why a lone `vus` produces this message.
@@ -528,10 +555,11 @@ The end-of-test progress line for the named scenario proves both quantities — 
 my_named_scenario ✓ [ 100% ] 3 VUs  00m00.0s/10m0s  6/6 iters, 2 per VU
 ```
 
-and the summary confirms the `6` total iterations:
+and the summary confirms the `6` total iterations (stable count; the volatile `…/s` rate is dropped, count extracted deterministically):
 
 ```
-iterations...........: 6   38328.616784/s
+$ /tmp/k6scratch/k6bin run --no-color s_scenarios.js 2>&1 | grep -oE 'iterations\.+: [0-9]+'
+iterations...........: 6
 ```
 
 The script's `my_named_scenario` is exactly what ran — `3` VUs each running `2` iterations for `6` total.
@@ -579,22 +607,22 @@ Banner — the CLI `--vus 5` froze the VU count over the script's `2`, and `iter
 * default: 10 iterations shared among 5 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 ```
 
-The raw console output (quoted verbatim from this run, including the full k6 log prefix — `time=`, `level=info`, `msg=`, `source=console`) shows VU ids up to `5` executing:
+The console output shows VU ids up to `5` executing. Below is a **sample from one run with the volatile `time="…"` prefix stripped** (`… 2>&1 | grep source=console | sed 's/^time="[^"]*" //'`). This block is **illustrative, not reproducible verbatim** — both the line order and the per-VU iteration distribution vary between runs; the reproducible proof is the deterministic extraction that follows it:
 
 ```
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=5 ITER=0" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=0" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=1" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=2" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=0" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=2 ITER=1" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=5 ITER=1" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=1 ITER=0" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=4 ITER=0" source=console
-time="2026-07-01T22:11:45Z" level=info msg="obs VU=3 ITER=3" source=console
+level=info msg="obs VU=2 ITER=0" source=console
+level=info msg="obs VU=5 ITER=0" source=console
+level=info msg="obs VU=5 ITER=1" source=console
+level=info msg="obs VU=4 ITER=0" source=console
+level=info msg="obs VU=1 ITER=0" source=console
+level=info msg="obs VU=1 ITER=1" source=console
+level=info msg="obs VU=3 ITER=0" source=console
+level=info msg="obs VU=2 ITER=1" source=console
+level=info msg="obs VU=5 ITER=2" source=console
+level=info msg="obs VU=4 ITER=1" source=console
 ```
 
-The interleaving order varies between runs; the frozen invariants — the **set of VU ids** and the **total count** — are extracted deterministically from a captured run. The console lines carry **five distinct VU ids (`1`–`5`)**, matching the banner's frozen `5 VUs`, and there are exactly **10** of them, matching the frozen `iterations: 10` budget:
+The frozen invariants — the **set of VU ids** and the **total count** — are extracted deterministically from a captured run. The console lines carry **five distinct VU ids (`1`–`5`)**, matching the banner's frozen `5 VUs`, and there are exactly **10** of them, matching the frozen `iterations: 10` budget:
 
 ```
 $ /tmp/k6scratch/k6bin run --no-color --vus 5 s_multivu.js 2>&1 | tee /tmp/mv.out >/dev/null
@@ -608,19 +636,20 @@ $ grep -c source=console /tmp/mv.out
 10
 ```
 
-and the summary confirms the same frozen iteration budget:
+and the summary confirms the same frozen iteration budget — the stable count `10` (the volatile `…/s` rate is dropped, count extracted deterministically):
 
 ```
-iterations...........: 10  20243.447702/s
+$ /tmp/k6scratch/k6bin run --no-color --vus 5 s_multivu.js 2>&1 | grep -oE 'iterations\.+: [0-9]+'
+iterations...........: 10
 ```
 
-**Conclusion:** once frozen, the same effective options govern every VU — all **5** VUs drew from the single `shared-iterations` scenario and *together* executed exactly the frozen **10** iterations (in this run dynamically distributed as VU `3` four, VUs `2` and `5` two each, and VUs `1` and `4` one each — summing to 10). This connects directly back to the freeze in section (d): the VU count and the iteration budget were both fixed into `TestRunState.Options` (`cmd/test_load.go:280`) *before* `execution.NewScheduler` (`execution/scheduler.go:38`) built the execution plan via `options.Scenarios.GetFullExecutionRequirements(et)` (`execution/scheduler.go:44`), so no individual VU can deviate from them.
+**Conclusion:** once frozen, the same effective options govern every VU — all **5** VUs drew from the single `shared-iterations` scenario and *together* executed exactly the frozen **10** iterations (the 10 iterations are dynamically distributed among the 5 VUs, with the exact per-VU split varying between runs but always summing to 10). This connects directly back to the freeze in section (d): the VU count and the iteration budget were both fixed into `TestRunState.Options` (`cmd/test_load.go:280`) *before* `execution.NewScheduler` (`execution/scheduler.go:38`) built the execution plan via `options.Scenarios.GetFullExecutionRequirements(et)` (`execution/scheduler.go:44`), so no individual VU can deviate from them.
 
 ---
 
 ## (g) Corroboration (secondary — non-authoritative)
 
-The authoritative evidence in this document is the locally observed output from the binary built at commit `ddc3b0b1d2`. As a secondary cross-check only, the official Grafana k6 "How to use options" documentation enumerates the same five-layer order of precedence — defaults, then the `--config` file, then the script `options`, then the environment variable, and finally the CLI flag as highest — which matches both the observed behavior above and the apply sequence at `cmd/config.go:199-204`. No conflict was found between the observed runtime behavior, the source code, and the official documentation; the documentation is used purely to corroborate, never to substitute for, the observed evidence.
+The authoritative evidence in this document is the locally observed output from the binary built from the pinned source commit `ddc3b0b1d2` (see the reproduction harness above). As a secondary cross-check only, the official Grafana k6 "How to use options" documentation enumerates the same five-layer order of precedence — defaults, then the `--config` file, then the script `options`, then the environment variable, and finally the CLI flag as highest — which matches both the observed behavior above and the apply sequence at `cmd/config.go:199-204`. No conflict was found between the observed runtime behavior, the source code, and the official documentation; the documentation is used purely to corroborate, never to substitute for, the observed evidence.
 
 ---
 
@@ -628,7 +657,7 @@ The authoritative evidence in this document is the locally observed output from 
 
 | Item the question named | Where answered | Code reference | Observed proof line |
 |---|---|---|---|
-| Consolidation mechanism | (a) | `getConsolidatedConfig` `cmd/config.go:189`; apply order `cmd/config.go:199-204` | version banner `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)` ties evidence to commit |
+| Consolidation mechanism | (a) | `getConsolidatedConfig` `cmd/config.go:189`; apply order `cmd/config.go:199-204` | version banner `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)` (pinned source-commit build) ties evidence to the source commit |
 | Precedence ladder (CLI > `K6_*` env > script > config file > defaults) | (b) | `.Apply(cliConf)` last `cmd/config.go:203`; `applyDefault` `cmd/config.go:204` | B1–B4 banners (below) |
 | **VUs** — CLI beats script | (b) B1 | `if opts.VUs.Valid` `lib/options.go:361` | `* default: 5 looping VUs for 2s (gracefulStop: 30s)`; `vus..................: 5   min=5      max=5` |
 | **duration** — CLI beats script | (b) B2 | `cmd/config.go:203` | banner `* default: 1 looping VUs for 5s (gracefulStop: 30s)`; elapsed proven in (b) B2 by `running (05.0s), 0/1 VUs, 10 complete and 0 interrupted iterations` |
@@ -638,11 +667,11 @@ The authoritative evidence in this document is the locally observed output from 
 | `-e/--env` vs real env-var nuance | (c) | — | `level=info msg="SETUP sees __ENV.DURATION=9s" source=console` + unchanged `* default: 1 looping VUs for 3s (gracefulStop: 30s)` banner |
 | `scenarios` has no env/CLI form | (c) | `ignored:"true"` `lib/options.go:245` | derivation only via script/config (see (e)) |
 | Freeze point | (d) | `derivedConfig` `cmd/test_load.go:226`; `TestRunState.Options` `cmd/test_load.go:280`; `NewScheduler` `execution/scheduler.go:38` | banner `* default: 6 iterations shared among 2 VUs (maxDuration: 10m0s, gracefulStop: 30s)` |
-| Runtime-mutation-ignored proof | (d) | freeze comment `cmd/test_load.go:280` | 6 lines, VU ids only `1`/`2`, each `script_reads_options.vus=999`; `iterations...........: 6   16557.936219/s` |
+| Runtime-mutation-ignored proof | (d) | freeze comment `cmd/test_load.go:280` | `grep -c source=console` = `6`; VU ids `sort -u` = `1`/`2` only; `grep -c 'VU=999'` = `0`; each line `script_reads_options.vus=999`; count `iterations...........: 6` |
 | **scenarios** — shortcut derivation | (e) | `DeriveScenariosFromShortcuts` `lib/executor/execution_config_shortcuts.go:52` | `constant-vus` / `shared-iterations` / `ramping-vus` / `per-vu-iterations` from `inspect` |
 | **scenarios** — vus-alone warning | (e) | `lib/executor/execution_config_shortcuts.go:101-105` | `msg="the `vus=5` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"` |
 | **scenarios** — cross-tier reset | (e) | `lib/options.go:371-377` | `my_named_scenario` alone → survives; with `--vus 4 --duration 2s` → `* default: 4 looping VUs for 2s`, 0 occurrences |
-| Multi-VU behavior | (f) | `execution/scheduler.go:44` | `* default: 10 iterations shared among 5 VUs (maxDuration: 10m0s, gracefulStop: 30s)`; VU ids `1,2,3,4,5`; `iterations...........: 10  20243.447702/s` |
+| Multi-VU behavior | (f) | `execution/scheduler.go:44` | `* default: 10 iterations shared among 5 VUs (maxDuration: 10m0s, gracefulStop: 30s)`; VU ids `sort -u` = `1,2,3,4,5`; `grep -c source=console` = `10`; count `iterations...........: 10` |
 | Corroboration (non-authoritative) | (g) | `cmd/config.go:199-204` | official docs match; observed output is authoritative |
 
 **Repository integrity:** the source tree was **not** modified. All temporary scripts, the config file, and the compiled binary lived under `/tmp/k6scratch` (outside the repository) and were removed after observation; `git status --porcelain` reported an empty (clean) working tree before, during, and after the investigation. The only net-new file is this document.
