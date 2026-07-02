@@ -11,10 +11,23 @@ The exact binary under investigation, built from this checkout:
 ```
 $ go build -mod=vendor -o /tmp/k6bin/k6 .
 $ /tmp/k6bin/k6 version
-k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)
+k6 v0.55.0 (commit/f4e7b4145a, go1.23.10, linux/amd64)
+$ git rev-parse --short=10 HEAD          # the "commit/…" segment is exactly this
+f4e7b4145a
 ```
 
-This confirms **version `v0.55.0`**, **commit `ddc3b0b1d2`**, and the build **toolchain `go1.23.10`**.
+This confirms **version `v0.55.0`** and **toolchain `go1.23.10`** — both are fixed values. The **commit segment is deliberately *not* a fixed string**: k6 stamps it from the **current `git HEAD`** at build time, so it always equals `git rev-parse --short=10 HEAD` (the block above is a snapshot captured at `HEAD` `f4e7b4145a`; **your checkout's `HEAD` will differ** — the two values above just have to match each other) and it changes with **every** commit on the branch. This is exactly why the commit differs from the source commit `ddc3b0b1d2` — so, to be precise about the mechanism: k6 does **not** hard‑code the commit. Only the *version* is a constant — `const Version = "0.55.0"` `[lib/consts/consts.go:L12]`. The *commit* is read at build time from Go's build info: `debug.ReadBuildInfo()` `[lib/consts/consts.go:L19]` → the `vcs.revision` setting `[lib/consts/consts.go:L30]`, truncated to the first 10 characters (`commitLen := 10` `[lib/consts/consts.go:L31]`) and rendered at `[lib/consts/consts.go:L52]`. Because `vcs.revision` is the current `HEAD`, the **reproducible reading of the line is: the `commit/…` segment *is* your checkout's `HEAD`** — verify it with the `git rev-parse` shown above.
+
+**Why `HEAD` is `f4e7b4145a` and not the source commit `ddc3b0b1d2`, and why citations still pin to `ddc3b0b1d2`:** this deliverable adds documentation‑only commits on top of source commit `ddc3b0b1d2`, and those commits touch **only this file**. Using `--name-status` (whose output is stable and does **not** drift as this document itself grows), the diff reports exactly one changed path — added, marked `A` — and a `.go`‑filtered diff reports **zero** source files changed (the same holds for test, build, and config files):
+
+```
+$ git diff ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD --name-status
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
+$ git diff ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD --name-only -- '*.go' | wc -l
+0
+```
+
+So a build from the delivered checkout stamps **that checkout's `HEAD`** into the `commit/…` segment (confirm with `git rev-parse --short=10 HEAD`), while every `file:line` citation in this document remains pinned to, and byte‑for‑byte valid at, source commit `ddc3b0b1d2` (no cited source file changed — see the `--name-status` diff above). In short: the **version, the toolchain, and every citation reproduce exactly**, and the **commit segment reproduces as `= HEAD` by construction**. (Aside: building with *uncommitted* changes in the tree sets `vcs.modified=true` `[lib/consts/consts.go:L36]`, appending a `-dirty` suffix `[lib/consts/consts.go:L49]` — e.g. `commit/f4e7b4145a-dirty` — so a clean checkout is required to reproduce the un‑suffixed form.)
 
 ## Environment & reproducibility
 
@@ -23,11 +36,12 @@ This confirms **version `v0.55.0`**, **commit `ddc3b0b1d2`**, and the build **to
 | Go toolchain | `go version go1.23.10 linux/amd64` |
 | C compiler (needed by `-race`) | `gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0` |
 | Module / version | `go.k6.io/k6` `[go.mod:L1]`, k6 `v0.55.0` |
-| Pinned commit | `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (short `ddc3b0b1d2`) |
+| Source commit under investigation (all `file:line` citations pinned here) | `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (short `ddc3b0b1d2`) |
+| Built‑binary commit (what `k6 version` prints) | `= git rev-parse --short=10 HEAD` (the current `HEAD`; `f4e7b4145a` at the tested HEAD). Documentation‑only commits sit on top of `ddc3b0b1d2`; see the explanation above |
 | Dependencies | **vendored** (`vendor/`), so every command uses `-mod=vendor` (offline) |
 | Wall clock during the run | `Wed Jul  1 21:36:31 UTC 2026` (`date -u`) — relevant to Q1's TLS findings |
 
-All commands below are runnable as-is from the repository root. Every `file:line` citation is pinned to commit `ddc3b0b1d2`. Temporary artifacts (the built binary and a throwaway script) were written **outside** the repository under `/tmp` and removed afterward, so the working tree is left byte‑for‑byte unchanged.
+All commands below are runnable as-is from the repository root. Every `file:line` citation is pinned to **source commit `ddc3b0b1d2`**; those anchors are unaffected by the documentation‑only commits (which change no source file, as the `git diff --name-status` above shows). Building from the delivered checkout therefore reproduces the version, the toolchain, and every citation exactly, and stamps **that checkout's `HEAD`** into the `commit/…` segment (it was `f4e7b4145a` at the tested HEAD; confirm yours with `git rev-parse --short=10 HEAD`). Temporary artifacts (the built binary and a throwaway script) were written **outside** the repository under `/tmp` and removed afterward, so the working tree is left byte‑for‑byte unchanged.
 
 ---
 
@@ -64,7 +78,7 @@ The workflow defines **three** test jobs: `test-prev` `[.github/workflows/test.y
 To aggregate exact counts I ran the CI-equivalent command with `-json` (JSON adds nothing to behavior; it just makes the `PASS`/`FAIL`/`SKIP` markers trivially countable). `-mod=vendor` is required because deps are vendored; `-race` requires gcc (present, `15.2.0`):
 
 ```
-$ GOMAXPROCS=2 go test -mod=vendor -p 8 -race -timeout 800s -json ./... > /tmp/test.json 2> /tmp/test.stderr
+$ GOMAXPROCS=2 go test -mod=vendor -p 2 -race -timeout 800s -json ./... > /tmp/test.json 2> /tmp/test.stderr
 $ echo "EXIT_CODE=$?"
 EXIT_CODE=1
 ```
@@ -292,7 +306,7 @@ Two nuances worth calling out:
 
 | Metric | Result |
 |--------|--------|
-| Build (`k6 version`) | ✅ `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` |
+| Build (`k6 version`) | ✅ `k6 v0.55.0 (commit/<HEAD>, go1.23.10, linux/amd64)` where `<HEAD>` = `git rev-parse --short=10 HEAD` (`f4e7b4145a` at the tested HEAD); source commit under investigation is `ddc3b0b1d2` — see *Environment & reproducibility* |
 | Packages | 82 total → **52 ok**, **2 FAIL**, **28** no‑test‑files |
 | Tests + subtests | **4419 PASS**, **6 FAIL**, **1 SKIP** |
 | Broken (build/compile) packages | **0** (stderr was empty) |
@@ -302,7 +316,7 @@ Two nuances worth calling out:
 **Reproducible aggregation recap** — every number in the table above is the verbatim output of these commands run against the single `-json` capture:
 
 ```
-$ GOMAXPROCS=2 go test -mod=vendor -p 8 -race -timeout 800s -json ./... > /tmp/test.json 2> /tmp/test.stderr; echo "EXIT_CODE=$?"
+$ GOMAXPROCS=2 go test -mod=vendor -p 2 -race -timeout 800s -json ./... > /tmp/test.json 2> /tmp/test.stderr; echo "EXIT_CODE=$?"
 EXIT_CODE=1
 $ wc -c /tmp/test.stderr                                   # 0 bytes => 0 build/compile-broken packages
 0 /tmp/test.stderr
@@ -357,7 +371,7 @@ The two iteration counters are **built‑in metrics** declared and registered in
 **Per‑iteration emission lives in `js/runner.go`.** When a *full default* iteration completes, the runner pushes an `iterations` sample of value `1`:
 
 - The guard and the channel send: `if isFullIteration && isDefault {` `[js/runner.go:L870]` → `u.state.Samples <- iterationSamples(startTime, endTime, ctm, builtinMetrics)` `[js/runner.go:L871]`.
-- The sample builder `func iterationSamples(...)` `[js/runner.go:L879]` produces the `Iterations` sample with `Metric: builtinMetrics.Iterations` `[js/runner.go:L894]` and `Value: 1` `[js/runner.go:L899]`.
+- The sample builder `func iterationSamples(...)` `[js/runner.go:L879]` produces the `Iterations` sample with `Metric: builtinMetrics.Iterations` `[js/runner.go:L894]` and `Value:    1,` `[js/runner.go:L899]` (quoted byte‑exactly from the source line).
 - The iteration itself runs in `func (u *ActiveVU) RunOnce() error` `[js/runner.go:L724]`, which bumps a **per‑VU** counter via `u.incrIteration()` `[js/runner.go:L755]`, defined at `func (u *ActiveVU) incrIteration()` `[js/runner.go:L904]`.
 
 **Scenario‑level scheduling lives in `lib/executor/`.** There are exactly **7 executor types** (each registered by an `init()` calling `lib.RegisterExecutorConfigType`), so — to correct a common miscount — **7, not 12** (the "12" is the number of *non‑test* `.go` files in the directory; there are 24 files total including 12 `_test.go`):
@@ -480,7 +494,7 @@ default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  1/1 shared iters
 
 ### The ordered function‑call chain (from run start to output)
 
-Every step is verified against commit `ddc3b0b1d2`.
+Every step is verified against source commit `ddc3b0b1d2` (the `file:line` anchors below; recall the built binary stamps whatever the current `HEAD` is — e.g. `f4e7b4145a` at the tested HEAD — but no cited source changed).
 
 1. **`cmd/run.go:L170`** — `metricsEngine, err := engine.NewMetricsEngine(testRunState.Registry, logger)` builds the engine (→ `metrics/engine/engine.go:L44`).
 2. **`cmd/run.go:L187`** — `metricsIngester = metricsEngine.CreateIngester()` creates the sample→sink ingester (→ `metrics/engine/engine.go:L56`).
@@ -495,7 +509,7 @@ Every step is verified against commit `ddc3b0b1d2`.
 11. **`lib/executor/helpers.go:L108`** — the shared‑iterations executor drives the iteration: `err := vu.RunOnce()`.
 12. **`js/runner.go:L724`** — `func (u *ActiveVU) RunOnce() error` runs the default function; **`js/runner.go:L755`** bumps the per‑VU counter via `u.incrIteration()` (defined at `js/runner.go:L904`).
 13. **`js/runner.go:L870`** — the guard `if isFullIteration && isDefault {` → **`js/runner.go:L871`** `u.state.Samples <- iterationSamples(startTime, endTime, ctm, builtinMetrics)` sends the sample onto the channel.
-14. **`js/runner.go:L879`–`L902`** — `iterationSamples(...)` builds the sample with `Metric: builtinMetrics.Iterations` `[js/runner.go:L894]` and `Value: 1` `[js/runner.go:L899]` (and the paired `IterationDuration` sample).
+14. **`js/runner.go:L879`–`L902`** — `iterationSamples(...)` builds the sample with `Metric: builtinMetrics.Iterations` `[js/runner.go:L894]` and `Value:    1,` `[js/runner.go:L899]` (byte‑exact source line; and the paired `IterationDuration` sample).
 15. **`output/manager.go:L64`** — the manager goroutine reads it: `case sampleContainer, ok := <-samplesChan:`.
 16. **`output/manager.go:L52`** — it fans the batch out to every output: `out.AddMetricSamples(sampleContainers)` (one of those outputs is the engine ingester).
 17. **`metrics/engine/ingester.go:L90`** — `m.Sink.Add(sample)` routes the value into the metric's own sink.
