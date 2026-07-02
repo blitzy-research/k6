@@ -155,7 +155,7 @@ So the two failing packages are **`go.k6.io/k6/js/modules/k6/http`** and **`go.k
 
 ### Root cause of the failures — TLS test-fixture drift (grpc) and an external OCSP dependency (http), *not* certificate expiry (reported, not fixed)
 
-Both failing packages are **TLS-related, but for two distinct and clock-independent reasons**. I traced each to its actual mechanism by re-running the failing subtests verbosely and decoding the certificates involved. **Neither failure is a certificate-expiry problem, and an earlier local clock would fix neither** — the certs in play are valid until the years **2084/3021**.
+Both failing packages are **TLS-related, but for two distinct and clock-independent reasons**. I traced each to its actual mechanism by re-running the failing subtests verbosely and decoding the certificates involved. **Neither failure is a certificate-expiry problem, and an earlier local clock would fix neither** — the certs in play are valid until the years **2084 and 3021** (both decoded below).
 
 **(1) `js/modules/k6/grpc` — a Go-toolchain test-fixture mismatch (`crypto/rsa: verification error`), not expiry.**
 
@@ -201,6 +201,21 @@ Because the hard-coded CA (`49126B12…`) is a *different key* from the one that
 
 `remote error: tls: bad certificate` is the generic TLS alert the **client** sends when it rejects the server's cert; it is *not* an expiry signal. k6's `localHostCert` fixture was copied from an **older** Go toolchain's `testcert.LocalhostCert`; Go has since regenerated that built-in cert with a new key, so the fixture and the toolchain's current server cert no longer match. This is **Go-toolchain-version drift against a hard-coded test fixture** — completely independent of the wall clock. (The `ConnectTls`/`ConnectTlsEncryptedKey` subtests report `60.09s` because their `connect()` calls set no timeout and hit the default context deadline; `ConnectTlsInvokeSuccess` fails in `5.09s` because its script sets `timeout: '5s'`.)
 
+The 2084 pair is only *half* of each `ConnectTls`/`ConnectTlsEncryptedKey` handshake. Their `setup` also switches the server to **mutual TLS** — `tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert` `[js/modules/k6/grpc/client_test.go:L1213, L1224]`, with the client CA pool seeded from `clientAuthCA` `[js/modules/k6/grpc/client_test.go:L1212, L1223]` — so the VU script must additionally present a **client certificate**, passed as `cert: "…"` (alongside `localHostCert` as `cacerts`) at `[js/modules/k6/grpc/client_test.go:L1217, L1228]`. That client-auth pair is a **separate** set of fixtures from the two 2084 certs above: `clientAuthCA` (`CN=My CA`) is defined at `[js/modules/k6/grpc/client_test.go:L1159]` and `clientAuth` (`CN=client`) at `[js/modules/k6/grpc/client_test.go:L1161]`. Decoding that pair shows it is valid **until 3021** — even further from any 2026 clock than the 2084 server/`localHostCert` pair:
+
+```
+$ openssl x509 -noout -subject -serial -enddate   # clientAuthCA  [js/modules/k6/grpc/client_test.go:L1159]
+subject=CN=My CA
+serial=840C0602E2F8357A
+notAfter=May 24 12:29:36 3021 GMT
+$ openssl x509 -noout -subject -serial -enddate   # clientAuth    [js/modules/k6/grpc/client_test.go:L1161]
+subject=CN=client
+serial=83F49E346DD7A81D
+notAfter=May 24 15:12:34 3021 GMT
+```
+
+So **all four** certs involved in the failing gRPC handshake are far from expiry — the server cert and `localHostCert` to **2084**, and the `clientAuthCA`/`clientAuth` mutual-TLS pair to **3021** — which confirms the failure is a **key mismatch** (`crypto/rsa: verification error`), not a certificate-expiry problem.
+
 **(2) `js/modules/k6/http` — a live external OCSP-stapling dependency (`ocsp status: unknown`), not expiry.**
 
 The single failing http subtest is `ocsp_stapled_good` `[js/modules/k6/http/request_test.go:L2192]`. It makes a **request to the public internet** — `website := "https://www.wikipedia.org/"` `[js/modules/k6/http/request_test.go:L2197]` — and asserts the stapled OCSP status equals `OCSP_STATUS_GOOD` `[js/modules/k6/http/request_test.go:L2206]`. Verbatim from a verbose re-run:
@@ -220,7 +235,7 @@ The network is reachable — `curl -sI https://www.wikipedia.org/` returns `HTTP
 
 The http package's other TLS certs are likewise generated dynamically from `time.Now()` (`[js/modules/k6/http/request_test.go:L2105]`, `[js/modules/k6/http/request_test.go:L2162]`) — they are **not** baked-in fixed-window certs, so no 2026 wall clock renders them expired.
 
-**Conclusion:** both failures are **environment-sensitive, not product bugs**, but the mechanisms are (a) grpc: a hard-coded httptest cert fixture that has drifted from the current Go toolchain's cert (a key mismatch; both certs valid to 2084/3021), and (b) http: an external `www.wikipedia.org` OCSP staple that is no longer `good`. **An earlier local clock fixes neither** — the grpc case needs the fixture regenerated to match the toolchain (or the toolchain aligned to the fixture), and the http case depends on an external service. Per the read-only directive, they are **reported, not remediated**.
+**Conclusion:** both failures are **environment-sensitive, not product bugs**, but the mechanisms are (a) grpc: a hard-coded httptest cert fixture that has drifted from the current Go toolchain's cert (a key mismatch — the two mismatched certs are both valid to 2084, and the separate mutual-TLS client-auth pair to 3021, all decoded above), and (b) http: an external `www.wikipedia.org` OCSP staple that is no longer `good`. **An earlier local clock fixes neither** — the grpc case needs the fixture regenerated to match the toolchain (or the toolchain aligned to the fixture), and the http case depends on an external service. Per the read-only directive, they are **reported, not remediated**.
 
 ### Skipped tests — static (source) vs runtime (observed)
 
@@ -281,7 +296,7 @@ Two nuances worth calling out:
 | Packages | 82 total → **52 ok**, **2 FAIL**, **28** no‑test‑files |
 | Tests + subtests | **4419 PASS**, **6 FAIL**, **1 SKIP** |
 | Broken (build/compile) packages | **0** (stderr was empty) |
-| Failing packages | `js/modules/k6/http`, `js/modules/k6/grpc` — TLS-related but **not expiry**: grpc = Go-toolchain httptest cert-fixture drift (`crypto/rsa: verification error` key mismatch; certs valid to 2084/3021); http = external `www.wikipedia.org` OCSP staple `unknown`. Environment-sensitive, not product bugs |
+| Failing packages | `js/modules/k6/http`, `js/modules/k6/grpc` — TLS-related but **not expiry**: grpc = Go-toolchain httptest cert-fixture drift (`crypto/rsa: verification error` key mismatch; server/`localHostCert` pair valid to 2084, separate client-auth pair `clientAuthCA`/`clientAuth` to 3021 — `client_test.go:L1159`/`L1161`); http = external `www.wikipedia.org` OCSP staple `unknown`. Environment-sensitive, not product bugs |
 | Skipped at runtime | **1** (`TestTC39`, corpus absent) |
 
 **Reproducible aggregation recap** — every number in the table above is the verbatim output of these commands run against the single `-json` capture:
@@ -303,7 +318,7 @@ $ grep '"Test":' /tmp/test.json | grep '"Elapsed":' | grep -oE '"Action":"(pass|
       1 "Action":"skip"
 ```
 
-These results are **reproducible** with the exact command above. **Caveat:** the two TLS failures are **environment-sensitive but not clock-sensitive**. grpc fails because k6's hard-coded httptest cert fixture no longer matches the Go toolchain's regenerated server cert (a `crypto/rsa: verification error` key mismatch; both certs valid to 2084/3021); http `ocsp_stapled_good` depends on the external `www.wikipedia.org` OCSP staple (observed status `unknown`). An earlier date would fix neither — the grpc fixture must be regenerated to match the toolchain, and the http staple is served by an external site.
+These results are **reproducible** with the exact command above. **Caveat:** the two TLS failures are **environment-sensitive but not clock-sensitive**. grpc fails because k6's hard-coded httptest cert fixture no longer matches the Go toolchain's regenerated server cert (a `crypto/rsa: verification error` key mismatch — the two mismatched certs both valid to 2084, and the separate client-auth pair `clientAuthCA`/`clientAuth` to 3021 per `js/modules/k6/grpc/client_test.go:L1159`/`L1161`); http `ocsp_stapled_good` depends on the external `www.wikipedia.org` OCSP staple (observed status `unknown`). An earlier date would fix neither — the grpc fixture must be regenerated to match the toolchain, and the http staple is served by an external site.
 
 ---
 
