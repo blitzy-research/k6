@@ -21,7 +21,7 @@ locate and explain what was observed.
 |---|-----------------------------|---------|-------------------|
 | 1 | VUs get "stuck" — neither fully active nor fully stopped (rapid up/down + long `gracefulRampDown`) | **Transitional, not stuck** | VUs held at `5/5`, **0 interrupted** across the rapid cycles; `toGracefulStop` is reversed to `running` before the iteration ends. |
 | 2 | Scheduled-handler VU count ≠ graceful-handler count at certain moments | **By design** | Raw/scheduled plan drops to `1` by t=7s while the max-allowed plan holds `6` until t=33s — intentional reservation. |
-| 3 | After `ctrl+c`, VUs "keep running for way longer than `gracefulStop`" | **Not reproduced** | SIGINT teardown measured **44.9 ms / 44.6 ms** (3 VUs) and **56.9 ms** (50 VUs); nothing runs past `maxEndTime`. |
+| 3 | After `ctrl+c`, VUs "keep running for way longer than `gracefulStop`" | **Not reproduced** | SIGINT teardown measured **47.7 ms / 45.4 ms** (3 VUs) and **51.1 ms** (50 VUs); nothing runs past `maxEndTime`. |
 | 4 | Execution segments: one instance shows more VUs, and the sum "exceeds my configured maximum" | **Sum = max, never exceeds** | TARGET=10 → `4+3+3 = 10`; TARGET=9 → `3+3+3 = 9`. First segment gets the extra indivisible VU by design. |
 | 5 | "Is the VU buffer leaking somehow?" | **No leak** | Across ~270 get/return ops/run: **0** buffer warnings/errors; `vus_max` held at `10`. |
 | A | Is there a race between the two handler goroutines? | **No** | The two handlers are closures invoked **serially from one goroutine**; `-race` clean 2/2. |
@@ -295,11 +295,17 @@ identical across 2 runs.
 tracked by the scheduled handler doesn't match what the graceful handler thinks
 should exist" at certain moments.
 
-**Runtime evidence (from Section 1).** In the rapid-ramp run above, the active
-(scheduled) VU count and the reserved (max-allowed) count visibly diverge: at
-t=7s the run shows `1/5 VUs` — the **scheduled** side has dropped to `1`, while
-the **max** side is still `5` (the reservation from the long `gracefulRampDown`
-has not expired). They only reconcile at the very end (`0/5 VUs, 15 complete`).
+**Runtime evidence (from Section 1).** In the rapid-ramp run above, the k6 progress
+line makes the reservation visible: at t=7s the run shows `1/5 VUs`. That is k6's
+**active/max VU display** — `active=1` (VUs currently executing an iteration) over
+`max=5` (the scenario's VU allocation, whose peak is `5`). The active count has
+dropped to `1` while the max VU pool is still held at `5` because the long
+`gracefulRampDown` reservation has not yet expired; the two reconcile only at the very
+end (`0/5 VUs, 15 complete`). This progress line demonstrates **active-vs-max
+divergence** — the runtime *symptom* of the reservation — but it is **not** a direct
+readout of the `scheduledVUsHandlerStrategy` private `cur` counter. The precise
+scheduled-handler-vs-max-allowed-handler count divergence the user described is
+established instead by the config's computed step plan below.
 
 **Step-plan evidence (the config's computed plan).** The two handlers consume two
 *different* step streams. The exact numbers are computed by the config and asserted
@@ -320,8 +326,11 @@ The arrays asserted by that passing test (quoted here as the config's *computed
 plan*, i.e. source evidence, not runtime output) are:
 
 - **Raw / scheduled steps** (`conf.getRawExecutionSteps(et, false)` at
-  `lib/executor/ramping_vus.go:L171`): `{0s:4, 1s:5, 2s:6, 3s:5, 4s:4, 5s:3,
-  6s:2, 7s:1, 8s:2, …, 18s:4, 20s:1}` — peak `6` at t=2s, dropping to **`1` by t=7s**.
+  `lib/executor/ramping_vus.go:L171`), asserted in full by the passing test as
+  `expRawStepsNoZeroEnd` (`lib/executor/ramping_vus_test.go:L459-L480`):
+  `{0s:4, 1s:5, 2s:6, 3s:5, 4s:4, 5s:3, 6s:2, 7s:1, 8s:2, 9s:3, 10s:4, 11s:5,
+  12s:4, 13s:3, 14s:2, 15s:1, 16s:2, 17s:3, 18s:4, 20s:1}` — peak `6` at t=2s,
+  dropping to **`1` by t=7s** (there is no `19s` entry; the plan jumps `18s→20s`).
 - **Graceful / max-allowed steps** (`conf.GetExecutionRequirements(et)` at
   `lib/executor/ramping_vus.go:L434`), with the default 30s `gracefulStop` and 30s
   `gracefulRampDown`: `{0s:4, 1s:5, 2s:6, 33s:5, 42s:4, 50s:1, 53s:0}`.
@@ -388,14 +397,15 @@ output — RUN 1:**
 ```
 $ /tmp/k6bin run --no-color /tmp/k6obs/longiter.js > /tmp/k6obs/s3_run1.txt 2>&1 &
 $ K6PID=$!; sleep 3
-$ T0=$(python3 -c 'import time;print(time.time())'); kill -INT $K6PID; wait $K6PID
+$ T0=$(python3 -c 'import time;print(time.time())'); kill -INT $K6PID; wait $K6PID; code=$?
 $ T1=$(python3 -c 'import time;print(time.time())')
-$ python3 -c "print(f'SIGINT->exit teardown = {($T1-$T0)*1000:.1f} ms')"
+$ echo "k6 exit code after SIGINT = $code"
 k6 exit code after SIGINT = 105
-SIGINT->exit teardown = 44.9 ms
+$ python3 -c "print(f'SIGINT->exit teardown = {($T1-$T0)*1000:.1f} ms')"
+SIGINT->exit teardown = 47.7 ms
 ```
 
-Full k6 output for RUN 1 (`/tmp/k6obs/s3_run1.txt`):
+Full k6 output for RUN 1 (`$ cat /tmp/k6obs/s3_run1.txt`):
 
 ```
 
@@ -412,16 +422,16 @@ Full k6 output for RUN 1 (`/tmp/k6obs/s3_run1.txt`):
      scenarios: (100.00%) 1 scenario, 3 max VUs, 1m0s max duration (incl. graceful stop):
               * li: Up to 3 looping VUs for 30s over 1 stages (gracefulRampDown: 30s, gracefulStop: 30s)
 
-time="2026-07-06T22:10:27Z" level=info msg="ITER_START t=0ms vu=3 vusActive=3" source=console
-time="2026-07-06T22:10:27Z" level=info msg="ITER_START t=0ms vu=1 vusActive=3" source=console
-time="2026-07-06T22:10:27Z" level=info msg="ITER_START t=0ms vu=2 vusActive=3" source=console
+time="2026-07-06T23:02:20Z" level=info msg="ITER_START t=0ms vu=3 vusActive=3" source=console
+time="2026-07-06T23:02:20Z" level=info msg="ITER_START t=0ms vu=1 vusActive=3" source=console
+time="2026-07-06T23:02:20Z" level=info msg="ITER_START t=0ms vu=2 vusActive=3" source=console
 
 running (0m01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
 li     [   3% ] 3/3 VUs  01.0s/30.0s
 
 running (0m02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
 li     [   7% ] 3/3 VUs  02.0s/30.0s
-time="2026-07-06T22:10:30Z" level=info msg="ITER_END   t=2991ms vu=1" source=console
+time="2026-07-06T23:02:23Z" level=info msg="ITER_END   t=2994ms vu=3" source=console
 
      data_received...: 0 B 0 B/s
      data_sent.......: 0 B 0 B/s
@@ -431,64 +441,173 @@ time="2026-07-06T22:10:30Z" level=info msg="ITER_END   t=2991ms vu=1" source=con
 
 running (0m03.0s), 0/3 VUs, 0 complete and 3 interrupted iterations
 li   ✗ [  10% ] 3/3 VUs  03.0s/30.0s
-time="2026-07-06T22:10:30Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-06T23:02:23Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-**Command and output tail — RUN 2** (same unchanged input):
+**Command and complete unedited output — RUN 2** (same unchanged input):
 
 ```
 $ /tmp/k6bin run --no-color /tmp/k6obs/longiter.js > /tmp/k6obs/s3_run2.txt 2>&1 &
 $ K6PID=$!; sleep 3
-$ T0=$(python3 -c 'import time;print(time.time())'); kill -INT $K6PID; wait $K6PID
+$ T0=$(python3 -c 'import time;print(time.time())'); kill -INT $K6PID; wait $K6PID; code=$?
 $ T1=$(python3 -c 'import time;print(time.time())')
-$ python3 -c "print(f'SIGINT->exit teardown = {($T1-$T0)*1000:.1f} ms')"
+$ echo "k6 exit code after SIGINT = $code"
 k6 exit code after SIGINT = 105
-SIGINT->exit teardown = 44.6 ms
+$ python3 -c "print(f'SIGINT->exit teardown = {($T1-$T0)*1000:.1f} ms')"
+SIGINT->exit teardown = 45.4 ms
+$ cat /tmp/k6obs/s3_run2.txt
 
-$ tail -n 6 /tmp/k6obs/s3_run2.txt
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/longiter.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 3 max VUs, 1m0s max duration (incl. graceful stop):
+              * li: Up to 3 looping VUs for 30s over 1 stages (gracefulRampDown: 30s, gracefulStop: 30s)
+
+time="2026-07-06T23:02:33Z" level=info msg="ITER_START t=0ms vu=1 vusActive=3" source=console
+time="2026-07-06T23:02:33Z" level=info msg="ITER_START t=0ms vu=3 vusActive=3" source=console
+time="2026-07-06T23:02:33Z" level=info msg="ITER_START t=0ms vu=2 vusActive=3" source=console
+
+running (0m01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+li     [   3% ] 3/3 VUs  01.0s/30.0s
+
+running (0m02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+li     [   7% ] 3/3 VUs  02.0s/30.0s
+
+     data_received...: 0 B 0 B/s
+     data_sent.......: 0 B 0 B/s
+     vus.............: 3   min=3 max=3
      vus_max.........: 3   min=3 max=3
 
 
-running (0m02.3s), 0/3 VUs, 0 complete and 3 interrupted iterations
-li   ✗ [   8% ] 3/3 VUs  02.3s/30.0s
-time="2026-07-06T22:11:26Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+running (0m03.0s), 0/3 VUs, 0 complete and 3 interrupted iterations
+li   ✗ [  10% ] 3/3 VUs  03.0s/30.0s
+time="2026-07-06T23:02:36Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-**Distribution across runs.** SIGINT→exit teardown = **44.9 ms** (RUN 1) and
-**44.6 ms** (RUN 2) — stable at ≈45 ms. Both runs end with `0/3 VUs, 0 complete
+**Distribution across runs.** SIGINT→exit teardown = **47.7 ms** (RUN 1) and
+**45.4 ms** (RUN 2) — stable at ≈45–48 ms. Both runs end with `0/3 VUs, 0 complete
 and 3 interrupted iterations` and the error `test run was aborted because k6
-received a 'interrupt' signal`. (The single `ITER_END t=2991ms vu=1` line in RUN 1
-is a benign artifact: k6's `sleep()` is context-interruptible, so on abort one VU's
-post-`sleep` line raced out just before process exit; the iteration is still counted
-as **interrupted**, not complete.)
+received a 'interrupt' signal`. (Whether a stray `ITER_END` line appears is itself
+run-to-run variable and benign: RUN 1 shows one — `ITER_END t=2994ms vu=3` — while
+RUN 2 shows none. k6's `sleep()` is context-interruptible, so on abort a VU's
+post-`sleep` line can race out just before process exit; the iteration is still
+counted as **interrupted**, not complete, in both runs.)
 
 ### 3b — 50-VU variant (abort is prompt regardless of scale)
 
-**Observation script** (`/tmp/k6obs/many_vu_longiter.js`): 50 VUs, 60-second stage,
-`gracefulStop: '30s'`, 20-second iterations.
+**Observation script** (`/tmp/k6obs/many_vu_longiter.js`): 50 VUs (`startVUs: 50`,
+held for a 60-second stage), `gracefulStop: '30s'`, and 20-second iterations — so all
+50 VUs are active and mid-iteration when interrupted. The command captures the exit
+code and times the teardown exactly as in 3a; the complete unedited k6 output follows:
 
 ```
 $ /tmp/k6bin run --no-color /tmp/k6obs/many_vu_longiter.js > /tmp/k6obs/s3_many.txt 2>&1 &
 $ K6PID=$!; sleep 3
-$ T0=$(python3 -c 'import time;print(time.time())'); kill -INT $K6PID; wait $K6PID
+$ T0=$(python3 -c 'import time;print(time.time())'); kill -INT $K6PID; wait $K6PID; code=$?
 $ T1=$(python3 -c 'import time;print(time.time())')
-$ python3 -c "print(f'SIGINT->exit teardown = {($T1-$T0)*1000:.1f} ms')"
+$ echo "k6 exit code after SIGINT = $code"
 k6 exit code after SIGINT = 105
-SIGINT->exit teardown = 56.9 ms
+$ python3 -c "print(f'SIGINT->exit teardown = {($T1-$T0)*1000:.1f} ms')"
+SIGINT->exit teardown = 51.1 ms
+$ cat /tmp/k6obs/s3_many.txt
 
-$ tail -n 8 /tmp/k6obs/s3_many.txt
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/many_vu_longiter.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 50 max VUs, 1m30s max duration (incl. graceful stop):
+              * m: Up to 50 looping VUs for 1m0s over 1 stages (gracefulRampDown: 30s, gracefulStop: 30s)
+
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=6 vusActive=14" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=4 vusActive=17" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=22 vusActive=33" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=26 vusActive=21" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=38 vusActive=36" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=35 vusActive=30" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=30 vusActive=40" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=41 vusActive=37" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=20 vusActive=33" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=19 vusActive=46" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=34 vusActive=49" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=5 vusActive=23" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=8 vusActive=25" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=47 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=33 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=44 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=28 vusActive=27" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=40 vusActive=28" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=43 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=27 vusActive=28" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=36 vusActive=29" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=16 vusActive=28" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=15 vusActive=16" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=3 vusActive=16" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=23 vusActive=30" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=24 vusActive=31" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=37 vusActive=32" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=10 vusActive=32" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=7 vusActive=14" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=9 vusActive=15" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=21 vusActive=33" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=1 vusActive=19" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=12 vusActive=14" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=11 vusActive=20" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=29 vusActive=41" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=14 vusActive=42" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=39 vusActive=43" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=13 vusActive=43" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=31 vusActive=43" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=25 vusActive=44" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=42 vusActive=47" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=32 vusActive=48" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=48 vusActive=48" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=50 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=46 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=45 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=17 vusActive=26" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=2 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=1ms vu=49 vusActive=50" source=console
+time="2026-07-06T23:02:48Z" level=info msg="ITER_START t=0ms vu=18 vusActive=22" source=console
+
+running (0m01.0s), 50/50 VUs, 0 complete and 0 interrupted iterations
+m      [   2% ] 50/50 VUs  0m01.0s/1m00.0s
+
+running (0m02.0s), 50/50 VUs, 0 complete and 0 interrupted iterations
+m      [   3% ] 50/50 VUs  0m02.0s/1m00.0s
+time="2026-07-06T23:02:51Z" level=info msg="ITER_END   t=2985ms vu=39" source=console
+time="2026-07-06T23:02:51Z" level=info msg="ITER_END   t=2985ms vu=2" source=console
+time="2026-07-06T23:02:51Z" level=info msg="ITER_END   t=2985ms vu=27" source=console
+time="2026-07-06T23:02:51Z" level=info msg="ITER_END   t=2985ms vu=45" source=console
+time="2026-07-06T23:02:51Z" level=info msg="ITER_END   t=2985ms vu=18" source=console
+
+     data_received...: 0 B 0 B/s
      data_sent.......: 0 B 0 B/s
      vus.............: 50  min=50 max=50
      vus_max.........: 50  min=50 max=50
 
 
-running (0m02.7s), 00/50 VUs, 0 complete and 50 interrupted iterations
-m    ✗ [   5% ] 14/50 VUs  0m02.7s/1m00.0s
-time="2026-07-06T22:11:38Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+running (0m03.0s), 00/50 VUs, 0 complete and 50 interrupted iterations
+m    ✗ [   5% ] 49/50 VUs  0m03.0s/1m00.0s
+time="2026-07-06T23:02:51Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-Even with 50 VUs each mid-way through a 20-second iteration, teardown is **56.9 ms**
+Even with 50 VUs each mid-way through a 20-second iteration, teardown is **51.1 ms**
 and all 50 iterations are **interrupted** — the abort does not wait for `gracefulStop`.
+(As in 3a, a handful of VUs — here 5 — race out an `ITER_END` line at `t≈2985ms` just
+before process exit; those iterations are still counted `interrupted`, not complete.)
 
 ### 3c — Natural end, LONG `gracefulStop` (contrast)
 
@@ -496,9 +615,12 @@ and all 50 iterations are **interrupted** — the abort does not wait for `grace
 `gracefulStop: '30s'`, 5-second iteration. Here there is **no** SIGINT — the run ends
 naturally.
 
+The wall time is measured with an explicit `T0`/`T1` pair (as in 3a) so the timing line
+is genuinely printed *after* the run output — there is **no** `ITER_END`/abort here:
+
 ```
-$ time /tmp/k6bin run --no-color /tmp/k6obs/natural_long_gs.js
-total wall time = 5.08 s
+$ T0=$(python3 -c 'import time;print(time.time())')
+$ /tmp/k6bin run --no-color /tmp/k6obs/natural_long_gs.js
 
          /\      Grafana   /‾‾/  
     /\  /  \     |\  __   /  /   
@@ -513,8 +635,8 @@ total wall time = 5.08 s
      scenarios: (100.00%) 1 scenario, 2 max VUs, 33s max duration (incl. graceful stop):
               * n: Up to 2 looping VUs for 3s over 1 stages (gracefulRampDown: 30s, gracefulStop: 30s)
 
-time="2026-07-06T22:11:46Z" level=info msg="START t=0ms vu=1" source=console
-time="2026-07-06T22:11:46Z" level=info msg="START t=0ms vu=2" source=console
+time="2026-07-06T23:03:08Z" level=info msg="START t=0ms vu=2" source=console
+time="2026-07-06T23:03:08Z" level=info msg="START t=0ms vu=1" source=console
 
 running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
 n      [  33% ] 2/2 VUs  1.0s/3.0s
@@ -530,24 +652,27 @@ n    ↓ [ 100% ] 2/2 VUs  3s
 
 running (05.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
 n    ↓ [ 100% ] 2/2 VUs  3s
-time="2026-07-06T22:11:51Z" level=info msg="END   t=5001ms vu=2" source=console
-time="2026-07-06T22:11:51Z" level=info msg="END   t=5001ms vu=1" source=console
+time="2026-07-06T23:03:13Z" level=info msg="END   t=5001ms vu=1" source=console
+time="2026-07-06T23:03:13Z" level=info msg="END   t=5001ms vu=2" source=console
 
      data_received........: 0 B 0 B/s
      data_sent............: 0 B 0 B/s
      iteration_duration...: avg=5s min=5s med=5s max=5s p(90)=5s p(95)=5s
-     iterations...........: 2   0.399923/s
+     iterations...........: 2   0.399874/s
      vus..................: 2   min=2      max=2
      vus_max..............: 2   min=2      max=2
 
 
 running (05.0s), 0/2 VUs, 2 complete and 0 interrupted iterations
 n    ✓ [ 100% ] 0/2 VUs  3s
+$ T1=$(python3 -c 'import time;print(time.time())')
+$ python3 -c "print(f'total wall time = {($T1-$T0):.2f} s')"
+total wall time = 5.08 s
 ```
 
 At natural end, the mid-flight 5-second iteration is **allowed to finish** (`END
 t=5001ms`, `2 complete and 0 interrupted`) because the 30s `gracefulStop` window is
-wide enough. Total wall ≈ **5.08 s** (the run ends as soon as the last VU finishes,
+wide enough. Total wall = **5.08 s** (the run ends as soon as the last VU finishes,
 well inside the `33s` max duration).
 
 ### 3d — Natural end, SHORT `gracefulStop` (the deadline in action)
@@ -555,9 +680,11 @@ well inside the `33s` max duration).
 **Observation script** (`/tmp/k6obs/natural_short_gs.js`): 2 VUs, 3-second stage,
 `gracefulStop: '2s'`, 10-second iteration.
 
+Timed the same way (explicit `T0`/`T1`, timing line printed after the run):
+
 ```
-$ time /tmp/k6bin run --no-color /tmp/k6obs/natural_short_gs.js
-total wall time = 5.08 s
+$ T0=$(python3 -c 'import time;print(time.time())')
+$ /tmp/k6bin run --no-color /tmp/k6obs/natural_short_gs.js
 
          /\      Grafana   /‾‾/  
     /\  /  \     |\  __   /  /   
@@ -572,8 +699,8 @@ total wall time = 5.08 s
      scenarios: (100.00%) 1 scenario, 2 max VUs, 5s max duration (incl. graceful stop):
               * n: Up to 2 looping VUs for 3s over 1 stages (gracefulRampDown: 30s, gracefulStop: 2s)
 
-time="2026-07-06T22:12:03Z" level=info msg="START t=0ms vu=1" source=console
-time="2026-07-06T22:12:03Z" level=info msg="START t=0ms vu=2" source=console
+time="2026-07-06T23:03:22Z" level=info msg="START t=0ms vu=1" source=console
+time="2026-07-06T23:03:22Z" level=info msg="START t=0ms vu=2" source=console
 
 running (1.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
 n      [  33% ] 2/2 VUs  1.0s/3.0s
@@ -589,7 +716,7 @@ n    ↓ [ 100% ] 2/2 VUs  3s
 
 running (5.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
 n    ↓ [ 100% ] 2/2 VUs  3s
-time="2026-07-06T22:12:08Z" level=warning msg="No script iterations fully finished, consider making the test duration longer"
+time="2026-07-06T23:03:27Z" level=warning msg="No script iterations fully finished, consider making the test duration longer"
 
      data_received...: 0 B 0 B/s
      data_sent.......: 0 B 0 B/s
@@ -599,6 +726,9 @@ time="2026-07-06T22:12:08Z" level=warning msg="No script iterations fully finish
 
 running (5.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
 n    ✓ [ 100% ] 2/2 VUs  3s
+$ T1=$(python3 -c 'import time;print(time.time())')
+$ python3 -c "print(f'total wall time = {($T1-$T0):.2f} s')"
+total wall time = 5.07 s
 ```
 
 The banner reports `5s max duration (incl. graceful stop)` = `regularDuration(3s) +
@@ -625,7 +755,7 @@ the deadline, not any longer.
 
 **Verdict (reported honestly):** the user's "VUs run *longer* than `gracefulStop`
 after `ctrl+c`" is **not reproduced** on the local executor. `ctrl+c` stops VUs
-*faster* than `gracefulStop` (≈45–57 ms here), and at natural end nothing runs past
+*faster* than `gracefulStop` (≈45–51 ms here), and at natural end nothing runs past
 `maxEndTime = startTime + regularDuration + gracefulStop`. The only way a VU legitimately
 runs *up to* (never beyond) `gracefulStop` after the regular duration is the *natural*
 end shown in 3c/3d — which is by design, not an overrun.
@@ -660,36 +790,398 @@ export default function () {
 ### 4a — Cross-product for `TARGET=10` (single machine + three segments)
 
 The canonical three-instance CLI uses `--execution-segment` with the shared
-`--execution-segment-sequence "0,1/3,2/3,1"`:
+`--execution-segment-sequence "0,1/3,2/3,1"`. The **complete unedited** single-machine
+baseline output is shown here; the three per-segment `TARGET=10` runs (with their own
+complete output) are in **4c**, where they are launched concurrently.
+
+**Single machine, `TARGET=10` — complete unedited output** (`$ /tmp/k6bin run --no-color -e TARGET=10 /tmp/k6obs/seg.js`):
 
 ```
-$ SEQ="0,1/3,2/3,1"
-$ /tmp/k6bin run --no-color -e TARGET=10 /tmp/k6obs/seg.js                                              # single machine
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 10 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 10 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:09:56Z" level=info msg="t=100ms vusActive=1" source=console
+time="2026-07-06T23:09:56Z" level=info msg="t=201ms vusActive=2" source=console
+time="2026-07-06T23:09:56Z" level=info msg="t=300ms vusActive=3" source=console
+time="2026-07-06T23:09:56Z" level=info msg="t=401ms vusActive=4" source=console
+time="2026-07-06T23:09:56Z" level=info msg="t=500ms vusActive=5" source=console
+time="2026-07-06T23:09:56Z" level=info msg="t=601ms vusActive=6" source=console
+time="2026-07-06T23:09:56Z" level=info msg="t=700ms vusActive=7" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=801ms vusActive=8" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=900ms vusActive=9" source=console
+
+running (01.0s), 09/10 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 09/10 VUs  1.0s/5.0s
+time="2026-07-06T23:09:57Z" level=info msg="t=1001ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1101ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1201ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1301ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1401ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1501ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1601ms vusActive=10" source=console
+time="2026-07-06T23:09:57Z" level=info msg="t=1701ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=1802ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=1901ms vusActive=10" source=console
+
+running (02.0s), 10/10 VUs, 9 complete and 0 interrupted iterations
+seg    [  40% ] 10/10 VUs  2.0s/5.0s
+time="2026-07-06T23:09:58Z" level=info msg="t=2002ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2102ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2202ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2302ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2402ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2501ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2602ms vusActive=10" source=console
+time="2026-07-06T23:09:58Z" level=info msg="t=2701ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=2802ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=2901ms vusActive=10" source=console
+
+running (03.0s), 10/10 VUs, 19 complete and 0 interrupted iterations
+seg    [  60% ] 10/10 VUs  3.0s/5.0s
+time="2026-07-06T23:09:59Z" level=info msg="t=3003ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3104ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3203ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3303ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3403ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3501ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3602ms vusActive=10" source=console
+time="2026-07-06T23:09:59Z" level=info msg="t=3702ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=3803ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=3902ms vusActive=10" source=console
+
+running (04.0s), 10/10 VUs, 29 complete and 0 interrupted iterations
+seg    [  80% ] 10/10 VUs  4.0s/5.0s
+time="2026-07-06T23:10:00Z" level=info msg="t=4004ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4104ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4204ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4304ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4403ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4502ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4603ms vusActive=10" source=console
+time="2026-07-06T23:10:00Z" level=info msg="t=4702ms vusActive=10" source=console
+time="2026-07-06T23:10:01Z" level=info msg="t=4804ms vusActive=10" source=console
+time="2026-07-06T23:10:01Z" level=info msg="t=4903ms vusActive=10" source=console
+
+running (05.0s), 10/10 VUs, 39 complete and 0 interrupted iterations
+seg    [ 100% ] 10/10 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 49  8.299344/s
+     vus..................: 10  min=9      max=10
      vus_max..............: 10  min=10     max=10
-$ /tmp/k6bin run --no-color -e TARGET=10 --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js
-     vus_max..............: 4   min=4      max=4
-$ /tmp/k6bin run --no-color -e TARGET=10 --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js
-     vus_max..............: 3   min=3      max=3
-$ /tmp/k6bin run --no-color -e TARGET=10 --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js
-     vus_max..............: 3   min=3     max=3
+
+
+running (05.9s), 00/10 VUs, 49 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 00/10 VUs  5s
 ```
+
+**Derived cross-product** (from `$ grep vus_max` over the single-machine run above and
+the three concurrent per-segment runs in 4c — placed after the raw output, as a
+summary of it):
+
+| instance | `--execution-segment` | `vus_max` |
+|---|---|---|
+| single machine | (none) | `10` |
+| A | `0:1/3` | `4` |
+| B | `1/3:2/3` | `3` |
+| C | `2/3:1` | `3` |
 
 `single = 10`; segments `0:1/3 → 4`, `1/3:2/3 → 3`, `2/3:1 → 3`;
 **SUM = 4 + 3 + 3 = 10 = single-machine max.**
 
 ### 4b — Cross-product for `TARGET=9`
 
+All four runs are shown with **complete unedited output**.
+
+**Single machine, `TARGET=9`** (`$ /tmp/k6bin run --no-color -e TARGET=9 /tmp/k6obs/seg.js`):
+
 ```
-$ SEQ="0,1/3,2/3,1"
-$ /tmp/k6bin run --no-color -e TARGET=9 /tmp/k6obs/seg.js
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 9 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 9 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:06Z" level=info msg="t=112ms vusActive=1" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=223ms vusActive=2" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=334ms vusActive=3" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=445ms vusActive=4" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=557ms vusActive=5" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=667ms vusActive=6" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=779ms vusActive=7" source=console
+time="2026-07-06T23:11:06Z" level=info msg="t=890ms vusActive=8" source=console
+
+running (01.0s), 8/9 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 8/9 VUs  1.0s/5.0s
+time="2026-07-06T23:11:06Z" level=info msg="t=1000ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1113ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1223ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1335ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1446ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1558ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1668ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1780ms vusActive=9" source=console
+time="2026-07-06T23:11:07Z" level=info msg="t=1890ms vusActive=9" source=console
+
+running (02.0s), 9/9 VUs, 8 complete and 0 interrupted iterations
+seg    [  40% ] 9/9 VUs  2.0s/5.0s
+time="2026-07-06T23:11:07Z" level=info msg="t=2002ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2114ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2224ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2335ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2447ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2559ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2669ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2781ms vusActive=9" source=console
+time="2026-07-06T23:11:08Z" level=info msg="t=2891ms vusActive=9" source=console
+
+running (03.0s), 9/9 VUs, 17 complete and 0 interrupted iterations
+seg    [  60% ] 9/9 VUs  3.0s/5.0s
+time="2026-07-06T23:11:08Z" level=info msg="t=3002ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3115ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3225ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3337ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3448ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3560ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3670ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3782ms vusActive=9" source=console
+time="2026-07-06T23:11:09Z" level=info msg="t=3892ms vusActive=9" source=console
+
+running (04.0s), 9/9 VUs, 26 complete and 0 interrupted iterations
+seg    [  80% ] 9/9 VUs  4.0s/5.0s
+time="2026-07-06T23:11:09Z" level=info msg="t=4003ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4116ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4226ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4337ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4448ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4561ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4671ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4783ms vusActive=9" source=console
+time="2026-07-06T23:11:10Z" level=info msg="t=4893ms vusActive=9" source=console
+
+running (05.0s), 9/9 VUs, 35 complete and 0 interrupted iterations
+seg    [ 100% ] 9/9 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 44  7.464691/s
+     vus..................: 9   min=8      max=9
      vus_max..............: 9   min=9      max=9
-$ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js
-     vus_max..............: 3   min=3      max=3
-$ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js
-     vus_max..............: 3   min=3     max=3
-$ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js
-     vus_max..............: 3   min=3      max=3
+
+
+running (05.9s), 0/9 VUs, 44 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/9 VUs  5s
 ```
+
+**Segment `0:1/3`, `TARGET=9`** (`$ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "0:1/3" --execution-segment-sequence "0,1/3,2/3,1" /tmp/k6obs/seg.js`):
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (33.33%) 1 scenario, 3 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 3 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:11Z" level=info msg="t=112ms vusActive=1" source=console
+time="2026-07-06T23:11:12Z" level=info msg="t=445ms vusActive=2" source=console
+time="2026-07-06T23:11:12Z" level=info msg="t=778ms vusActive=3" source=console
+
+running (01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 3/3 VUs  1.0s/5.0s
+time="2026-07-06T23:11:12Z" level=info msg="t=1112ms vusActive=3" source=console
+time="2026-07-06T23:11:13Z" level=info msg="t=1446ms vusActive=3" source=console
+time="2026-07-06T23:11:13Z" level=info msg="t=1779ms vusActive=3" source=console
+
+running (02.0s), 3/3 VUs, 3 complete and 0 interrupted iterations
+seg    [  40% ] 3/3 VUs  2.0s/5.0s
+time="2026-07-06T23:11:13Z" level=info msg="t=2112ms vusActive=3" source=console
+time="2026-07-06T23:11:14Z" level=info msg="t=2447ms vusActive=3" source=console
+time="2026-07-06T23:11:14Z" level=info msg="t=2780ms vusActive=3" source=console
+
+running (03.0s), 3/3 VUs, 6 complete and 0 interrupted iterations
+seg    [  60% ] 3/3 VUs  3.0s/5.0s
+time="2026-07-06T23:11:14Z" level=info msg="t=3113ms vusActive=3" source=console
+time="2026-07-06T23:11:15Z" level=info msg="t=3448ms vusActive=3" source=console
+time="2026-07-06T23:11:15Z" level=info msg="t=3781ms vusActive=3" source=console
+
+running (04.0s), 3/3 VUs, 9 complete and 0 interrupted iterations
+seg    [  80% ] 3/3 VUs  4.0s/5.0s
+time="2026-07-06T23:11:15Z" level=info msg="t=4114ms vusActive=3" source=console
+time="2026-07-06T23:11:16Z" level=info msg="t=4448ms vusActive=3" source=console
+time="2026-07-06T23:11:16Z" level=info msg="t=4782ms vusActive=3" source=console
+
+running (05.0s), 3/3 VUs, 12 complete and 0 interrupted iterations
+seg    [ 100% ] 3/3 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 15  2.593987/s
+     vus..................: 3   min=3      max=3
+     vus_max..............: 3   min=3      max=3
+
+
+running (05.8s), 0/3 VUs, 15 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/3 VUs  5s
+```
+
+**Segment `1/3:2/3`, `TARGET=9`** (`$ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "1/3:2/3" --execution-segment-sequence "0,1/3,2/3,1" /tmp/k6obs/seg.js`):
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (33.33%) 1 scenario, 3 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 3 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:17Z" level=info msg="t=223ms vusActive=1" source=console
+time="2026-07-06T23:11:18Z" level=info msg="t=557ms vusActive=2" source=console
+time="2026-07-06T23:11:18Z" level=info msg="t=889ms vusActive=3" source=console
+
+running (01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 3/3 VUs  1.0s/5.0s
+time="2026-07-06T23:11:18Z" level=info msg="t=1224ms vusActive=3" source=console
+time="2026-07-06T23:11:19Z" level=info msg="t=1558ms vusActive=3" source=console
+time="2026-07-06T23:11:19Z" level=info msg="t=1890ms vusActive=3" source=console
+
+running (02.0s), 3/3 VUs, 3 complete and 0 interrupted iterations
+seg    [  40% ] 3/3 VUs  2.0s/5.0s
+time="2026-07-06T23:11:19Z" level=info msg="t=2225ms vusActive=3" source=console
+time="2026-07-06T23:11:20Z" level=info msg="t=2558ms vusActive=3" source=console
+time="2026-07-06T23:11:20Z" level=info msg="t=2890ms vusActive=3" source=console
+
+running (03.0s), 3/3 VUs, 6 complete and 0 interrupted iterations
+seg    [  60% ] 3/3 VUs  3.0s/5.0s
+time="2026-07-06T23:11:20Z" level=info msg="t=3226ms vusActive=3" source=console
+time="2026-07-06T23:11:21Z" level=info msg="t=3559ms vusActive=3" source=console
+time="2026-07-06T23:11:21Z" level=info msg="t=3892ms vusActive=3" source=console
+
+running (04.0s), 3/3 VUs, 9 complete and 0 interrupted iterations
+seg    [  80% ] 3/3 VUs  4.0s/5.0s
+time="2026-07-06T23:11:21Z" level=info msg="t=4227ms vusActive=3" source=console
+time="2026-07-06T23:11:22Z" level=info msg="t=4560ms vusActive=3" source=console
+time="2026-07-06T23:11:22Z" level=info msg="t=4893ms vusActive=3" source=console
+
+running (05.0s), 3/3 VUs, 12 complete and 0 interrupted iterations
+seg    [ 100% ] 3/3 VUs  5s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 15  2.545062/s
+     vus..................: 3   min=3      max=3
+     vus_max..............: 3   min=3      max=3
+
+
+running (05.9s), 0/3 VUs, 15 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/3 VUs  5s
+```
+
+**Segment `2/3:1`, `TARGET=9`** (`$ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "2/3:1" --execution-segment-sequence "0,1/3,2/3,1" /tmp/k6obs/seg.js`):
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (33.33%) 1 scenario, 3 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 3 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:24Z" level=info msg="t=334ms vusActive=1" source=console
+time="2026-07-06T23:11:24Z" level=info msg="t=667ms vusActive=2" source=console
+
+running (01.0s), 2/3 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 2/3 VUs  1.0s/5.0s
+time="2026-07-06T23:11:24Z" level=info msg="t=1000ms vusActive=3" source=console
+time="2026-07-06T23:11:25Z" level=info msg="t=1335ms vusActive=3" source=console
+time="2026-07-06T23:11:25Z" level=info msg="t=1669ms vusActive=3" source=console
+
+running (02.0s), 3/3 VUs, 2 complete and 0 interrupted iterations
+seg    [  40% ] 3/3 VUs  2.0s/5.0s
+time="2026-07-06T23:11:25Z" level=info msg="t=2001ms vusActive=3" source=console
+time="2026-07-06T23:11:26Z" level=info msg="t=2336ms vusActive=3" source=console
+time="2026-07-06T23:11:26Z" level=info msg="t=2670ms vusActive=3" source=console
+
+running (03.0s), 3/3 VUs, 5 complete and 0 interrupted iterations
+seg    [  60% ] 3/3 VUs  3.0s/5.0s
+time="2026-07-06T23:11:26Z" level=info msg="t=3002ms vusActive=3" source=console
+time="2026-07-06T23:11:27Z" level=info msg="t=3337ms vusActive=3" source=console
+time="2026-07-06T23:11:27Z" level=info msg="t=3670ms vusActive=3" source=console
+
+running (04.0s), 3/3 VUs, 8 complete and 0 interrupted iterations
+seg    [  80% ] 3/3 VUs  4.0s/5.0s
+time="2026-07-06T23:11:27Z" level=info msg="t=4003ms vusActive=3" source=console
+time="2026-07-06T23:11:28Z" level=info msg="t=4338ms vusActive=3" source=console
+time="2026-07-06T23:11:28Z" level=info msg="t=4671ms vusActive=3" source=console
+
+running (05.0s), 3/3 VUs, 11 complete and 0 interrupted iterations
+seg    [ 100% ] 3/3 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 14  2.468277/s
+     vus..................: 3   min=2      max=3
+     vus_max..............: 3   min=3      max=3
+
+
+running (05.7s), 0/3 VUs, 14 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/3 VUs  5s
+```
+
+**Derived cross-product** (`$ grep vus_max`, summarizing the four raw runs above):
+
+| instance | `--execution-segment` | `vus_max` |
+|---|---|---|
+| single machine | (none) | `9` |
+| A | `0:1/3` | `3` |
+| B | `1/3:2/3` | `3` |
+| C | `2/3:1` | `3` |
 
 `single = 9`; each segment `→ 3`; **SUM = 3 + 3 + 3 = 9 = single-machine max**
 (evenly divisible, so no remainder and no "extra" instance).
@@ -697,8 +1189,8 @@ $ /tmp/k6bin run --no-color -e TARGET=9 --execution-segment "2/3:1"   --executio
 ### 4c — Identical-timestamp `vusActive` (three segments run concurrently)
 
 To answer "one instance shows more … at the same timestamp," the three `TARGET=10`
-segments were run **concurrently** (background `&` + `wait`) and their console
-`vusActive` samples grepped:
+segments were run **concurrently** (background `&` + `wait`), each redirected to its own
+file:
 
 ```
 $ SEQ="0,1/3,2/3,1"
@@ -706,72 +1198,259 @@ $ /tmp/k6bin run --no-color -e TARGET=10 --execution-segment "0:1/3"   --executi
 $ /tmp/k6bin run --no-color -e TARGET=10 --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js > /tmp/k6obs/segc_B.txt 2>&1 &
 $ /tmp/k6bin run --no-color -e TARGET=10 --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" /tmp/k6obs/seg.js > /tmp/k6obs/segc_C.txt 2>&1 &
 $ wait
+```
 
+**Instance A (`0:1/3`) — complete unedited output** (`$ cat /tmp/k6obs/segc_A.txt`):
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (33.33%) 1 scenario, 4 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 4 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:29Z" level=info msg="t=101ms vusActive=1" source=console
+time="2026-07-06T23:11:29Z" level=info msg="t=401ms vusActive=2" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=701ms vusActive=3" source=console
+
+running (01.0s), 3/4 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 3/4 VUs  1.0s/5.0s
+time="2026-07-06T23:11:30Z" level=info msg="t=1001ms vusActive=4" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=1102ms vusActive=4" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=1402ms vusActive=4" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=1701ms vusActive=4" source=console
+
+running (02.0s), 4/4 VUs, 3 complete and 0 interrupted iterations
+seg    [  40% ] 4/4 VUs  2.0s/5.0s
+time="2026-07-06T23:11:31Z" level=info msg="t=2002ms vusActive=4" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=2102ms vusActive=4" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=2403ms vusActive=4" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=2702ms vusActive=4" source=console
+
+running (03.0s), 4/4 VUs, 7 complete and 0 interrupted iterations
+seg    [  60% ] 4/4 VUs  3.0s/5.0s
+time="2026-07-06T23:11:32Z" level=info msg="t=3002ms vusActive=4" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=3103ms vusActive=4" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=3404ms vusActive=4" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=3703ms vusActive=4" source=console
+
+running (04.0s), 4/4 VUs, 11 complete and 0 interrupted iterations
+seg    [  80% ] 4/4 VUs  4.0s/5.0s
+time="2026-07-06T23:11:33Z" level=info msg="t=4002ms vusActive=4" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=4104ms vusActive=4" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=4405ms vusActive=4" source=console
+time="2026-07-06T23:11:34Z" level=info msg="t=4703ms vusActive=4" source=console
+
+running (05.0s), 4/4 VUs, 15 complete and 0 interrupted iterations
+seg    [ 100% ] 4/4 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 19  3.331127/s
+     vus..................: 4   min=3      max=4
+     vus_max..............: 4   min=4      max=4
+
+
+running (05.7s), 0/4 VUs, 19 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/4 VUs  5s
+```
+
+**Instance B (`1/3:2/3`) — complete unedited output** (`$ cat /tmp/k6obs/segc_B.txt`):
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (33.33%) 1 scenario, 3 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 3 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:29Z" level=warning msg="Error from API server" error="listen tcp 127.0.0.1:6565: bind: address already in use"
+time="2026-07-06T23:11:29Z" level=info msg="t=201ms vusActive=1" source=console
+time="2026-07-06T23:11:29Z" level=info msg="t=500ms vusActive=2" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=801ms vusActive=3" source=console
+
+running (01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 3/3 VUs  1.0s/5.0s
+time="2026-07-06T23:11:30Z" level=info msg="t=1202ms vusActive=3" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=1501ms vusActive=3" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=1801ms vusActive=3" source=console
+
+running (02.0s), 3/3 VUs, 3 complete and 0 interrupted iterations
+seg    [  40% ] 3/3 VUs  2.0s/5.0s
+time="2026-07-06T23:11:31Z" level=info msg="t=2202ms vusActive=3" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=2502ms vusActive=3" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=2802ms vusActive=3" source=console
+
+running (03.0s), 3/3 VUs, 6 complete and 0 interrupted iterations
+seg    [  60% ] 3/3 VUs  3.0s/5.0s
+time="2026-07-06T23:11:32Z" level=info msg="t=3203ms vusActive=3" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=3503ms vusActive=3" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=3803ms vusActive=3" source=console
+
+running (04.0s), 3/3 VUs, 9 complete and 0 interrupted iterations
+seg    [  80% ] 3/3 VUs  4.0s/5.0s
+time="2026-07-06T23:11:33Z" level=info msg="t=4204ms vusActive=3" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=4503ms vusActive=3" source=console
+time="2026-07-06T23:11:34Z" level=info msg="t=4804ms vusActive=3" source=console
+
+running (05.0s), 3/3 VUs, 12 complete and 0 interrupted iterations
+seg    [ 100% ] 3/3 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 15  2.584032/s
+     vus..................: 3   min=3      max=3
+     vus_max..............: 3   min=3      max=3
+
+
+running (05.8s), 0/3 VUs, 15 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/3 VUs  5s
+```
+
+**Instance C (`2/3:1`) — complete unedited output** (`$ cat /tmp/k6obs/segc_C.txt`):
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/seg.js
+        output: -
+
+     scenarios: (33.33%) 1 scenario, 3 max VUs, 35s max duration (incl. graceful stop):
+              * seg: Up to 3 looping VUs for 5s over 2 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+time="2026-07-06T23:11:29Z" level=warning msg="Error from API server" error="listen tcp 127.0.0.1:6565: bind: address already in use"
+time="2026-07-06T23:11:29Z" level=info msg="t=301ms vusActive=1" source=console
+time="2026-07-06T23:11:29Z" level=info msg="t=600ms vusActive=2" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=901ms vusActive=3" source=console
+
+running (01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+seg    [  20% ] 3/3 VUs  1.0s/5.0s
+time="2026-07-06T23:11:30Z" level=info msg="t=1301ms vusActive=3" source=console
+time="2026-07-06T23:11:30Z" level=info msg="t=1601ms vusActive=3" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=1902ms vusActive=3" source=console
+
+running (02.0s), 3/3 VUs, 3 complete and 0 interrupted iterations
+seg    [  40% ] 3/3 VUs  2.0s/5.0s
+time="2026-07-06T23:11:31Z" level=info msg="t=2302ms vusActive=3" source=console
+time="2026-07-06T23:11:31Z" level=info msg="t=2601ms vusActive=3" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=2903ms vusActive=3" source=console
+
+running (03.0s), 3/3 VUs, 6 complete and 0 interrupted iterations
+seg    [  60% ] 3/3 VUs  3.0s/5.0s
+time="2026-07-06T23:11:32Z" level=info msg="t=3303ms vusActive=3" source=console
+time="2026-07-06T23:11:32Z" level=info msg="t=3602ms vusActive=3" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=3904ms vusActive=3" source=console
+
+running (04.0s), 3/3 VUs, 9 complete and 0 interrupted iterations
+seg    [  80% ] 3/3 VUs  4.0s/5.0s
+time="2026-07-06T23:11:33Z" level=info msg="t=4304ms vusActive=3" source=console
+time="2026-07-06T23:11:33Z" level=info msg="t=4603ms vusActive=3" source=console
+time="2026-07-06T23:11:34Z" level=info msg="t=4905ms vusActive=3" source=console
+
+running (05.0s), 3/3 VUs, 12 complete and 0 interrupted iterations
+seg    [ 100% ] 3/3 VUs  5.0s/5.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 15  2.540016/s
+     vus..................: 3   min=3      max=3
+     vus_max..............: 3   min=3      max=3
+
+
+running (05.9s), 0/3 VUs, 15 complete and 0 interrupted iterations
+seg  ✓ [ 100% ] 0/3 VUs  5s
+```
+
+**Additional analysis (derived from the complete output above).** Extracting just the
+`t=…ms vusActive=…` samples from each instance with `grep -oE`:
+
+```
 $ grep -oE 't=[0-9]+ms vusActive=[0-9]+' /tmp/k6obs/segc_A.txt
 t=101ms vusActive=1
 t=401ms vusActive=2
 t=701ms vusActive=3
-t=1000ms vusActive=4
-t=1101ms vusActive=4
-t=1426ms vusActive=4
-t=1703ms vusActive=4
-t=2001ms vusActive=4
+t=1001ms vusActive=4
+t=1102ms vusActive=4
+t=1402ms vusActive=4
+t=1701ms vusActive=4
+t=2002ms vusActive=4
 t=2102ms vusActive=4
-t=2453ms vusActive=4
-t=2703ms vusActive=4
+t=2403ms vusActive=4
+t=2702ms vusActive=4
 t=3002ms vusActive=4
 t=3103ms vusActive=4
-t=3981ms vusActive=4
-t=3981ms vusActive=4
-t=4004ms vusActive=4
-t=4103ms vusActive=4
-t=4981ms vusActive=4
-t=4981ms vusActive=4
+t=3404ms vusActive=4
+t=3703ms vusActive=4
+t=4002ms vusActive=4
+t=4104ms vusActive=4
+t=4405ms vusActive=4
+t=4703ms vusActive=4
 
 $ grep -oE 't=[0-9]+ms vusActive=[0-9]+' /tmp/k6obs/segc_B.txt
 t=201ms vusActive=1
 t=500ms vusActive=2
 t=801ms vusActive=3
-t=1201ms vusActive=3
-t=1517ms vusActive=3
-t=1802ms vusActive=3
+t=1202ms vusActive=3
+t=1501ms vusActive=3
+t=1801ms vusActive=3
 t=2202ms vusActive=3
-t=2536ms vusActive=3
-t=2803ms vusActive=3
+t=2502ms vusActive=3
+t=2802ms vusActive=3
 t=3203ms vusActive=3
-t=4180ms vusActive=3
-t=4180ms vusActive=3
-t=4203ms vusActive=3
+t=3503ms vusActive=3
+t=3803ms vusActive=3
+t=4204ms vusActive=3
+t=4503ms vusActive=3
+t=4804ms vusActive=3
 
 $ grep -oE 't=[0-9]+ms vusActive=[0-9]+' /tmp/k6obs/segc_C.txt
 t=301ms vusActive=1
 t=600ms vusActive=2
 t=901ms vusActive=3
-t=1324ms vusActive=3
+t=1301ms vusActive=3
 t=1601ms vusActive=3
-t=1901ms vusActive=3
-t=2365ms vusActive=3
-t=2602ms vusActive=3
+t=1902ms vusActive=3
+t=2302ms vusActive=3
+t=2601ms vusActive=3
 t=2903ms vusActive=3
-t=3797ms vusActive=3
-t=3797ms vusActive=3
-t=3915ms vusActive=3
-t=4798ms vusActive=3
-t=4798ms vusActive=3
-t=4916ms vusActive=3
-
-$ echo "A: $(grep vus_max /tmp/k6obs/segc_A.txt)"
-A:      vus_max..............: 4   min=4      max=4
-$ echo "B: $(grep vus_max /tmp/k6obs/segc_B.txt)"
-B:      vus_max..............: 3   min=3      max=3
-$ echo "C: $(grep vus_max /tmp/k6obs/segc_C.txt)"
-C:      vus_max..............: 3   min=3      max=3
+t=3303ms vusActive=3
+t=3602ms vusActive=3
+t=3904ms vusActive=3
+t=4304ms vusActive=3
+t=4603ms vusActive=3
+t=4905ms vusActive=3
 ```
 
-At steady state (e.g. around t≈2000 ms) the three instances read **A=4, B=3, C=3**
+At steady state (e.g. around t≈2000 ms — A `t=2002ms vusActive=4`, B `t=2202ms
+vusActive=3`, C `t=2302ms vusActive=3`) the three instances read **A=4, B=3, C=3**
 simultaneously — **sum = 10 = the configured maximum**. The concurrent run reproduced
-the same per-segment `vus_max` as the sequential run in 4a, so the split is
-deterministic across two independent runs.
+the same per-segment `vus_max` (`4`, `3`, `3`) as the single-machine cross-product in
+4a, so the split is deterministic across two independent runs.
 
 **Cause → effect.**
 
@@ -780,13 +1459,14 @@ deterministic across two independent runs.
   `ExecutionTuple.ScaleInt64` (`:L734`) and
   `ExecutionSegmentSequenceWrapper.ScaleInt64` (`:L580`). Indivisible VUs are *striped*
   across the sequence so that **summing the per-segment values reproduces the
-  single-machine total exactly** (the k6 issue #997 invariant). The first segment in
+  single-machine total exactly** (the k6 issue #997 invariant — see **External
+  references**). The first segment in
   the sequence takes the remainder, which is why `0:1/3` shows `4` while the others
   show `3` when the total is `10`.
 - This is validated independently by `TestSumRandomSegmentSequenceMatchesNoSegment`
   (`lib/executor/ramping_vus_test.go:L1112`), which passes cleanly under `-race`
   (Section 6, Probe 3).
-- (inferred, from k6 issue #1308) for `ramping-vus` only the *number of VUs* is
+- (inferred, from k6 issue #1308 — see **External references**) for `ramping-vus` only the *number of VUs* is
   partitioned across segments — consistent with observing only VU-count striping here.
 
 **Verdict:** "one instance consistently shows more" is **true and expected** — the
@@ -825,7 +1505,76 @@ export default function () { sleep(0.3); }
 **Command and complete unedited output — RUN 1:**
 
 ```
-$ /tmp/k6bin run --no-color /tmp/k6obs/buffer_stress.js
+$ /tmp/k6bin run --no-color /tmp/k6obs/buffer_stress.js > /tmp/k6obs/s5_run1.txt 2>&1
+$ cat /tmp/k6obs/s5_run1.txt
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6obs/buffer_stress.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 10 max VUs, 12s max duration (incl. graceful stop):
+              * churn: Up to 10 looping VUs for 12s over 30 stages (gracefulRampDown: 0s, gracefulStop: 30s)
+
+
+running (01.0s), 04/10 VUs, 8 complete and 10 interrupted iterations
+churn   [   8% ] 04/10 VUs  01.0s/12.0s
+
+running (02.0s), 09/10 VUs, 18 complete and 20 interrupted iterations
+churn   [  17% ] 09/10 VUs  02.0s/12.0s
+
+running (03.0s), 06/10 VUs, 31 complete and 34 interrupted iterations
+churn   [  25% ] 06/10 VUs  03.0s/12.0s
+
+running (04.0s), 01/10 VUs, 41 complete and 49 interrupted iterations
+churn   [  33% ] 01/10 VUs  04.0s/12.0s
+
+running (05.0s), 04/10 VUs, 49 complete and 60 interrupted iterations
+churn   [  42% ] 04/10 VUs  05.0s/12.0s
+
+running (06.0s), 09/10 VUs, 59 complete and 70 interrupted iterations
+churn   [  50% ] 09/10 VUs  06.0s/12.0s
+
+running (07.0s), 06/10 VUs, 71 complete and 84 interrupted iterations
+churn   [  58% ] 06/10 VUs  07.0s/12.0s
+
+running (08.0s), 01/10 VUs, 81 complete and 99 interrupted iterations
+churn   [  67% ] 01/10 VUs  08.0s/12.0s
+
+running (09.0s), 04/10 VUs, 89 complete and 110 interrupted iterations
+churn   [  75% ] 04/10 VUs  09.0s/12.0s
+
+running (10.0s), 09/10 VUs, 99 complete and 120 interrupted iterations
+churn   [  83% ] 09/10 VUs  10.0s/12.0s
+
+running (11.0s), 06/10 VUs, 111 complete and 134 interrupted iterations
+churn   [  92% ] 06/10 VUs  11.0s/12.0s
+
+running (12.0s), 01/10 VUs, 121 complete and 149 interrupted iterations
+churn   [ 100% ] 01/10 VUs  12.0s/12.0s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=300.56ms min=300.03ms med=300.53ms max=301.09ms p(90)=301ms p(95)=301.05ms
+     iterations...........: 121 10.082502/s
+     vus..................: 1   min=1       max=9 
+     vus_max..............: 10  min=10      max=10
+
+
+running (12.0s), 00/10 VUs, 121 complete and 150 interrupted iterations
+churn ✓ [ 100% ] 01/10 VUs  12s
+```
+
+**Command and complete unedited output — RUN 2 (same unchanged input):**
+
+```
+$ /tmp/k6bin run --no-color /tmp/k6obs/buffer_stress.js > /tmp/k6obs/s5_run2.txt 2>&1
+$ cat /tmp/k6obs/s5_run2.txt
 
          /\      Grafana   /‾‾/  
     /\  /  \     |\  __   /  /   
@@ -879,45 +1628,46 @@ churn   [ 100% ] 01/10 VUs  12.0s/12.0s
 
      data_received........: 0 B 0 B/s
      data_sent............: 0 B 0 B/s
-     iteration_duration...: avg=300.55ms min=300.03ms med=300.56ms max=301.07ms p(90)=300.97ms p(95)=301ms
-     iterations...........: 120 9.999313/s
+     iteration_duration...: avg=300.52ms min=300.03ms med=300.5ms max=301.11ms p(90)=300.96ms p(95)=301.07ms
+     iterations...........: 120 9.999287/s
      vus..................: 1   min=1      max=9 
      vus_max..............: 10  min=10     max=10
 
 
 running (12.0s), 00/10 VUs, 120 complete and 150 interrupted iterations
-churn ✓ [ 100% ] 01/10 VUs  12s
+churn ✓ [ 100% ] 00/10 VUs  12s
 ```
 
-**Buffer-warning check for both runs** (same unchanged input run twice):
+**Buffer-warning check (derived from the two complete runs above).** Each captured
+file was grepped for the starvation warning and its corresponding error:
 
 ```
-$ /tmp/k6bin run --no-color /tmp/k6obs/buffer_stress.js > /tmp/k6obs/buf_run1.txt 2>&1
-$ grep -c "Could not get a VU from the buffer" /tmp/k6obs/buf_run1.txt
+$ grep -c "Could not get a VU from the buffer" /tmp/k6obs/s5_run1.txt
 0
-$ grep -c "could not get a VU from the buffer in" /tmp/k6obs/buf_run1.txt
+$ grep -c "could not get a VU from the buffer in" /tmp/k6obs/s5_run1.txt
 0
-
-$ /tmp/k6bin run --no-color /tmp/k6obs/buffer_stress.js > /tmp/k6obs/buf_run2.txt 2>&1
-$ grep -c "Could not get a VU from the buffer" /tmp/k6obs/buf_run2.txt
+$ grep -c "Could not get a VU from the buffer" /tmp/k6obs/s5_run2.txt
 0
-$ grep -c "could not get a VU from the buffer in" /tmp/k6obs/buf_run2.txt
+$ grep -c "could not get a VU from the buffer in" /tmp/k6obs/s5_run2.txt
 0
-$ grep -E 'vus_max|iterations\.\.\.' /tmp/k6obs/buf_run2.txt
-     iterations...........: 120 9.999554/s
-     vus_max..............: 10  min=10     max=10
 ```
 
-**Distribution across runs.** Both runs produced **`0`** occurrences of the
-starvation warning *and* **`0`** of the corresponding error, `vus_max` stayed at
-`10` (min=10 max=10), and both ended with `120 complete and 150 interrupted`
-iterations — fully deterministic here.
+**Distribution across runs (same unchanged input, run twice).** The two runs did
+**not** produce byte-identical iteration counts: RUN 1 ended with
+**`121 complete and 150 interrupted`** iterations and RUN 2 with
+**`120 complete and 150 interrupted`** — the `complete` count varies by ±1
+(`120–121`) as a normal effect of sub-millisecond timing jitter in how many 300 ms
+iterations happen to finish inside the fixed 12 s window. The buffer-conservation
+signals, however, were **stable and identical across both runs**: **`0`** occurrences
+of the starvation warning (`lib/execution.go:L481`) *and* **`0`** of the corresponding
+error, and `vus_max` pinned at **`10`** (`min=10 max=10`) with no growth. The leak
+verdict rests on those stable signals, not on the jittering `complete` count.
 
 **Cause → effect.**
 
-- Over the run there are ~270 get/return operations per run (`120` completed + `150`
-  interrupted iterations, each pairing one `GetPlannedVU` with one `ReturnVU`), yet the
-  starvation warning at `lib/execution.go:L481` never fired and `GetPlannedVU`
+- Over the run there are ~270–271 get/return operations per run (`120–121` completed +
+  `150` interrupted iterations, each pairing one `GetPlannedVU` with one `ReturnVU`), yet
+  the starvation warning at `lib/execution.go:L481` never fired and `GetPlannedVU`
   (`lib/execution.go:L471`) never exhausted its 5 retries (`lib/execution.go:L29`).
 - `vus_max` never grew beyond the configured `10`, which means no VU was taken from the
   `vus` channel (`lib/execution.go:L106`) and left unreturned. Every get is paired with
@@ -1032,6 +1782,30 @@ ok  	go.k6.io/k6/lib/executor	7.053s
 
 Clean again: all `PASS`, no data race.
 
+**`-race` evidence (Probe 3 — the execution-segment sum-invariant, run twice).**
+This is the independent check behind Symptom 4: that summing the per-segment VU
+counts reproduces the single-machine total exactly.
+`TestSumRandomSegmentSequenceMatchesNoSegment`
+(`lib/executor/ramping_vus_test.go:L1112`) generates random execution-segment
+sequences and asserts the per-segment sums equal the no-segment shape; running it
+under `-race` confirms the striping arithmetic (`SegmentedIndex`,
+`lib/execution_segment.go:L768`) is free of data races as well:
+
+```
+$ go test -race -count=1 -run 'TestSumRandomSegmentSequenceMatchesNoSegment' ./lib/executor/     # RUN 1
+ok  	go.k6.io/k6/lib/executor	1.468s
+```
+
+```
+$ go test -race -count=1 -run 'TestSumRandomSegmentSequenceMatchesNoSegment' ./lib/executor/     # RUN 2
+ok  	go.k6.io/k6/lib/executor	1.384s
+```
+
+Both runs report `ok` with **no `WARNING: DATA RACE`** and no `FAIL` — the
+sum-invariant test passes cleanly under the race detector across repeated runs,
+corroborating the Section 4 finding that the per-segment counts sum exactly to the
+single-machine maximum.
+
 **Structural finding (why no race is possible between the two handlers).**
 
 - The two "handlers" are closures built in `RampingVUs.Run`:
@@ -1111,6 +1885,47 @@ mutation occurs.
 
 ---
 
+## External references
+
+The design invariants that the runtime observations above **confirm** are grounded in
+the following authoritative sources. These corroborate the *expected* behaviours; they
+are **not** the source of the observed values (which come from the runs shown in each
+section above):
+
+1. **k6 issue #997 — execution-segment partitioning / sum-invariant.**
+   <https://github.com/grafana/k6/issues/997>. This is the issue that introduced the
+   `--execution-segment` / `--execution-segment-sequence` options; the striping
+   distributes indivisible VUs so that the per-segment values **sum to the
+   single-machine total exactly**. Corroborated by the k6 v0.27.0 release notes, which
+   state the new execution-segment options were added for partitioning test runs across
+   instances ("See #997 for more details"). → grounds **Section 4** (Symptom 4).
+2. **k6 issue #1308 — VU-count-only partitioning for looping-VU executors.**
+   <https://github.com/grafana/k6/issues/1308>. For `ramping-vus` (internally
+   "variable-looping-vus") only the *number of VUs* is partitioned across segments; the
+   per-iteration work is not further subdivided (unlike the arrival-rate /
+   shared-iterations executors). → grounds the "(inferred, from k6 issue #1308)" note in
+   **Section 4**.
+3. **Execution segments — k6 options reference.**
+   <https://grafana.com/docs/k6/latest/using-k6/k6-options/reference/>. Documents the
+   `--execution-segment` and `--execution-segment-sequence` options exercised in
+   **Section 4**.
+4. **`ramping-vus` executor — official k6 docs.**
+   <https://grafana.com/docs/k6/latest/using-k6/scenarios/executors/ramping-vus/>.
+   Confirms `gracefulRampDown` (default `30s`, "separate from `gracefulStop`") and that
+   with `gracefulRampDown: 0s` some iterations may be interrupted during ramp-down. →
+   grounds **Sections 1, 2, 4, 5**.
+5. **Graceful stop concept — official k6 docs.**
+   <https://grafana.com/docs/k6/latest/using-k6/scenarios/concepts/graceful-stop/>.
+   Confirms `gracefulStop` (default `30s`, available to all executors except
+   externally-controlled) is the duration k6 waits before forcefully interrupting an
+   iteration. → grounds **Section 3**.
+
+All `file:line` citations throughout this document refer to the canonical k6 source
+under investigation (`k6 v0.55.0`); the URLs above are supplementary design context
+only.
+
+---
+
 ## Section 8 — Coverage pass + final repository state
 
 ### 8a — Coverage checklist (every named item addressed by name)
@@ -1118,8 +1933,8 @@ mutation occurs.
 | Named item (from the question) | Where addressed | Verdict / evidence |
 |---|---|---|
 | **Symptom 1** — "stuck" VUs | §1 | Transitional; `5/5` held, `0 interrupted`, 2/2 deterministic |
-| **Symptom 2** — scheduled ≠ graceful count | §2 | By design; scheduled=1 vs max-allowed=6 at t=7s |
-| **Symptom 3** — `ctrl+c` overrun | §3 | Not reproduced; SIGINT ≈45–57 ms; nothing past `maxEndTime` |
+| **Symptom 2** — scheduled ≠ graceful count | §2 | By design; computed step plan: scheduled=1 vs max-allowed=6 at t=7s (runtime progress shows active=1/max=5) |
+| **Symptom 3** — `ctrl+c` overrun | §3 | Not reproduced; SIGINT ≈45–51 ms; nothing past `maxEndTime` |
 | **Symptom 4** — segment imbalance / sum > max | §4 | Sum = max (10 and 9); first segment gets remainder |
 | **Symptom 5** — VU buffer leak | §5 | No leak; `0` warnings, `vus_max`=10 conserved |
 | **Question A** — race between handler goroutines | §6 | No; handlers serial in one goroutine; `-race` clean 2/2 |
