@@ -45,7 +45,7 @@ $ ./k6 version
 k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
 ```
 
-> **Reproducing this exact banner (commit hash).** k6 stamps its banner from the checked-out git commit, so the `commit/ddc3b0b1d2` shown above is produced only when the binary is built **at the source commit under study, `ddc3b0b1d23c128e34e2792fc9075f9126e32375`** (short `ddc3b0b1d2`). This document's own commit is added *on top of* that source commit on the delivery branch; therefore **building the final documentation branch instead yields a different banner commit** — in this environment `k6 v0.55.0 (commit/4874b312ac, go1.21.13, linux/amd64)` — because HEAD now includes the documentation commit `4874b312a`. Only the stamped commit hash differs; the compiled code and its behavior are identical (the docs commit changes no source). To reproduce the exact `commit/ddc3b0b1d2` banner, check out `ddc3b0b1d23c128e34e2792fc9075f9126e32375` before building.
+> **Reproducing this exact banner (commit hash).** k6 does not hard-code the commit — `consts.FullVersion()` derives it from Go's embedded VCS build info, reading `vcs.revision` (the HEAD commit, truncated to 10 characters) [lib/consts/consts.go:30-35] and `vcs.modified` (which appends a `-dirty` suffix when the working tree has uncommitted changes) [lib/consts/consts.go:49]; the full routine is [lib/consts/consts.go:16-52]. Consequently the `commit/ddc3b0b1d2` shown above is stamped only when the binary is built **at the source commit under study, `ddc3b0b1d23c128e34e2792fc9075f9126e32375`** (short `ddc3b0b1d2`) from a clean tree. This document's own commit is layered *on top of* that source commit on the delivery branch, so **building the delivery documentation branch instead stamps a different banner commit** — whatever the branch tip happens to be at build time, which keeps advancing as documentation commits (including code-review-fix revisions) are added above the source. That value is therefore intentionally not pinned here; read it live on whatever commit you build with `git rev-parse --short=10 HEAD` (or simply `./k6 version`). Only the stamped hash differs — the compiled code and its behavior are identical, because the docs commits change no source. To reproduce the exact `commit/ddc3b0b1d2` banner, check out `ddc3b0b1d23c128e34e2792fc9075f9126e32375` before building.
 
 The entry point is tiny: `func main()` calls `cmd.Execute()` [main.go:8-9].
 
@@ -634,8 +634,9 @@ gcc --version | head -1                 # gcc 15.2.0 (needed for -race)
 
 # 1. Build (canonical, offline, vendored)
 #    NOTE: the exact "commit/ddc3b0b1d2" banner below is produced only when building at the
-#    source commit ddc3b0b1d23c128e34e2792fc9075f9126e32375. Building the final documentation
-#    branch instead stamps the docs commit (e.g. commit/4874b312ac); code behavior is unchanged (see §0.2).
+#    source commit ddc3b0b1d23c128e34e2792fc9075f9126e32375 (clean tree). Building the delivery
+#    documentation branch instead stamps whatever the branch-tip commit is at build time -- read it
+#    live via `git rev-parse --short=10 HEAD` / `./k6 version`; code behavior is unchanged (see §0.2).
 go build -mod=vendor -o k6 .
 ./k6 version                            # k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)  # at source commit ddc3b0b1d23c
 
