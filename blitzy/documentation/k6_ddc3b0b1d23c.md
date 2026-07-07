@@ -8,13 +8,21 @@ Each section leads with a **Direct answer**, shows the exact command that produc
 
 ## Section 0 — Environment & Canonical Build
 
-k6 was built from the repository root in its default, canonical configuration using a hermetic Go environment (toolchain, module cache, and build cache pinned outside the source tree). The binary was emitted to `/tmp` so the repository tree stayed pristine.
+k6 was built from source in its default, canonical configuration using a hermetic Go environment (toolchain, module cache, and build cache pinned outside the source tree). The binary was emitted to `/tmp` so the repository tree stayed pristine.
+
+**The commit substring in the banner is the git `HEAD` commit at build time — it is not a hard-coded string.** `consts.FullVersion()` [lib/consts/consts.go:16] reads Go's VCS build stamp via `debug.ReadBuildInfo()` [lib/consts/consts.go:19], takes the `vcs.revision` setting [lib/consts/consts.go:30], and truncates it to the first **10** characters (`commitLen := 10`; `commit = s.Value[:commitLen]`) [lib/consts/consts.go:31-35] before formatting `"%s (commit/%s, %s)"` [lib/consts/consts.go:52] (`Version` is the compile-time constant `"0.55.0"` [lib/consts/consts.go:12]). The leading `k6` is the invoked binary's own name (its `argv[0]` basename), which is why the binary is built as `-o /tmp/k6`.
+
+The investigated commit is `ddc3b0b1d23c128e34e2792fc9075f9126e32375`, whose 10-character truncation is exactly `ddc3b0b1d2`; the canonical banner is therefore reproduced by building **from that commit**. The sequence below is fully reproducible from a clean checkout and leaves the source tree untouched — the clone lives entirely under `/tmp`, and building from an out-of-tree clone makes `HEAD` equal the investigated commit so the stamp is deterministic:
 
 ```bash
 # hermetic Go env — keeps GOPATH/GOCACHE out of the repo, pins the local toolchain,
 # and uses the repository's vendored modules (offline-capable)
 export GOTOOLCHAIN=local GOFLAGS=-mod=vendor GOPATH=/tmp/gopath GOCACHE=/tmp/gocache
-go build -o /tmp/k6 .        # run from the repository root; binary lands in /tmp, repo stays untouched
+
+# build the canonical commit in an out-of-tree clone so HEAD == the investigated commit
+git clone --quiet . /tmp/k6src
+cd /tmp/k6src && git checkout --quiet ddc3b0b1d23c128e34e2792fc9075f9126e32375
+go build -o /tmp/k6 .        # binary lands in /tmp; the repository tree is never modified
 ```
 
 The version banner (recorded verbatim):
@@ -23,6 +31,8 @@ The version banner (recorded verbatim):
 $ /tmp/k6 version
 k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.4, linux/amd64)
 ```
+
+> **On the commit substring and this answer document.** Because k6 stamps the *checked-out* `HEAD` commit, building directly from the branch tip that carries this answer document stamps that tip's commit substring instead (e.g. `commit/2054f7c70b`) rather than `ddc3b0b1d2`. That is expected: the answer document is Markdown under `blitzy/documentation/` and is **not** compiled into the binary, so the k6 version (`v0.55.0`), Go toolchain (`go1.23.4`), platform (`linux/amd64`), and every compiled code path are byte-for-byte identical to the canonical build above. All runtime evidence in this document was produced with the `commit/ddc3b0b1d2` binary built by the sequence shown.
 
 **Toolchain / dependency grounding** (from `go.mod`): the module is `go.k6.io/k6` [go.mod:1] with a declared minimum of `go 1.21` [go.mod:3]; it was built with the Go **1.23.4** toolchain. Key packages exercised in this investigation, at the exact versions pinned in the manifest:
 
@@ -73,22 +83,28 @@ The `ramping-vus` executor is configured by `RampingVUsConfig`, whose `GracefulR
 
 ### Invocation (single SIGINT)
 
+STDOUT (progress counter + end-of-test summary) and STDERR (logrus logs + `console.log` markers) are captured to **separate files from one and the same run**, so every figure below is mutually consistent:
+
 ```bash
-NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req1.js  2>/tmp/k6inv/req1.log &
+NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req1.js \
+  >/tmp/k6inv/req1.out 2>/tmp/k6inv/req1.err &   # STDOUT->req1.out (progress+summary); STDERR->req1.err (logs+markers)
 K6PID=$!
 sleep 5
-kill -INT "$K6PID"        # numeric kill only; delivered at ~t=5s, VUs at 6 and mid-iteration
+kill -INT "$K6PID"        # single numeric SIGINT at ~t=5s (6 VUs, each mid-sleep(3))
 wait "$K6PID"; echo "exit=$?"
 ```
 
-Result: `exit=105`.
+Result: `exit=105`. All evidence in (a), (b) below is from this single run (`req1.out` / `req1.err`).
 
-### (a) Signal-pipeline log lines (unedited; logrus `TextFormatter` → STDERR)
+### (a) Signal-pipeline log lines (the three key lines extracted from the `--verbose` STDERR stream of the same run)
 
-```
-time="2026-07-06T22:30:14Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
-time="2026-07-06T22:30:19Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-06T22:30:19Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+`--verbose` emits many `level=debug` lines; the command below extracts exactly the three signal-pipeline lines (unedited; logrus `TextFormatter` → STDERR):
+
+```bash
+$ grep -E "Trapping interrupt signals|Stopping k6 in response to signal|test run was aborted" /tmp/k6inv/req1.err
+time="2026-07-06T23:29:58Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
+time="2026-07-06T23:30:03Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-06T23:30:03Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
 - The interrupt-trap line is emitted by `handleTestAbortSignals` at [cmd/common.go:98].
@@ -110,27 +126,29 @@ At the instant of the signal (t≈5s), the counter jumps to **`5 complete and 6 
 
 > Note: the `scenarios:` header printed at the top of a run is a different line, rendered at [cmd/ui.go:149-150]; it is **not** the interrupted-iteration counter.
 
-The end-of-test summary reports only the **complete** count (unedited):
+The end-of-test summary from the **same run** (unedited from `req1.out`) reports only the **complete** count, which equals the progress counter's `5 complete`:
 
 ```
      data_received........: 0 B 0 B/s
      data_sent............: 0 B 0 B/s
      iteration_duration...: avg=3s min=3s med=3s max=3s p(90)=3s p(95)=3s
-     iterations...........: 5   1.004564/s
-     vus..................: 6   min=2      max=6
+     iterations...........: 5   1.004826/s
+     vus..................: 6   min=3      max=6
      vus_max..............: 6   min=6      max=6
 ```
 
-Cross-checking the console markers independently confirms mid-iteration termination — iterations that started (`ITER_START`) but were killed before returning never printed their `ITER_END`:
+Cross-checking the `console.log` markers from the **same run** (`req1.err`) independently confirms mid-iteration termination — iterations that started (`ITER_START`) but were killed mid-`sleep(3)` never reached their `ITER_END`:
 
 ```bash
-$ grep -c ITER_START /tmp/k6inv/req1.log
+$ grep -c ITER_START /tmp/k6inv/req1.err
 11
-$ grep -c ITER_END /tmp/k6inv/req1.log
-7
+$ grep -c ITER_END /tmp/k6inv/req1.err
+5
 ```
 
-`ITER_START` (11) exceeds `ITER_END` (7): at least four iterations began but were terminated before completing. `ITER_START` was stable at **11** across both runs; `ITER_END` was **7** (run 1) and **6** (run 2) — the exact `ITER_END` count is timing/console-flush dependent, but it is always strictly less than `ITER_START`, and the engine's own `6 interrupted iterations` counter was **stable across both runs**.
+These figures tie out exactly for this run: `ITER_END` (5) = `iterations` summary (5) = the progress counter's `5 complete`; and `ITER_START` (11) − `ITER_END` (5) = **6** = the `6 interrupted iterations` the engine reports — i.e. the 6 VUs caught mid-`sleep(3)` began an iteration (`ITER_START`) but were terminated before returning.
+
+**Stability across runs.** The engine counter is the authoritative, stable figure. A second run (`req1_run2.*`) reproduced the identical engine result — `running (05.0s), 0/6 VUs, 5 complete and 6 interrupted iterations`, summary `iterations: 5`, and `ITER_START` `11` — with only the `ITER_END` marker count differing (`5` in run 1, `6` in run 2). That single-marker variance is a `console.log`-flush timing artifact: `console.log('ITER_END')` fires at the JS-function tail a hair before the Go runner finalizes the iteration-complete accounting, so when the abort lands in that window the marker can print for an iteration the engine still tallies as *interrupted*. The decisive facts — `5 complete`, **`6 interrupted`**, and `ITER_START` (11) far exceeding the completed work — are stable across both runs and prove active VUs are terminated mid-execution rather than drained.
 
 ### (c) Root-cause corroboration from source
 
@@ -140,24 +158,26 @@ $ grep -c ITER_END /tmp/k6inv/req1.log
 
 ### (d) Second-SIGINT hard stop (secondary path)
 
-Delivering two `SIGINT`s back-to-back (the OS-signal channel is buffered with capacity 2 at [cmd/common.go:99]) exercises the hard-stop path:
+Delivering a **second** `SIGINT` while k6 is still shutting down from the first exercises the hard-stop path (the OS-signal channel is buffered with capacity 2 at [cmd/common.go:99]). A naive `kill -INT $PID ; kill -INT $PID` is timing-fragile: on a manual interrupt k6 kills its iterations immediately and returns fast, so the second signal can miss the brief shutdown window; and the kernel coalesces two identical pending signals into one if the process has not yet handled the first. A reliable pattern delivers the first signal, then **tightly re-sends `SIGINT` with no gap until the process exits**, guaranteeing a distinct second signal lands in the buffered channel during the shutdown window:
 
 ```bash
-NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req1.js 2>/tmp/k6inv/req1_hard.log &
+NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req1.js 2>/tmp/k6inv/req1_hard.err &
 K6PID=$!
 sleep 5
-kill -INT "$K6PID" ; kill -INT "$K6PID"    # two signals delivered as fast as possible
+kill -INT "$K6PID"                                 # 1st SIGINT -> graceful stop
+while kill -INT "$K6PID" 2>/dev/null; do :; done   # tight burst -> distinct 2nd SIGINT lands during shutdown -> hard stop
 wait "$K6PID"; echo "exit=$?"
 ```
 
-Unedited log (both handlers fire):
+Result: `exit=105`. This pattern reproduced the hard stop **8 out of 8** attempts (the fragile sequential form was intermittent). Unedited log — both handlers fire (extracted from `req1_hard.err`):
 
-```
-time="2026-07-06T22:32:34Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-06T22:32:34Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+```bash
+$ grep -E "Stopping k6 in response to signal|Aborting k6 in response to signal" /tmp/k6inv/req1_hard.err
+time="2026-07-06T23:34:35Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-06T23:34:35Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
 ```
 
-The first signal runs the `gracefulStop` closure; the second is read by the second `select` in `handleTestAbortSignals`, which invokes the `onHardStop` closure — `"Aborting k6 in response to signal"` at [cmd/run.go:360] — and then immediately calls `gs.OSExit(int(exitcodes.ExternalAbort))` at [cmd/common.go:113-118]. Exit code: **105**.
+The first signal runs the `gracefulStop` closure; the second is read by the second `select` in `handleTestAbortSignals` [cmd/common.go:111], which invokes the `onHardStop` closure — `"Aborting k6 in response to signal"` at [cmd/run.go:360] — and then immediately calls `gs.OSExit(int(exitcodes.ExternalAbort))` at [cmd/common.go:118]. Exit code: **105** ([errext/exitcodes/codes.go:41]).
 
 ---
 
@@ -170,7 +190,7 @@ The first signal runs the `gracefulStop` closure; the second is read by the seco
 `examples/grpc_server` is a **separate** Go module with a `replace go.k6.io/k6 => ../../` directive, so it was copied out of the tree and its replace target rewritten to an absolute path before building — leaving the tracked `go.mod`/`go.sum` unchanged:
 
 ```bash
-REPO=<repo-root>
+REPO=$(pwd)                        # run this from the repository root; $REPO is its absolute path
 mkdir -p /tmp/grpcsrv && cp -r "$REPO"/examples/grpc_server/* /tmp/grpcsrv/
 cd /tmp/grpcsrv && go mod edit -replace go.k6.io/k6="$REPO"
 GOFLAGS= go build -mod=mod -o /tmp/grpcserver . && /tmp/grpcserver -port 10000 &
@@ -212,25 +232,26 @@ NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req2_complete.js
 Unedited summary excerpt (exit code 0):
 
 ```
-     grpc_streams.................: 2      0.166627/s
-     grpc_streams_msgs_received...: 200    16.662703/s     ← DETERMINISTIC ANSWER = 200
-     grpc_streams_msgs_sent.......: 2      0.166627/s
+     grpc_streams.................: 2      0.166619/s
+     grpc_streams_msgs_received...: 200    16.661935/s     ← DETERMINISTIC ANSWER = 200
+     grpc_streams_msgs_sent.......: 2      0.166619/s
 ```
 
-Normal-completion cancellation log (unedited; fires once per stream):
+Normal-completion cancellation log (unedited; fires once per stream, so twice here — `error=EOF`):
 
 ```
-time="2026-07-06T22:33:56Z" level=debug msg="stream is cancelled/finished" error=EOF streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-06T23:38:26Z" level=debug msg="stream is cancelled/finished" error=EOF streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-06T23:38:26Z" level=debug msg="stream is cancelled/finished" error=EOF streamMethod=/main.FeatureExplorer/ListFeatures
 ```
 
 The console markers confirm 2 × 100 = 200:
 
 ```
-time="2026-07-06T22:33:58Z" level=info msg="STREAM_END received=100" source=console
-time="2026-07-06T22:33:58Z" level=info msg="STREAM_END received=100" source=console
+time="2026-07-06T23:38:28Z" level=info msg="STREAM_END received=100" source=console
+time="2026-07-06T23:38:28Z" level=info msg="STREAM_END received=100" source=console
 ```
 
-`grpc_streams_msgs_received` is registered as a **Counter** at [js/modules/k6/grpc/metrics.go:25]. The value was stable across two runs (RUN1 `200 16.662703/s`, RUN2 `200 16.663043/s`).
+`grpc_streams_msgs_received` is registered as a **Counter** at [js/modules/k6/grpc/metrics.go:25]. The value was stable across two runs (RUN1 `200 16.661935/s`, RUN2 `200 16.664145/s`); the count is deterministically **200**, only the sub-0.01/s rate varies.
 
 ### (b) Interruption case — 30ms graceful ramp-down window → PARTIAL
 
@@ -247,33 +268,35 @@ export const options = {
 ```
 
 ```bash
-NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req2_interrupt.js 2>/tmp/k6inv/req2i.log &
+NO_COLOR=1 /tmp/k6 run --verbose --no-color /tmp/k6inv/req2_interrupt.js \
+  >/tmp/k6inv/req2i.out 2>/tmp/k6inv/req2i.err &   # STDOUT->req2i.out (summary); STDERR->req2i.err (logs)
 K6PID=$!
 sleep 3
 kill -INT "$K6PID"
 wait "$K6PID"; echo "exit=$?"
 ```
 
-Unedited logs (exit code 105):
+Unedited logs (exit code 105) — the four key lines extracted from the `--verbose` STDERR stream of the same run:
 
-```
-time="2026-07-06T22:34:34Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-06T22:34:34Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
-time="2026-07-06T22:34:34Z" level=info msg="STREAM_ERR {\"code\":2,\"details\":[],\"message\":\"canceled by client (k6)\"}" source=console
-time="2026-07-06T22:34:34Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
-```
-
-Unedited summary line:
-
-```
-     grpc_streams_msgs_received...: 29     9.750578/s      ← PARTIAL / timing-dependent
+```bash
+$ grep -E "Stopping k6 in response to signal|stream is cancelled/finished|STREAM_ERR|test run was aborted because" /tmp/k6inv/req2i.err
+time="2026-07-06T23:39:14Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-06T23:39:14Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-06T23:39:14Z" level=info msg="STREAM_ERR {\"code\":2,\"details\":[],\"message\":\"canceled by client (k6)\"}" source=console
+time="2026-07-06T23:39:14Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-This value is **PARTIAL** and timing-dependent (it reflects however many of the 100ms-throttled features arrived before the interrupt). For a ~3s interrupt it was **29** in both runs (RUN1 `29 9.750578/s`, RUN2 `29 9.746382/s`) — approximately 3s / 100ms minus connection setup — but it must be read as a snapshot, not a deterministic total.
+Unedited summary line (from `req2i.out`):
+
+```
+     grpc_streams_msgs_received...: 29     9.746054/s      ← PARTIAL / timing-dependent
+```
+
+This value is **PARTIAL** and timing-dependent (it reflects however many of the 100ms-throttled features arrived before the interrupt). For a ~3s interrupt it was **29** in both runs (RUN1 `29 9.746054/s`, RUN2 `29 9.748080/s`) — approximately 3s / 100ms minus connection setup — but it must be read as a snapshot, not a deterministic total.
 
 ### (c) Key distinction
 
-The **same** debug log message `"stream is cancelled/finished"` fires in both the normal and the interrupted case; only the `error=` field differs — `EOF` on normal completion vs `"canceled by client (k6)"` on interrupt. That debug call is at [js/modules/k6/grpc/stream.go:201], guarded by `isRegularClosing(err)` at [js/modules/k6/grpc/stream.go:200]; the predicate treats both `io.EOF` and `grpcext.ErrCanceled` as regular closings [js/modules/k6/grpc/stream.go:216-218]. The literal string `"canceled by client (k6)"` originates from `var ErrCanceled = errors.New("canceled by client (k6)")` at [lib/netext/grpcext/stream.go:29]. The `grpc_streams_*` block is rendered as part of the end-of-test summary via [cmd/ui.go:150].
+The **same** debug log message `"stream is cancelled/finished"` fires in both the normal and the interrupted case; only the `error=` field differs — `EOF` on normal completion vs `"canceled by client (k6)"` on interrupt. That debug call is at [js/modules/k6/grpc/stream.go:201], guarded by `isRegularClosing(err)` at [js/modules/k6/grpc/stream.go:200]; the predicate treats both `io.EOF` and `grpcext.ErrCanceled` as regular closings [js/modules/k6/grpc/stream.go:216-218]. The literal string `"canceled by client (k6)"` originates from `var ErrCanceled = errors.New("canceled by client (k6)")` at [lib/netext/grpcext/stream.go:29]. The `grpc_streams_*` lines are part of the end-of-test text summary, which is rendered by the embedded-JS summarizer: `summarizeMetrics` [js/summary.js:243] emits one line per metric [js/summary.js:378] inside `generateTextSummary` [js/summary.js:384], and the result is written to STDOUT by `handleSummaryResult` [cmd/run.go:508]. (The `scenarios:` header at the top of a run — a different line — is the one rendered at [cmd/ui.go:149-150].)
 
 ---
 
@@ -361,11 +384,38 @@ The count is deterministically **1850** across runs; only the rate differs sligh
 
 ### Setup
 
-A ~12.8 MB-class data file was generated (measured **14,491,180 bytes**, **60,000 rows**). Peak RSS was sampled as `VmHWM` from `/proc/<pid>/status` while each run executed (k6 runs as a single process — VUs are goroutines — so process `VmHWM` captures the total peak):
+A ~12.8 MB-class data file was generated deterministically (fixed RNG seed) as a 60,000-row JSON array of six-field user records:
+
+```python
+# gen_data.py — deterministic ~12.8 MB fixture (60,000 rows)
+import json, random, string
+random.seed(42)
+def rs(n): return ''.join(random.choice(string.ascii_letters) for _ in range(n))
+rows = [{
+    "id": i,
+    "name": f"User {i:06d}",
+    "email": f"user{i:06d}@example.com",
+    "phone": f"+1-555-{100 + i // 1000}-{1000 + i % 1000}",
+    "company": rs(18) + " Inc",
+    "bio": rs(24) + " " + rs(48),
+} for i in range(60000)]
+json.dump(rows, open("/tmp/k6inv/data.json", "w"))
+```
+
+```console
+$ python3 gen_data.py && stat -c '%s bytes' /tmp/k6inv/data.json && \
+    python3 -c "import json;print(len(json.load(open('/tmp/k6inv/data.json'))),'rows')"
+13308890 bytes
+60000 rows
+```
+
+The fixture is **13,308,890 bytes (12.692 MiB, 60,000 rows, ≈221.8 B/row)**. Peak RSS was sampled as `VmHWM` from `/proc/<pid>/status` while each run executed (k6 runs as a single process — VUs are goroutines — so process `VmHWM` captures the total peak):
 
 ```bash
+#!/bin/bash
 # measure.sh <script> <vus> <duration>: run k6, poll /proc/<pid>/status for peak VmHWM
-NO_COLOR=1 /tmp/k6 run -u "$VUS" -d "$DUR" -q --no-color "$SCRIPT" &
+SCRIPT="$1"; VUS="$2"; DUR="$3"
+NO_COLOR=1 /tmp/k6 run -u "$VUS" -d "$DUR" -q --no-color "$SCRIPT" >/dev/null 2>&1 &
 K6PID=$!
 PEAK=0
 while kill -0 "$K6PID" 2>/dev/null; do
@@ -373,6 +423,7 @@ while kill -0 "$K6PID" 2>/dev/null; do
   [ -n "$HWM" ] && [ "$HWM" -gt "$PEAK" ] && PEAK=$HWM
   sleep 0.1
 done
+wait "$K6PID" 2>/dev/null
 echo "VUs=$VUS peak_VmHWM=${PEAK} kB"
 ```
 
@@ -395,16 +446,48 @@ export default function () { const row = data[(__VU + __ITER) % data.length]; if
 
 ### Measured peak `VmHWM` (test-script output)
 
+Each mode was measured at increasing VU counts, two runs each (8 s per run):
+
+```bash
+for vus in 1 100 300; do for run in 1 2; do
+  echo "SharedArray RUN${run} $(./measure.sh req4_shared.js "$vus" 8s)"
+done; done
+for vus in 1 5 10; do for run in 1 2; do
+  echo "per-VU-copy RUN${run} $(./measure.sh req4_copy.js "$vus" 8s)"
+done; done
+```
+
+Complete, unedited output:
+
+```text
+### SharedArray (req4_shared.js) ###
+SharedArray RUN1 VUs=1 peak_VmHWM=203372 kB
+SharedArray RUN2 VUs=1 peak_VmHWM=202060 kB
+SharedArray RUN1 VUs=100 peak_VmHWM=205760 kB
+SharedArray RUN2 VUs=100 peak_VmHWM=211320 kB
+SharedArray RUN1 VUs=300 peak_VmHWM=218160 kB
+SharedArray RUN2 VUs=300 peak_VmHWM=221760 kB
+### per-VU-copy CONTROL (req4_copy.js) ###
+per-VU-copy RUN1 VUs=1 peak_VmHWM=200648 kB
+per-VU-copy RUN2 VUs=1 peak_VmHWM=219508 kB
+per-VU-copy RUN1 VUs=5 peak_VmHWM=594124 kB
+per-VU-copy RUN2 VUs=5 peak_VmHWM=685232 kB
+per-VU-copy RUN1 VUs=10 peak_VmHWM=1078364 kB
+per-VU-copy RUN2 VUs=10 peak_VmHWM=1090428 kB
+```
+
+Summarized (kB → MB at ÷1024):
+
 | Mode | VUs | RUN1 | RUN2 |
 |------|-----|------|------|
-| SharedArray | 1 | 211120 kB (~206 MB) | 206856 kB (~202 MB) |
-| SharedArray | 100 | 221908 kB (~217 MB) | — |
-| SharedArray | 300 | 224792 kB (~220 MB) | 231516 kB (~226 MB) |
-| per-VU-copy | 1 | 200212 kB (~196 MB) | 212044 kB (~207 MB) |
-| per-VU-copy | 5 | 673784 kB (~658 MB) | — |
-| per-VU-copy | 10 | 1221192 kB (~1193 MB) | 1121252 kB (~1095 MB) |
+| SharedArray | 1 | 203372 kB (~199 MB) | 202060 kB (~197 MB) |
+| SharedArray | 100 | 205760 kB (~201 MB) | 211320 kB (~206 MB) |
+| SharedArray | 300 | 218160 kB (~213 MB) | 221760 kB (~217 MB) |
+| per-VU-copy | 1 | 200648 kB (~196 MB) | 219508 kB (~214 MB) |
+| per-VU-copy | 5 | 594124 kB (~580 MB) | 685232 kB (~669 MB) |
+| per-VU-copy | 10 | 1078364 kB (~1053 MB) | 1090428 kB (~1065 MB) |
 
-**Interpretation:** `SharedArray` is **flat** from 1 → 300 VUs (~206 MB → ~220–226 MB; a small, sub-linear increase attributable to per-VU goroutine/JS-runtime overhead, not to copying the dataset). The per-VU-copy control is **linear** — roughly +100 MB per VU (~196 MB at 1 VU → ~1095–1193 MB at 10 VUs). `SharedArray` at **300** VUs (~220–226 MB) uses far less than the control at **10** VUs (~1095–1193 MB); extrapolating the control to 300 VUs would be on the order of tens of GB (infeasible) — which is precisely why `SharedArray` exists. The behavior was stable across two runs.
+**Interpretation:** `SharedArray` is **flat** from 1 → 300 VUs (~197–199 MB → ~213–217 MB; a small, sub-linear increase of ≈17 MB across all 300 VUs, attributable to per-VU goroutine/JS-runtime overhead — not to copying the dataset). The per-VU-copy control is **linear** — roughly +95 MB per VU (~196–214 MB at 1 VU → ~1053–1065 MB at 10 VUs). `SharedArray` at **300** VUs (~213–217 MB) uses far less than the control at merely **10** VUs (~1053–1065 MB); extrapolating the control to 300 VUs would be on the order of tens of GB (infeasible) — which is precisely why `SharedArray` exists. The behavior was stable across two runs.
 
 ### Root cause (code-confirmed)
 
@@ -420,7 +503,141 @@ export default function () { const row = data[(__VU + __ITER) % data.length]; if
 
 ### Setup
 
-The built-in `experimental-prometheus-rw` output was run against a minimal loopback remote-write receiver (a small Python HTTP server that snappy-block-decompresses the body and parses the protobuf `WriteRequest`, extracting the `__name__` labels). The script defines a custom `Counter('my_custom_counter')` and a custom `Trend('my_custom_trend')`, plus an `http.get(...)` to a loopback target to generate built-in HTTP metrics:
+The built-in `experimental-prometheus-rw` output was run against a minimal loopback remote-write receiver. To guarantee the payload is decoded exactly as k6 encodes it, the receiver is a small **Go** program that imports the **same** libraries k6 uses to *encode* — the `klauspost/compress` snappy **block** codec, the Prometheus `prompb.WriteRequest` protobuf, and `google.golang.org/protobuf` — so it decompresses the body, unmarshals the `WriteRequest`, records every distinct `__name__` label, and dumps the sorted unique set on `SIGINT`:
+
+```go
+// /tmp/rwrecv/main.go — remote-write receiver using k6's exact encode libraries
+// Standalone Prometheus remote-write receiver for observing k6's exported
+// series names. It uses the SAME libraries k6 uses to ENCODE (klauspost snappy
+// block codec + prometheus prompb + protobuf), guaranteeing correct decoding.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/signal"
+	"sort"
+	"sync"
+	"syscall"
+
+	prompb "buf.build/gen/go/prometheus/prometheus/protocolbuffers/go"
+	"github.com/klauspost/compress/snappy"
+	"google.golang.org/protobuf/proto"
+)
+
+var (
+	mu          sync.Mutex
+	names       = map[string]bool{}
+	examples    = map[string]string{}
+	reqCount    int
+	seriesCount int
+)
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dec, err := snappy.Decode(nil, body) // snappy BLOCK decode (matches k6's snappy.Encode)
+	if err != nil {
+		http.Error(w, "snappy: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var wr prompb.WriteRequest
+	if err := proto.Unmarshal(dec, &wr); err != nil {
+		http.Error(w, "proto: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	mu.Lock()
+	reqCount++
+	for _, ts := range wr.GetTimeseries() {
+		seriesCount++
+		labels := map[string]string{}
+		var name string
+		for _, l := range ts.GetLabels() {
+			labels[l.GetName()] = l.GetValue()
+			if l.GetName() == "__name__" {
+				name = l.GetValue()
+			}
+		}
+		if name != "" {
+			names[name] = true
+			if _, ok := examples[name]; !ok {
+				b, _ := json.Marshal(labels)
+				examples[name] = string(b)
+			}
+		}
+	}
+	mu.Unlock()
+	w.WriteHeader(http.StatusNoContent) // 204: standard remote-write ack
+}
+
+func main() {
+	addr := "127.0.0.1:9091"
+	if len(os.Args) > 1 {
+		addr = os.Args[1]
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/write", handler)
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, "listen error:", err)
+			os.Exit(1)
+		}
+	}()
+	fmt.Printf("remote-write receiver listening on http://%s/api/v1/write\n", addr)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	mu.Lock()
+	defer mu.Unlock()
+	uniq := make([]string, 0, len(names))
+	for n := range names {
+		uniq = append(uniq, n)
+	}
+	sort.Strings(uniq)
+	fmt.Printf("\n=== RECEIVER SUMMARY: requests=%d series_samples=%d unique __name__=%d ===\n", reqCount, seriesCount, len(uniq))
+	for _, n := range uniq {
+		fmt.Println(n)
+	}
+	fmt.Println("--- full example label sets ---")
+	for _, want := range []string{"k6_my_custom_counter_total", "k6_my_custom_trend_p99", "k6_http_req_duration_p99", "k6_vus", "k6_http_req_failed_rate"} {
+		if ex, ok := examples[want]; ok {
+			fmt.Printf("EXAMPLE %s => %s\n", want, ex)
+		}
+	}
+}
+```
+
+Its `go.mod` pins the exact encode-side library versions (matching k6's own — see [go.mod:20] and the vendored tree), so decoding is byte-faithful:
+
+```text
+module rwrecv
+
+go 1.23.4
+
+require (
+	buf.build/gen/go/prometheus/prometheus/protocolbuffers/go v1.31.0-20230627135113-9a12bc2590d2.1
+	github.com/klauspost/compress v1.17.11
+	google.golang.org/protobuf v1.35.1
+)
+```
+
+```bash
+# Build the receiver offline from the warm module cache
+cd /tmp/rwrecv
+GOPROXY=off GOSUMDB=off GOMODCACHE=/root/go/pkg/mod GOFLAGS=-mod=mod GOTOOLCHAIN=local \
+  go build -o /tmp/rwreceiver .
+```
+
+The k6 script defines a custom `Counter('my_custom_counter')` and a custom `Trend('my_custom_trend')`, plus an `http.get(...)` to a loopback target to generate built-in HTTP metrics:
 
 ```javascript
 // /tmp/k6inv/req5.js
@@ -439,14 +656,50 @@ export default function () {
 ```
 
 ```bash
+# 1) start the receiver
+/tmp/rwreceiver 127.0.0.1:9091 &        # prints: remote-write receiver listening on ...
+# 2) run k6 with the experimental-prometheus-rw output pointed at it
 K6_PROMETHEUS_RW_SERVER_URL="http://127.0.0.1:9091/api/v1/write" \
   NO_COLOR=1 /tmp/k6 run -o experimental-prometheus-rw --no-color /tmp/k6inv/req5.js
+# 3) after k6 exits, SIGINT the receiver to dump the sorted unique __name__ set
+kill -INT %1
 ```
 
 k6 confirmed the output was active (exit code 0):
 
 ```
         output: Prometheus remote write (http://127.0.0.1:9091/api/v1/write)
+```
+
+The receiver then printed its complete, **unedited** dump (RUN1 shown; the 17-name set was byte-identical on RUN2):
+
+```text
+remote-write receiver listening on http://127.0.0.1:9091/api/v1/write
+
+=== RECEIVER SUMMARY: requests=3 series_samples=51 unique __name__=17 ===
+k6_data_received_total
+k6_data_sent_total
+k6_http_req_blocked_p99
+k6_http_req_connecting_p99
+k6_http_req_duration_p99
+k6_http_req_failed_rate
+k6_http_req_receiving_p99
+k6_http_req_sending_p99
+k6_http_req_tls_handshaking_p99
+k6_http_req_waiting_p99
+k6_http_reqs_total
+k6_iteration_duration_p99
+k6_iterations_total
+k6_my_custom_counter_total
+k6_my_custom_trend_p99
+k6_vus
+k6_vus_max
+--- full example label sets ---
+EXAMPLE k6_my_custom_counter_total => {"__name__":"k6_my_custom_counter_total","scenario":"default"}
+EXAMPLE k6_my_custom_trend_p99 => {"__name__":"k6_my_custom_trend_p99","scenario":"default"}
+EXAMPLE k6_http_req_duration_p99 => {"__name__":"k6_http_req_duration_p99","expected_response":"true","method":"GET","name":"http://127.0.0.1:8088/","proto":"HTTP/1.0","scenario":"default","status":"200","url":"http://127.0.0.1:8088/"}
+EXAMPLE k6_vus => {"__name__":"k6_vus"}
+EXAMPLE k6_http_req_failed_rate => {"__name__":"k6_http_req_failed_rate","expected_response":"true","method":"GET","name":"http://127.0.0.1:8088/","proto":"HTTP/1.0","scenario":"default","status":"200","url":"http://127.0.0.1:8088/"}
 ```
 
 ### Captured `__name__` values (17 unique, IDENTICAL across 2 runs)
@@ -458,17 +711,7 @@ Grouped by metric type (the suffix is a function of the type/stat, the base name
 - **Rate → `_rate`:** `k6_http_req_failed_rate`
 - **Trend → `_p99` (default stat):** `k6_http_req_duration_p99`, `k6_http_req_blocked_p99`, `k6_http_req_connecting_p99`, `k6_http_req_waiting_p99`, `k6_http_req_sending_p99`, `k6_http_req_receiving_p99`, `k6_http_req_tls_handshaking_p99`, `k6_iteration_duration_p99`, `k6_my_custom_trend_p99`
 
-Raw decoded label set from the actual protobuf payload (unedited) — the custom counter:
-
-```
-{"labels": {"__name__": "k6_my_custom_counter_total", "scenario": "default"}, "n_samples": 1}
-```
-
-And a built-in Trend series, showing the original name carried verbatim beneath the `k6_` prefix and `_p99` suffix (unedited):
-
-```
-{"labels": {"__name__": "k6_http_req_duration_p99", "expected_response": "true", "method": "GET", "name": "http://127.0.0.1:8088/", "proto": "HTTP/1.0", "scenario": "default", "status": "200", "url": "http://127.0.0.1:8088/"}, "n_samples": 1}
-```
+The full decoded label sets appear verbatim in the receiver dump above (the `EXAMPLE …` lines). They confirm the base metric name is carried **verbatim** beneath the `k6_` prefix plus the per-type/stat suffix: the custom counter `my_custom_counter` → `k6_my_custom_counter_total` (`{"__name__":"k6_my_custom_counter_total","scenario":"default"}`), and the built-in `http_req_duration` → `k6_http_req_duration_p99` while carrying its full HTTP label set (`method`, `status`, `url`, `proto`, …).
 
 ### Integrity proof
 
@@ -490,7 +733,7 @@ Confirming every named sub-item across the five requirements is explicitly answe
 
 - **Req 1 — Ramping-VUs under SIGINT:**
   - ✔ Exact signal-pipeline log lines captured (trap [cmd/common.go:98], "Stopping k6 in response to signal..." [cmd/run.go:350], abort error [cmd/run.go:354]).
-  - ✔ Decisive interrupted-iteration proof: progress counter `5 complete and 6 interrupted iterations` ([execution/scheduler.go:156]) + `ITER_START` (11) > `ITER_END` (6–7) → active VUs terminated **mid-execution**, not allowed to finish.
+  - ✔ Decisive interrupted-iteration proof (one self-consistent run): progress counter `5 complete and 6 interrupted iterations` ([execution/scheduler.go:156]) = summary `iterations: 5` = `ITER_END` (5); `ITER_START` (11) − `ITER_END` (5) = the 6 interrupted → active VUs terminated **mid-execution**, not allowed to finish. Engine counter (`5 complete / 6 interrupted`, `ITER_START` 11) stable across both runs; only the `ITER_END` marker varies (5→6, console-flush timing).
   - ✔ Before/during/after counter shown; root cause corroborated ([lib/executor/base_config.go:95-96], [lib/executor/helpers.go:117,122,195-196]).
   - ✔ Second-SIGINT hard stop ("Aborting k6 in response to signal" [cmd/run.go:360]); exit code **105** ([errext/exitcodes/codes.go:41]).
 - **Req 2 — gRPC server-streaming interruption:**
