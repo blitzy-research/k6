@@ -276,10 +276,10 @@ kill -INT "$K6PID"
 wait "$K6PID"; echo "exit=$?"
 ```
 
-Unedited logs (exit code 105) — the four key lines extracted from the `--verbose` STDERR stream of the same run:
+Unedited logs (exit code 105) — the four key lines extracted from the `--verbose` STDERR stream of the same run. The fourth alternative is anchored on `level=error` so it matches only the error-level abort line itself, not the redundant `level=debug` lines that merely reference the same abort message in a `msg=` prose string or an `error=` field:
 
 ```bash
-$ grep -E "Stopping k6 in response to signal|stream is cancelled/finished|STREAM_ERR|test run was aborted because" /tmp/k6inv/req2i.err
+$ grep -E 'Stopping k6 in response to signal|stream is cancelled/finished|STREAM_ERR|level=error msg="test run was aborted' /tmp/k6inv/req2i.err
 time="2026-07-06T23:39:14Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
 time="2026-07-06T23:39:14Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
 time="2026-07-06T23:39:14Z" level=info msg="STREAM_ERR {\"code\":2,\"details\":[],\"message\":\"canceled by client (k6)\"}" source=console
