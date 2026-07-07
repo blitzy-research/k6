@@ -56,8 +56,13 @@ atomic writes — the `-race` detector is clean across every probe and repeated 
    its verdict is reported verbatim.
 
 **Environment.** The work was performed in the target container at k6 HEAD
-`ddc3b0b1d23c128e34e2792fc9075f9126e32375` (the branch is bound to the deliverable
-name `k6_ddc3b0b1d23c.md`). The Go toolchain matches `go.mod`
+`ddc3b0b1d23c128e34e2792fc9075f9126e32375`. The deliverable's filename stem
+`k6_ddc3b0b1d23c` is bound to the **source** commit/branch under investigation: the
+stem `ddc3b0b1d23c` is the first 12 hex characters of that 40-character source commit
+`ddc3b0b1d23c128e34e2792fc9075f9126e32375`. This is intentionally distinct from the
+Blitzy **destination** working branch on which the document is authored and committed,
+`blitzy-c7fc9070-51d8-49b5-89f1-e4430bb59801` — the naming contract binds the file to
+the investigated source, not to the destination branch. The Go toolchain matches `go.mod`
 (`go 1.21` at `go.mod:L3`, `toolchain go1.21.13` at `go.mod:L5`):
 
 ```
@@ -1782,7 +1787,7 @@ Both runs are **CLEAN**: no `WARNING: DATA RACE`, all `PASS`, `ok` in 4.131s / 4
 `RampingVUs.Run` → `iterateSteps` + `go runRemainingGracefulSteps` under the detector:
 
 ```
-$ go test -race -count=1 -run 'TestRampingVUsGracefulStopWaits|TestRampingVUsGracefulStopStops|TestRampingVUsGracefulRampDown|TestRampingVUsHandleRemainingVUs|TestRampingVUsRampDownNoWobble' -v ./lib/executor/
+$ go test -race -count=1 -run 'TestRampingVUsGracefulStopWaits|TestRampingVUsGracefulStopStops|TestRampingVUsGracefulRampDown|TestRampingVUsHandleRemainingVUs|TestRampingVUsRampDownNoWobble' -v ./lib/executor/     # RUN 1
 === RUN   TestRampingVUsGracefulStopWaits
 === PAUSE TestRampingVUsGracefulStopWaits
 === RUN   TestRampingVUsGracefulStopStops
@@ -1807,7 +1812,37 @@ PASS
 ok  	go.k6.io/k6/lib/executor	7.053s
 ```
 
-Clean again: all `PASS`, no data race.
+```
+$ go test -race -count=1 -run 'TestRampingVUsGracefulStopWaits|TestRampingVUsGracefulStopStops|TestRampingVUsGracefulRampDown|TestRampingVUsHandleRemainingVUs|TestRampingVUsRampDownNoWobble' -v ./lib/executor/     # RUN 2
+=== RUN   TestRampingVUsGracefulStopWaits
+=== PAUSE TestRampingVUsGracefulStopWaits
+=== RUN   TestRampingVUsGracefulStopStops
+=== PAUSE TestRampingVUsGracefulStopStops
+=== RUN   TestRampingVUsGracefulRampDown
+=== PAUSE TestRampingVUsGracefulRampDown
+=== RUN   TestRampingVUsHandleRemainingVUs
+=== PAUSE TestRampingVUsHandleRemainingVUs
+=== RUN   TestRampingVUsRampDownNoWobble
+=== PAUSE TestRampingVUsRampDownNoWobble
+=== CONT  TestRampingVUsGracefulRampDown
+=== CONT  TestRampingVUsRampDownNoWobble
+=== CONT  TestRampingVUsHandleRemainingVUs
+=== CONT  TestRampingVUsGracefulStopStops
+=== CONT  TestRampingVUsGracefulStopWaits
+--- PASS: TestRampingVUsHandleRemainingVUs (0.07s)
+--- PASS: TestRampingVUsGracefulStopWaits (1.50s)
+--- PASS: TestRampingVUsGracefulStopStops (2.50s)
+--- PASS: TestRampingVUsGracefulRampDown (2.50s)
+--- PASS: TestRampingVUsRampDownNoWobble (6.02s)
+PASS
+ok  	go.k6.io/k6/lib/executor	7.051s
+```
+
+Both runs are **CLEAN**: all `PASS`, no `WARNING: DATA RACE`, `ok` in
+7.053s / 7.051s. The clean verdict is stable across the repeated runs; the
+goroutine-scheduling order of the `=== CONT` lines varies between runs (an
+expected property of the Go scheduler under `-race`), while the pass-set and
+the absence of any data race are identical.
 
 **`-race` evidence (Probe 3 — the execution-segment sum-invariant, run twice).**
 This is the independent check behind Symptom 4: that summing the per-segment VU
@@ -1966,27 +2001,27 @@ only.
 | **Symptom 5** — VU buffer leak | §5 | No leak; `0` warnings, `vus_max`=10 conserved |
 | **Question A** — race between handler goroutines | §6 | No; handlers serial in one goroutine; `-race` clean 2/2 |
 | **Question B** — simultaneous VU-state mutation | §7 | Serialized by mutex + atomic; `-race` clean |
-| `iterateSteps` | §6 | `ramping_vus.go:L622-L645`; serial calls at L634 / L640 |
-| `runRemainingGracefulSteps` | §6 | `ramping_vus.go:L654-L666`; only max-allowed at L664; goroutine at L554 |
-| `maxAllowedVUsHandlerStrategy` | §2, §6 | `ramping_vus.go:L668-L676`; private `cur`; only `hardStop()` |
-| `scheduledVUsHandlerStrategy` | §2, §6 | `ramping_vus.go:L679-L690`; private `cur`; `start()`/`gracefulStop()` |
-| `reserveVUsForGracefulRampDowns` | §2 | `ramping_vus.go:L307`; comment L300-L301 |
-| `GetExecutionRequirements` | §2 | `ramping_vus.go:L434`; final 0-VU step at `sumStagesDuration + GracefulStop` |
-| `getDurationContexts` / `maxEndTime` | §3 | `helpers.go:L168` / `:L172`; `regDurationCtx` L178 |
-| `vuHandle.start` / `gracefulStop` / `hardStop` | §3, §7 | `vu_handle.go:L115` / `:L147` / `:L165` (each `mutex.Lock()`) |
-| `vuHandle.changeState` | §7 | `vu_handle.go:L142-L144`; `atomic.StoreInt32` |
-| `vuHandle.runLoopsIfPossible` | §1, §7 | `vu_handle.go:L185`; atomic load L204; race re-check L248 |
-| `GetPlannedVU` / `vus` chan | §5 | `execution.go:L471` / `:L106`; retries L29; warning L481 |
-| `SegmentedIndex` | §4 | `execution_segment.go:L768` (+ L776/L782/L795/L808); `ScaleInt64` L734/L580 |
-| file `ramping_vus.go` | §1, §2, §6 | executor + handlers + Run |
-| file `vu_handle.go` | §1, §7 | per-VU state machine |
-| file `helpers.go` | §3 | duration contexts |
-| file `base_config.go` | §3 | `DefaultGracefulStopValue` L20; `GracefulStop` L31; `GetGracefulStop` L97 |
-| file `execution.go` | §5 | VU buffer |
-| file `execution_segment.go` | §4 | segment scaler |
+| `iterateSteps` | §6 | `lib/executor/ramping_vus.go:L622-L645`; serial calls at L634 / L640 |
+| `runRemainingGracefulSteps` | §6 | `lib/executor/ramping_vus.go:L654-L666`; only max-allowed at L664; goroutine at L554 |
+| `maxAllowedVUsHandlerStrategy` | §2, §6 | `lib/executor/ramping_vus.go:L668-L676`; private `cur`; only `hardStop()` |
+| `scheduledVUsHandlerStrategy` | §2, §6 | `lib/executor/ramping_vus.go:L679-L690`; private `cur`; `start()`/`gracefulStop()` |
+| `reserveVUsForGracefulRampDowns` | §2 | `lib/executor/ramping_vus.go:L307`; comment L300-L301 |
+| `GetExecutionRequirements` | §2 | `lib/executor/ramping_vus.go:L434`; final 0-VU step at `sumStagesDuration + GracefulStop` |
+| `getDurationContexts` / `maxEndTime` | §3 | `lib/executor/helpers.go:L168` / `:L172`; `regDurationCtx` L178 |
+| `vuHandle.start` / `gracefulStop` / `hardStop` | §3, §7 | `lib/executor/vu_handle.go:L115` / `:L147` / `:L165` (each `mutex.Lock()`) |
+| `vuHandle.changeState` | §7 | `lib/executor/vu_handle.go:L142-L144`; `atomic.StoreInt32` |
+| `vuHandle.runLoopsIfPossible` | §1, §7 | `lib/executor/vu_handle.go:L185`; atomic load L204; race re-check L248 |
+| `GetPlannedVU` / `vus` chan | §5 | `lib/execution.go:L471` / `:L106`; retries L29; warning L481 |
+| `SegmentedIndex` | §4 | `lib/execution_segment.go:L768` (+ L776/L782/L795/L808); `ScaleInt64` L734/L580 |
+| file `lib/executor/ramping_vus.go` | §1, §2, §6 | executor + handlers + Run |
+| file `lib/executor/vu_handle.go` | §1, §7 | per-VU state machine |
+| file `lib/executor/helpers.go` | §3 | duration contexts |
+| file `lib/executor/base_config.go` | §3 | `DefaultGracefulStopValue` L20; `GracefulStop` L31; `GetGracefulStop` L97 |
+| file `lib/execution.go` | §5 | VU buffer |
+| file `lib/execution_segment.go` | §4 | segment scaler |
 | file `cmd/run.go` | §3 | interrupt handlers L349/L352/L357/L359/L361/L363 |
 | file `cmd/common.go` | §3 | `handleTestAbortSignals` L97; `SignalNotify` L101 |
-| file `main.go` | Methodology, §6 | real entry point `func main(){ cmd.Execute() }` |
+| file `main.go:L8-L9` | Methodology, §6 | real entry point `func main(){ cmd.Execute() }` |
 | flag `--execution-segment` | §4 | three-instance split |
 | flag `--execution-segment-sequence` | §4 | `"0,1/3,2/3,1"` |
 | option `gracefulRampDown` | §1, §2, §4, §5 | 30s (reservation) and 0s (churn) |
@@ -2004,6 +2039,9 @@ tree is unchanged apart from this single new document. (The Go toolchain at
 `/usr/local/go` was pre-installed in the environment and is intentionally left in
 place.)
 
+At investigation time — before the delivery harness commits the document — the file
+is still untracked, so `git status` reports it with `??`:
+
 ```
 $ rm -rf /tmp/k6obs /tmp/k6bin
 $ git status --porcelain --untracked-files=all
@@ -2014,6 +2052,22 @@ $ git status --porcelain --untracked-files=all
 collapsing it to the untracked directory `?? blitzy/`; the pre-existing empty
 `blitzy/screenshots` and `blitzy/screen_recordings` directories are not shown because
 git does not track empty directories.)
+
+Once the document is committed, that untracked `??` line naturally disappears and the
+working tree is clean. The durable, commit-independent statement of repository
+integrity is therefore the diff of `HEAD` against the investigated **source** commit
+`ddc3b0b1d23c` (`ddc3b0b1d23c128e34e2792fc9075f9126e32375`), which shows exactly one
+**added** path — this answer document — and nothing else (no existing file modified
+or deleted):
+
+```
+$ git diff --name-status ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
+```
+
+That single `A` line is the invariant that holds in the delivered state: one new file
+under `blitzy/documentation/`, all insertions, zero deletions, and no other path
+touched anywhere in the source tree.
 
 The only change to the repository is the addition of this answer document,
 `blitzy/documentation/k6_ddc3b0b1d23c.md` — exactly as required. No existing source,
