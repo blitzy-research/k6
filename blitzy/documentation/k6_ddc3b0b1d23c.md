@@ -77,12 +77,39 @@ $ /tmp/k6bin version
 k6bin v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
 ```
 
-This is canonical **k6 v0.55.0**, built at commit **`ddc3b0b1d2`** on **go1.21.13**,
-which is exactly what a normal user's `go build` would produce here. Every
-`k6 run` invocation below uses this `/tmp/k6bin` binary through its real entry
-point. All temporary observation scripts live under `/tmp/k6obs/` (outside the
-repository) and are deleted at the end (see Section 8); the source tree is left
-byte-for-byte unchanged apart from this one document.
+This is canonical **k6 v0.55.0** on **go1.21.13** — the exact binary a normal
+user's default `go build` produces from this source tree. The `commit/` field is
+build-time git metadata (the note below explains why a later rebuild can show a
+different hash); the capture above was taken at the investigated source commit
+**`ddc3b0b1d2`**, so it reads `commit/ddc3b0b1d2`. Every `k6 run` invocation below
+uses this `/tmp/k6bin` binary through its real entry point. All temporary
+observation scripts live under `/tmp/k6obs/` (outside the repository) and are
+deleted at the end (see Section 8); the source tree is left byte-for-byte
+unchanged apart from this one document.
+
+> **Note — the `commit/` field is build-time git metadata, not baked into the
+> source.** k6 does not hard-code its commit hash; `consts.FullVersion()` reads it
+> at build time from the Go build info — `debug.ReadBuildInfo()` → the
+> `vcs.revision` setting (the current git HEAD), truncated to the first 10
+> characters — and renders it with the format string `"%s (commit/%s, %s)"`
+> (`lib/consts/consts.go:L19-L52`; `vcs.revision` extraction at
+> `lib/consts/consts.go:L30-L35`; format at `lib/consts/consts.go:L52`). If the
+> working tree has uncommitted changes, `vcs.modified` is `true` and a `-dirty`
+> suffix is appended (`lib/consts/consts.go:L36-L39,L48-L50`) — e.g. building with
+> this document staged-but-uncommitted yields `commit/<head>-dirty`. The hash
+> therefore reflects whatever HEAD points at when `go build` runs and necessarily
+> changes as commits are layered on. The investigation was performed at source
+> HEAD `ddc3b0b1d23c128e34e2792fc9075f9126e32375`, so the capture above shows
+> `commit/ddc3b0b1d2`. Every commit added afterward — including this answer
+> document itself — advances HEAD, so a later fresh `go build` reports that newer
+> HEAD instead (for example, at the commit where this document was code-reviewed,
+> `k6 version` showed `commit/b157610e3c`); any such post-investigation hash is
+> illustrative, not a reproducible constant, while `v0.55.0`, `go1.21.13`, and
+> `linux/amd64` stay identical. This is a property of the version-stamping
+> mechanism, not a change to the software: the k6 **source is byte-for-byte
+> identical to the investigated commit** — `git diff --name-only ddc3b0b1d2` lists
+> only this document — so the binary is fully canonical v0.55.0 and every runtime
+> observation, timing, and verdict below is unaffected.
 
 **Test/probe command family.** The `-race` probes use the canonical detector
 from the `Makefile` `tests:` target (`go test -race -timeout 210s ./...`,
