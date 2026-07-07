@@ -146,9 +146,9 @@ $ grep -c ITER_END /tmp/k6inv/req1.err
 5
 ```
 
-These figures tie out exactly for this run: `ITER_END` (5) = `iterations` summary (5) = the progress counter's `5 complete`; and `ITER_START` (11) − `ITER_END` (5) = **6** = the `6 interrupted iterations` the engine reports — i.e. the 6 VUs caught mid-`sleep(3)` began an iteration (`ITER_START`) but were terminated before returning.
+These figures tie out for this run: `ITER_END` (5) = `iterations` summary (5) = the progress counter's `5 complete`. The robust, always-holding invariant is `ITER_START` (11) = `5 complete` + `6 interrupted` — i.e. the 11 iterations that began (`ITER_START`) split into the 5 that finished and the **6** that were caught mid-`sleep(3)` and terminated before returning, exactly the `6 interrupted iterations` the engine reports. (`ITER_END` tracks the `5 complete` count only when console output flushes cleanly; it is a timing-sensitive marker — see **Stability across runs** below — so the authoritative split is `ITER_START` = complete + interrupted, not `ITER_START` − `ITER_END`.)
 
-**Stability across runs.** The engine counter is the authoritative, stable figure. A second run (`req1_run2.*`) reproduced the identical engine result — `running (05.0s), 0/6 VUs, 5 complete and 6 interrupted iterations`, summary `iterations: 5`, and `ITER_START` `11` — with only the `ITER_END` marker count differing (`5` in run 1, `6` in run 2). That single-marker variance is a `console.log`-flush timing artifact: `console.log('ITER_END')` fires at the JS-function tail a hair before the Go runner finalizes the iteration-complete accounting, so when the abort lands in that window the marker can print for an iteration the engine still tallies as *interrupted*. The decisive facts — `5 complete`, **`6 interrupted`**, and `ITER_START` (11) far exceeding the completed work — are stable across both runs and prove active VUs are terminated mid-execution rather than drained.
+**Stability across runs.** The engine counter is the authoritative, stable figure. Repeated runs (five, at the same SIGINT-at-~t=5s timing) reproduced the identical engine result every time — `running (05.0s), 0/6 VUs, 5 complete and 6 interrupted iterations`, summary `iterations: 5`, and `ITER_START` `11` — with only the `ITER_END` marker count differing from run to run (**observed values 5–8 across five runs**, e.g. `5`, `6`, and `8`, while `5 complete`, `6 interrupted`, and `ITER_START` `11` never varied). That marker variance is a `console.log`-flush timing artifact: `console.log('ITER_END')` fires at the JS-function tail as `sleep(3)` unwinds on cancellation, a hair before the Go runner finalizes the iteration-complete accounting, so when the abort lands in that window the marker can print for one or more iterations that the engine still (correctly) tallies as *interrupted* — which is exactly why `ITER_END` can exceed the stable `5 complete` count. The decisive facts — `5 complete`, **`6 interrupted`**, and `ITER_START` (11) far exceeding the completed work — are stable across all runs and prove active VUs are terminated mid-execution rather than drained.
 
 ### (c) Root-cause corroboration from source
 
@@ -286,6 +286,8 @@ time="2026-07-06T23:39:14Z" level=info msg="STREAM_ERR {\"code\":2,\"details\":[
 time="2026-07-06T23:39:14Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
+> **On the `STREAM_ERR` line count (timing-dependent).** The four lines above are the stable, always-present core; the `error="canceled by client (k6)"` evidence appears on **every** interrupted run. The *number* of `STREAM_ERR` console lines, however, is timing-dependent: in the majority of runs the `on('error')` handler fires once (the `"canceled by client (k6)"` line shown), but occasionally it also fires an earlier line — `STREAM_ERR {"code":2,...,"message":"context canceled at .../req2_interrupt.js:14:21(0)"}` — when the cancelled context reaches the `stream.write`/`data` path a hair before the stream-error path. That extra line is a benign artifact of interrupt timing and does not change the received-message count or the `"canceled by client (k6)"` cancellation evidence.
+
 Unedited summary line (from `req2i.out`):
 
 ```
@@ -342,7 +344,7 @@ $ curl -s http://127.0.0.1:6565/v1/metrics/dropped_iterations
 {"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":1850,"rate":56.059533852371416}}}}
 ```
 
-The all-metrics endpoint — `GET /v1/metrics`, routed at [api/v1/routes.go:23] to `handleGetMetrics` [api/v1/metric_routes.go:9] — includes the same object (`"count":1850`):
+The all-metrics endpoint — `GET /v1/metrics`, routed at [api/v1/routes.go:23] to `handleGetMetrics` [api/v1/metric_routes.go:9] — includes the same object (`"count":1850`). The order of elements in the `data` array is incidental — it is assembled by ranging over a Go map, so the element order varies between calls; the `dropped_iterations` object with `"count":1850` is always present regardless of order:
 
 ```bash
 $ curl -s http://127.0.0.1:6565/v1/metrics
