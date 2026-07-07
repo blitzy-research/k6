@@ -98,10 +98,10 @@ Result: `exit=105`. All evidence in (a), (b) below is from this single run (`req
 
 ### (a) Signal-pipeline log lines (the three key lines extracted from the `--verbose` STDERR stream of the same run)
 
-`--verbose` emits many `level=debug` lines; the command below extracts exactly the three signal-pipeline lines (unedited; logrus `TextFormatter` → STDERR):
+`--verbose` emits many `level=debug` lines; the command below extracts exactly the three signal-pipeline lines (unedited; logrus `TextFormatter` → STDERR). The third alternative is anchored on `level=error` so it matches only the error-level abort line itself, not the redundant `level=debug` lines that merely reference the same abort message in a `msg=` prose string or an `error=` field:
 
 ```bash
-$ grep -E "Trapping interrupt signals|Stopping k6 in response to signal|test run was aborted" /tmp/k6inv/req1.err
+$ grep -E 'msg="Trapping interrupt signals|msg="Stopping k6 in response to signal|level=error msg="test run was aborted' /tmp/k6inv/req1.err
 time="2026-07-06T23:29:58Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
 time="2026-07-06T23:30:03Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
 time="2026-07-06T23:30:03Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
