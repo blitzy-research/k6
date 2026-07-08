@@ -21,7 +21,7 @@ working tree is unchanged except for this one document.
 |---|----------|---------|
 | **Q1** | Do VUs get "stuck" (neither active nor stopped) under rapid up/down stages + long `gracefulRampDown`? | **BY DESIGN** — the "stuck" condition is the transitional `toGracefulStop` state; deterministically resolved. Not a bug. |
 | **Q2** | Why doesn't the scheduled handler's VU count match the graceful handler's count? | **BY DESIGN (expected, not corruption)** — two independent `cur` counters over different step curves; the graceful count is deliberately held higher by `reserveVUsForGracefulRampDowns()`. |
-| **Q3** | Why do VUs keep running longer than `gracefulStop` after Ctrl+C? | **BY DESIGN (separate path; not reproduced for JS-bound work)** — Ctrl+C uses a distinct abort path; the first `SIGINT` aborts in ~35–100 ms (far *faster* than `gracefulStop`), the second forces immediate `OSExit`. |
+| **Q3** | Why do VUs keep running longer than `gracefulStop` after Ctrl+C? | **BY DESIGN (separate path; not reproduced for JS-bound work)** — Ctrl+C uses a distinct abort path; the first `SIGINT` aborts in tens of milliseconds (0.028–0.098 s — far *faster* than `gracefulStop`), the second forces immediate `OSExit`. |
 | **Q4** | Why does one segment instance show more VUs, and why does the sum appear to exceed the maximum? | **one-instance-more = BY DESIGN** (deterministic striping remainder); **sum-exceeds-max = NOT reproduced** (sum equals the maximum at peak, never exceeds it). |
 | **Q5** | Is there a race between the two handler goroutines, or a VU buffer leak? | **NO data race, NO buffer leak; the two handlers are NEVER simultaneous.** |
 
@@ -35,7 +35,8 @@ k6 was built and run in its **canonical configuration**, exactly as a normal use
 Two builds are relevant and both are shown so the version stamps can be reconciled
 independently: (1) the **investigation baseline build** at the source commit under
 investigation (`ddc3b0b1d`), which produced *every* runtime observation in this document,
-and (2) the **delivery-head build** on the branch that carries this document.
+and (2) the **delivery-head build** on the branch that carries this document (a moving
+target, explained below).
 
 **Investigation baseline build (source commit `ddc3b0b1d`, branch `k6_ddc3b0b1d23c`) —
 this is the binary used for all runtime evidence below:**
@@ -60,30 +61,32 @@ $ /tmp/k6race version
 k6race v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
 ```
 
-**Delivery-head build (this document's branch, *after* the documentation commit).** k6's
-`version` stamps the *current* git HEAD into the binary from Go's build-info `vcs.revision`
-(first 10 characters) — `lib/consts/consts.go:L19-L35`. Because this document is committed
-on top of `ddc3b0b1d`, the delivery HEAD is the documentation commit, so a rebuild from the
-delivery checkout reports that commit instead of the baseline one:
+**Delivery-head build (this document's branch) — a moving target.** k6's `version` stamps
+the *current* git HEAD into the binary from Go's build-info `vcs.revision` (first 10
+characters) — `lib/consts/consts.go:L31` (`commitLen := 10`), `L35`
+(`commit = s.Value[:commitLen]`). Because this document is committed on top of `ddc3b0b1d`,
+the delivery HEAD is *whichever commit most recently edited this file*, so it **advances
+every time the document is amended** — the first documentation commit, then each later edit
+that addresses review/QA feedback. Its exact short hash is therefore a moving target and is
+intentionally **not pinned** here: a rebuild from the delivery checkout simply reports the
+current HEAD rather than the baseline. (Observed as a moving series: an early delivery HEAD
+rebuilt to `commit/2bcafdc4d9`; a later amendment moved it to `commit/ca396901e3`; committing
+this very note will move it again — which is exactly why the narrative anchors to the
+immutable baseline banner `commit/ddc3b0b1d2`, not to the delivery hash.) What is **stable**
+— and what actually matters — is that the delivery build differs from the baseline in nothing
+but that embedded VCS commit string; the diff below proves the change is a single added file
+with zero code changes, and is true at *any* delivery HEAD on this branch:
 
 ```text
-$ git rev-parse --abbrev-ref HEAD ; git rev-parse --short HEAD
-blitzy-2dfd9699-6d7a-419c-a717-ad211034d886
-2bcafdc4d
-
-$ CGO_ENABLED=1 go build -o /tmp/k6_delivery .
-$ /tmp/k6_delivery version
-k6_delivery v0.55.0 (commit/2bcafdc4d9, go1.21.13, linux/amd64)
-
 $ git diff --name-status ddc3b0b1d..HEAD
 A	blitzy/documentation/k6_ddc3b0b1d23c.md
 ```
 
-The two builds differ **only** in the embedded VCS commit string. The documentation commit
-adds exactly one file (the `git diff --name-status` above) and changes **no** code under
-investigation, so the observed binary behavior is identical. Every runtime observation below
-therefore comes from the baseline `commit/ddc3b0b1d2` binary, and every `file:line` citation
-is anchored to `ddc3b0b1d`.
+The two builds differ **only** in the embedded VCS commit string. The documentation changes
+add exactly one file (the `git diff --name-status` above) and change **no** code under
+investigation, so the observed binary behavior is identical regardless of the delivery HEAD.
+Every runtime observation below therefore comes from the baseline `commit/ddc3b0b1d2` binary,
+and every `file:line` citation is anchored to `ddc3b0b1d`.
 
 The race detector requires cgo (`CGO_ENABLED=1`) plus a C compiler (`gcc`); `go.mod` pins
 `go 1.21` [go.mod:L3] with `toolchain go1.21.13` [go.mod:L5], and the installed toolchain
@@ -242,7 +245,9 @@ Command:
 /tmp/k6bin run -v --log-output=stderr /tmp/k6inv/q1b_hardstop.js
 ```
 
-Counts: `Start` = **4**, `"Graceful stop"` = **4**, `"Hard stop"` = **4**. Timeline:
+Counts: `Start` = **4**, `"Graceful stop"` = **4**, `"Hard stop"` = **4** (modal value — the
+explicit `"Hard stop"` Debug-line count is *not* perfectly deterministic; see the
+variability note after the interpretation). Timeline (a representative `"Hard stop"`=4 run):
 
 ```text
 t=+00s  Start vu0
@@ -271,6 +276,28 @@ exactly `gracefulRampDown=2s` after each `"Graceful stop"` the max-allowed handl
 `"Hard stop"` → `running`/`toGracefulStop` → `toHardStop` (`vu_handle.go:L174-L175`) and
 `vh.cancel()` (`L178`) interrupts the iteration ("4 interrupted iterations"). This exposes
 the third named transitional state, `toHardStop`.
+
+**Variability note — the `"Hard stop"` Debug-line count is not perfectly deterministic.**
+The *interrupted-iterations* outcome is invariant, but the *number of explicit `"Hard stop"`
+Debug lines* is not. Re-running this exact scenario (canonical `k6 run`, unchanged input)
+**40×** produced `"Hard stop"` = **4** in **35** runs and `"Hard stop"` = **3** in **5** runs,
+while the `4 interrupted iterations` outcome held in **all 40**. In a 3-count run the last VU
+(`vu0`) is torn down by the executor's end-of-run context cancellation rather than by an
+explicit `hardStop()` call, so it emits no `"Hard stop"` line — yet its in-flight iteration
+is still interrupted, keeping the interrupted total at 4. Complete unedited excerpt from a
+captured 3-count run (`Start`=4 and `"Graceful stop"`=4 were unchanged):
+
+```text
+time="2026-07-08T07:28:41Z" level=debug msg="Hard stop" executor=ramping-vus scenario=hard vuNum=3
+time="2026-07-08T07:28:41Z" level=debug msg="Hard stop" executor=ramping-vus scenario=hard vuNum=2
+time="2026-07-08T07:28:41Z" level=debug msg="Hard stop" executor=ramping-vus scenario=hard vuNum=1
+running (4.0s), 1/4 VUs, 0 complete and 3 interrupted iterations
+running (4.0s), 0/4 VUs, 0 complete and 4 interrupted iterations
+```
+
+This is a logging-timing artifact of *which* teardown path reaches the final VU first, not a
+state-machine defect: `toHardStop` is still exercised and every iteration is still
+interrupted regardless of whether the last VU's teardown logs an explicit `"Hard stop"`.
 
 **Q1 rationale.** The three transitional states named in the question (`starting`,
 `toGracefulStop`, `toHardStop`) are all real and all resolved deterministically by the state
@@ -384,7 +411,7 @@ VU buffer never grows beyond it.
 
 **Verdict: BY DESIGN — and the user's "longer than `gracefulStop`" was NOT reproduced for
 JS-bound scripts.** Ctrl+C uses a **separate** abort path (in `cmd/`, not the executor). The
-first `SIGINT` aborts promptly (measured ~35–100 ms — far *faster* than the 30s
+first `SIGINT` aborts promptly (measured in tens of milliseconds, 0.028–0.098 s — far *faster* than the 30s
 `gracefulStop`); the second `SIGINT` forces immediate `OSExit`. The executor's
 `gracefulStop`/`gracefulRampDown` (stage scheduling) is explicitly **bypassed** on manual
 interrupt. These two mechanisms must not be conflated.
@@ -414,7 +441,7 @@ interrupt. These two mechanisms must not be conflated.
   `select { case <-timer.C: case <-ctx.Done(): timer.Stop() } }` at
   `js/modules/k6/k6.go:L75-L79`.
 
-### Q3.1 Single SIGINT — measured linger from SIGINT to process exit (stable across 2 runs)
+### Q3.1 Single SIGINT — measured linger from SIGINT to process exit (measured across 50 runs)
 
 Two scripts exercise the two relevant paths: a **context-aware** `sleep(8)` (which selects
 on `ctx.Done()`) and a **context-ignoring** 25 s tight JS loop. Each iteration logs
@@ -469,49 +496,91 @@ LINGER=$(awk "BEGIN{printf \"%.3f\", $T_EXIT-$T_SIG}")
 echo "exit_code=$EXIT  linger_seconds=$LINGER  ITER_START=$(grep -cw ITER_START "$STDERR")  ITER_END=$(grep -cw ITER_END "$STDERR")"
 ```
 
-Commands and their complete output (each case run twice):
+Commands and their complete output. Because the sleep-case `ITER_END` count is a **race**
+(see the takeaway below), the sleep case was run **15×** and the busy case **10×** to
+characterize the distribution rather than assert a single value; the whole set was then
+repeated a second time with materially identical distributions (`exit_code` and `ITER_START`
+deterministic; sleep `ITER_END` variable; busy `ITER_END` uniformly 0):
 
 ```text
-$ for i in 1 2; do echo -n "run$i: "; /tmp/k6inv/drive_single_sigint.sh /tmp/k6inv/q3_sleep.js sleep_r$i 5; done
-run1: exit_code=105  linger_seconds=0.040  ITER_START=4  ITER_END=2
-run2: exit_code=105  linger_seconds=0.043  ITER_START=4  ITER_END=2
+$ for i in $(seq 1 15); do echo -n "run$i: "; /tmp/k6inv/drive_single_sigint.sh /tmp/k6inv/q3_sleep.js sleep_r$i 5; done
+run1: exit_code=105  linger_seconds=0.032  ITER_START=4  ITER_END=0
+run2: exit_code=105  linger_seconds=0.045  ITER_START=4  ITER_END=1
+run3: exit_code=105  linger_seconds=0.028  ITER_START=4  ITER_END=2
+run4: exit_code=105  linger_seconds=0.038  ITER_START=4  ITER_END=2
+run5: exit_code=105  linger_seconds=0.041  ITER_START=4  ITER_END=2
+run6: exit_code=105  linger_seconds=0.038  ITER_START=4  ITER_END=2
+run7: exit_code=105  linger_seconds=0.098  ITER_START=4  ITER_END=0
+run8: exit_code=105  linger_seconds=0.038  ITER_START=4  ITER_END=1
+run9: exit_code=105  linger_seconds=0.047  ITER_START=4  ITER_END=2
+run10: exit_code=105  linger_seconds=0.032  ITER_START=4  ITER_END=1
+run11: exit_code=105  linger_seconds=0.040  ITER_START=4  ITER_END=0
+run12: exit_code=105  linger_seconds=0.044  ITER_START=4  ITER_END=2
+run13: exit_code=105  linger_seconds=0.051  ITER_START=4  ITER_END=0
+run14: exit_code=105  linger_seconds=0.029  ITER_START=4  ITER_END=0
+run15: exit_code=105  linger_seconds=0.033  ITER_START=4  ITER_END=2
 
-$ for i in 1 2; do echo -n "run$i: "; /tmp/k6inv/drive_single_sigint.sh /tmp/k6inv/q3_busy.js busy_r$i 5; done
-run1: exit_code=105  linger_seconds=0.100  ITER_START=4  ITER_END=0
-run2: exit_code=105  linger_seconds=0.035  ITER_START=4  ITER_END=0
+$ for i in $(seq 1 10); do echo -n "run$i: "; /tmp/k6inv/drive_single_sigint.sh /tmp/k6inv/q3_busy.js busy_r$i 5; done
+run1: exit_code=105  linger_seconds=0.044  ITER_START=4  ITER_END=0
+run2: exit_code=105  linger_seconds=0.059  ITER_START=4  ITER_END=0
+run3: exit_code=105  linger_seconds=0.029  ITER_START=4  ITER_END=0
+run4: exit_code=105  linger_seconds=0.032  ITER_START=4  ITER_END=0
+run5: exit_code=105  linger_seconds=0.037  ITER_START=4  ITER_END=0
+run6: exit_code=105  linger_seconds=0.041  ITER_START=4  ITER_END=0
+run7: exit_code=105  linger_seconds=0.033  ITER_START=4  ITER_END=0
+run8: exit_code=105  linger_seconds=0.033  ITER_START=4  ITER_END=0
+run9: exit_code=105  linger_seconds=0.035  ITER_START=4  ITER_END=0
+run10: exit_code=105  linger_seconds=0.031  ITER_START=4  ITER_END=0
 ```
 
-Complete raw log excerpt around the signal — Case A (`q3_sleep_r1.log`), filtered to the
-`ITER_*` markers plus the two abort lines; timestamps are unedited:
+Across the 15 sleep runs shown, the `ITER_END` count took the values **0, 1, and 2**; a
+second 15-run sample additionally produced **3**, for a full observed range of **0–3** over
+the 30 sleep runs (modal 2). The busy count was **0** in all 10 shown and in all 10 of the
+second sample. `exit_code` was **105** and `ITER_START` was **4** in every run. The linger
+stayed in the **tens of milliseconds** — observed range **0.028–0.098 s** across the 25 runs
+shown (the second 25-run sample was materially identical), typically 0.03–0.05 s with an
+occasional outlier approaching ~0.10 s (e.g. sleep `run7` at 0.098 s) — i.e. orders of
+magnitude below the 30 s executor `gracefulStop`.
+
+Complete raw log excerpt around the signal — **one representative** Case A sleep run
+(`q3_caseA.log`; in this instance 2 of the 4 VUs finished before the interrupt reached them
+— the count varies run to run, see the takeaway below), filtered to the `ITER_*` markers plus
+the two abort lines; timestamps are unedited:
 
 ```text
-time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:39Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-08T05:20:39Z" level=info msg=ITER_END source=console
-time="2026-07-08T05:20:39Z" level=info msg=ITER_END source=console
-time="2026-07-08T05:20:39Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-08T07:13:05Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:05Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:05Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:05Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:10Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-08T07:13:10Z" level=info msg=ITER_END source=console
+time="2026-07-08T07:13:10Z" level=info msg=ITER_END source=console
+time="2026-07-08T07:13:10Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-Case B (`q3_busy_r1.log`) — same markers, but **no** `ITER_END` (all four tight loops are
-force-interrupted by the sobek VM `Interrupt`):
+Case B (`q3_caseB.log`) — same markers, but **no** `ITER_END` (all four tight loops are
+force-interrupted by the sobek VM `Interrupt`); this outcome (busy `ITER_END`=0) was
+deterministic across all 20 busy runs:
 
 ```text
-time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
-time="2026-07-08T05:20:49Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-08T05:20:49Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-08T07:13:10Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:10Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:10Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:10Z" level=info msg=ITER_START source=console
+time="2026-07-08T07:13:15Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-08T07:13:15Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-Takeaway: even a script deliberately ignoring context cancellation is stopped in ~35–100 ms
-— i.e. **far faster** than `gracefulStop=30s`, the opposite of "lingering." In Case A the
-context-aware `sleep` returns on `ctx.Done()` and two of the four VUs race through to
-`ITER_END` before the VM `Interrupt` reaches them (`ITER_END`=2, stable across both runs),
-while the other two are interrupted first; the linger is ~40 ms regardless.
+Takeaway: even a script deliberately ignoring context cancellation is stopped in tens of
+milliseconds (0.028–0.098 s) — i.e. **far faster** than `gracefulStop=30s`, the opposite of
+"lingering." In the sleep case the context-aware `sleep` returns on `ctx.Done()`, so a
+**variable** number of VUs race through to `ITER_END` before the VM `Interrupt` reaches them.
+This `ITER_END` count is **not deterministic**: it is a genuine race between the `ctx.Done()`
+return path (`js/modules/k6/k6.go:L75-L79`) and the sobek VM `Interrupt`
+(`js/bundle.go:L323-L324`), and across 30 sleep runs it ranged **0–3** (modal 2), as the
+distribution above shows — it must not be reported as a fixed value. The remaining VUs are
+interrupted first. The linger itself is unaffected by this race and stays in the tens of
+milliseconds regardless.
 
 ### Q3.2 Two SIGINTs — the second signal forces immediate exit
 
@@ -587,7 +656,7 @@ test always dies. **(Inferred, not reproduced here):** the only way a VU could l
 Ctrl+C would be if it were inside a **blocking Go/host call** that neither context
 cancellation nor the sobek `Interrupt` can preempt until it returns — this is an inference
 from the interrupt mechanism, since neither the context-aware `sleep` nor the tight JS loop
-exhibited it (both stopped in ~35–100 ms above). The 30 s `gracefulStop` is never honored on
+exhibited it (both stopped in tens of milliseconds, 0.028–0.098 s, above). The 30 s `gracefulStop` is never honored on
 manual interrupt.
 
 ---
@@ -1256,8 +1325,11 @@ claims, was not reproducible for canonical inputs).
 The canonical `k6 run` entry point and the exact commands shown above were used throughout;
 the race detector required `CGO_ENABLED=1` plus `gcc`. Magnitude and timing claims were
 confirmed across at least two identical runs, and run-to-run variability is reported exactly
-as observed (Q1/Q2/Q4 counts were deterministic and identical across runs; Q3 linger
-measured 0.032–0.037 s). All temporary reproduction scripts, driver scripts, and binaries
+as observed. The Q1/Q2/Q4 counts were deterministic and identical across runs; the Q3
+single-SIGINT linger measured 0.028–0.098 s across the 25 runs shown in Q3.1 (a second
+25-run sample was materially identical), typically 0.03–0.05 s with an occasional outlier
+approaching ~0.10 s; and the Q3 sleep-case `ITER_END` count is a genuine race, observed to
+range 0–3 across the 30 sleep runs (see Q3.1). All temporary reproduction scripts, driver scripts, and binaries
 lived under `/tmp` (outside the repository) and were deleted afterward; the repository
 working tree is unchanged except for this document. All `file:line` citations are anchored
 to HEAD `ddc3b0b1d`.
