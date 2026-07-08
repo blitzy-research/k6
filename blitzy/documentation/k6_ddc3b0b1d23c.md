@@ -750,16 +750,16 @@ t_offset   full  seg0  seg1  seg2  sum   sum==full?
       8s     8     3     3     2     8   OK
       9s     9     3     3     3     9   OK
      10s    10     4     3     3    10   OK
-   13.5s     9     3     3     3     9   OK
-     14s     8     3     3     2     8   OK
-   14.5s     7     3     2     2     7   OK
-     15s     6     2     2     2     6   OK
-   15.5s     5     2     2     1     5   OK
-     16s     4     2     1     1     4   OK
-   16.5s     3     1     1     1     3   OK
-     17s     2     1     1     0     2   OK
-   17.5s     1     1     0     0     1   OK
-     18s     0     0     0     0     0   OK
+   15.5s     9     3     3     3     9   OK
+     16s     8     3     3     2     8   OK
+   16.5s     7     3     2     2     7   OK
+     17s     6     2     2     2     6   OK
+   17.5s     5     2     2     1     5   OK
+     18s     4     2     1     1     4   OK
+   18.5s     3     1     1     1     3   OK
+     19s     2     1     1     0     2   OK
+   19.5s     1     1     0     0     1   OK
+     20s     0     0     0     0     0   OK
 
 Invariant sum(seg0..2)==full violations: 0
 Direct ScaleInt64(10): full=10 seg0=4 seg1=3 seg2=3 (sum=10)
