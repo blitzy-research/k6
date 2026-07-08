@@ -17,7 +17,7 @@ export GOCACHE=/tmp/gocache
 go build -o /tmp/k6bin/k6 .
 ```
 
-The toolchain is **Go 1.21.13**, matching the `go.mod` directives `go 1.21` and `toolchain go1.21.13` (`go.mod:3`, `go.mod:5`). In this containerised environment that pinned toolchain was selected explicitly (`GOTOOLCHAIN=go1.21.13`); the resulting binary's version banner is shown below and is used, verbatim, throughout this document.
+The `go.mod` **requests** Go 1.21 (`go 1.21`, `go.mod:3`) together with a `toolchain go1.21.13` directive (`go.mod:5`). The canonical build image, however, ships **Go 1.23.10** and sets `GOTOOLCHAIN=local` (`go env GOTOOLCHAIN` → `local`), so the build uses the image's locally installed compiler — which already satisfies the `go 1.21` minimum — and the `toolchain go1.21.13` directive is **not** downloaded or selected. (An explicit `GOTOOLCHAIN=go1.21.13` build fails offline in this image: `go: download go1.21.13 for linux/amd64: toolchain not available`.) Because the binary is compiled with Go 1.23.10, the version banner — assembled by `FullVersion` (`lib/consts/consts.go:16`) from `runtime.Version()` (`lib/consts/consts.go:17`) — reports `go1.23.10`. The resulting binary's version banner is shown below and is used, verbatim, throughout this document.
 
 Every run enters the real CLI entry point: `main.go` calls `cmd.Execute()` (`main.go:8-9`), which dispatches to the `k6 run` Cobra command built by `getCmdRun` (`cmd/run.go:462`):
 
@@ -30,7 +30,7 @@ func main() {
 Version banner (`k6 version`):
 
 ```text
-k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
+k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)
 ```
 
 **Environment.** Outbound HTTPS is available and `https://test.k6.io` is reachable. It responds with an **HTTP 302 redirect** which k6 follows by default (`--max-redirects` default `10`, `cmd/options.go:36`); this is why one `http.get(...)` produces `http_reqs=2` (see Q4/Q5).
@@ -176,7 +176,7 @@ default ✓ [ 100% ] 1 VUs  00m01.2s/10m0s  1/1 iters, 1 per VU
 
 ### Metrics (16 emitted for this script)
 
-The single-request run emitted **16 metrics** (the same 16 the REST API reported in Q1). Every built-in metric is declared and registered in `metrics/builtin.go`; each has a **metric type** — `Counter` / `Gauge` / `Trend` / `Rate` (`metrics/metric_type.go:9-14`) — and a **value type** — `Default` / `Time` (milliseconds) / `Data` (bytes) (`metrics/value_type.go:6-10`). The type/value registration happens in `RegisterBuiltinMetrics` (`metrics/builtin.go:78-111`). The "rendered" column below is quoted from the Q4 run #1 summary (trend rows show only `avg=` for brevity; the full stats are in the Q4 block):
+The single-request run emitted **16 metrics** (enumerated below; this set includes `checks`, which appears because the script performs a `check()`). Q1's REST `/v1/metrics` snapshot also reported 16 metric objects, but that count came from a separate `loop.js` run, so the two 16-counts are not guaranteed to be the identical set of metrics. Every built-in metric is declared and registered in `metrics/builtin.go`; each has a **metric type** — `Counter` / `Gauge` / `Trend` / `Rate` (`metrics/metric_type.go:9-14`) — and a **value type** — `Default` / `Time` (milliseconds) / `Data` (bytes) (`metrics/value_type.go:6-10`). The type/value registration happens in `RegisterBuiltinMetrics` (`metrics/builtin.go:78-111`). The "rendered" column below is quoted from the Q4 run #1 summary (trend rows show only `avg=` for brevity; the full stats are in the Q4 block):
 
 | Metric | Metric type | Value type | Rendered (Q4 run #1) | Source: name / registration |
 |---|---|---|---|---|
@@ -676,7 +676,7 @@ export function handleSummary(data) {
 }
 ```
 
-The available `--out` backends are the sub-packages under `output/`: **`json`, `csv`, `influxdb`, `cloud`** (`output/json/`, `output/csv/`, `output/influxdb/`, `output/cloud/`). `-o/--out` takes a `uri` and may be repeated — it is a `StringArrayP` (`cmd/config.go:31`: `flags.StringArrayP("out", "o", []string{}, "uri for an external metrics database")`).
+The available `--out` backends are the sub-packages under `output/`: **`json`, `csv`, `influxdb`, `cloud`** (`output/json/`, `output/csv/`, `output/influxdb/`, `output/cloud/`). `-o/--out` takes a `uri` and may be repeated — it is a `StringArrayP` (`cmd/config.go:31`: ``flags.StringArrayP("out", "o", []string{}, "`uri` for an external metrics database")``).
 
 ## Q9 — Script validation logic (with error text and exit codes)
 
@@ -799,10 +799,10 @@ const (
 
 ## Source lineage & verified citations
 
-All citations were verified against the source tree at commit `ddc3b0b1d`, and all behavioural claims come from the runtime output of a `k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)` binary built from that source. Read-only source files consulted and/or executed as evidence:
+All citations were verified against the source tree at commit `ddc3b0b1d`, and all behavioural claims come from the runtime output of a `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.10, linux/amd64)` binary built from that source. Read-only source files consulted and/or executed as evidence:
 
 - `examples/http_get.js`, `README.md`
-- `main.go`, `cmd/run.go`, `cmd/root.go`, `cmd/config.go`, `cmd/state/state.go`, `cmd/options.go`, `cmd/runtime_options.go`
+- `main.go`, `cmd/run.go`, `cmd/root.go`, `cmd/config.go`, `cmd/state/state.go`, `cmd/options.go`, `cmd/runtime_options.go`, `lib/consts/consts.go`
 - `metrics/builtin.go`, `metrics/metric_type.go`, `metrics/value_type.go`, `metrics/units.go`
 - `js/summary.js`, `js/runner.go`
 - `loader/readsource.go`, `loader/loader.go`, `errext/exitcodes/codes.go`, `api/server.go`
