@@ -8,9 +8,10 @@ This document is an **evidence-grounded investigation**. Every behavioral claim 
 
 ## 0. Provenance — the exact binary and how it was built and run
 
-All observations below come from a binary built from this repository at branch `k6_ddc3b0b1d23c`.
+All observations below come from a binary built from this repository. **Two git commits matter and are kept strictly distinct throughout this document:**
 
-- **Repository / branch head commit:** `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (short `ddc3b0b1d`).
+- **Source-under-investigation** (the k6 code being analyzed): branch `k6_ddc3b0b1d23c`, whose head — *before* this documentation file was committed — is commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (short `ddc3b0b1d`; 10‑char build stamp `ddc3b0b1d2`). **Every source `file:line` citation and every line number in this answer refers to this code.**
+- **Delivered repository HEAD** (what a reviewer who checks out the delivered branch receives): a commit that is exactly the source-under-investigation **plus this single documentation file and nothing else**. `git diff ddc3b0b1d <delivered-HEAD> --name-status` lists exactly one entry — `A blitzy/documentation/k6_ddc3b0b1d23c.md` — with **zero** `.go` / `go.mod` / `go.sum` / `vendor/` changes. Because the delivered-HEAD hash advances with every revision of this documentation file (and the `commit/…` build stamp tracks it — see below), only the baseline `ddc3b0b1d2` is a fixed reference; the doc commit observed while writing this answer was `3e9f5aabc82ca4e851bf42f60fc98bd9efeadc00` (10‑char stamp `3e9f5aabc8`). Because no source file differs between the baseline and any delivered-HEAD doc commit, the analyzed runtime behavior, line numbers, and error strings are identical whichever of the two the binary is built from.
 - **Go toolchain (observed):** `go version go1.23.12 linux/amd64`.
 - **Canonical build command (offline, vendored dependencies), run from the repository root:**
 
@@ -20,10 +21,26 @@ PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local GOFLAGS=-mod=vendor CGO_ENABLED=0
 
 The `-mod=vendor` flag uses the fully vendored dependency tree (no network), `GOTOOLCHAIN=local` pins the installed `go1.23.12` (the repo's `go.mod` declares `go 1.21` [go.mod:L3] / `toolchain go1.21.13` [go.mod:L5], but the canonical build target is Go 1.23.x per `Dockerfile:L1` `FROM --platform=$BUILDPLATFORM golang:1.23-alpine3.20 as builder` and `.github/workflows/build.yml:L27` `DEFAULT_GO_VERSION: "1.23.x"`), and `CGO_ENABLED=0` matches the canonical non-race build.
 
-- **Version string reported by the built binary (verbatim, observed):**
+- **Version strings reported by the built binary (verbatim; both observed this investigation).** k6 derives the `commit/…` segment at build time from Go's embedded VCS stamp: `FullVersion()` reads `vcs.revision` via `debug.ReadBuildInfo()` and takes its **first 10 characters** [lib/consts/consts.go:L28-L35], appending `-dirty` only when `vcs.modified == "true"` [lib/consts/consts.go:L36-L39,L48-L49], then formats `"%s (commit/%s, %s)"` [lib/consts/consts.go:L52]. The `commit/…` segment is therefore purely the git HEAD stamp and affects no analyzed behavior.
+
+  Building the **source-under-investigation** (a clean checkout at `ddc3b0b1d`, i.e. before this document existed) reports:
 
 ```
 k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
+```
+
+  Building a **delivered-HEAD doc commit** (here `3e9f5aabc`, the doc commit observed while writing this answer; clean tree so `vcs.modified=false`) reports:
+
+```
+k6bin v0.55.0 (commit/3e9f5aabc8, go1.23.12, linux/amd64)
+```
+
+  The two differ **only** in the 10‑char VCS stamp (`ddc3b0b1d2` vs the delivered doc commit, e.g. `3e9f5aabc8`) — a direct consequence of the doc-only commit; every other field (`v0.55.0`, `go1.23.12`, `linux/amd64`) and all analyzed behavior are identical. The delivered stamp is whatever commit finally carries this file; only the baseline `ddc3b0b1d2` is fixed. To reproduce the exact source-under-investigation stamp, check the baseline out into a fresh clone (a *linked* `git worktree` at the baseline emits **no** VCS stamp under Go 1.23, so a full checkout/clone is required) and build there:
+
+```
+git clone --no-hardlinks . /tmp/k6base && cd /tmp/k6base && git checkout ddc3b0b1d
+PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local GOFLAGS=-mod=vendor CGO_ENABLED=0 go build -o /tmp/k6bin .
+/tmp/k6bin version    # -> k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
 
 - **Canonical invocation used for every experiment** (stdout/stderr captured together, exit code recorded):
@@ -37,9 +54,11 @@ For the VU-count demonstration (§6), `--vus N --iterations N` was added.
 
 - **Scratch workspace:** all test scripts were created **outside** the source tree, under `/tmp/k6exp/`, and were removed after the investigation. The k6 source tree was left byte-for-byte unchanged (only this `blitzy/` document is added).
 
+- **JavaScript-engine and transpiler provenance (dependencies — unchanged by this investigation).** The observed behavior depends on two vendored dependencies pinned in `go.mod`: the JavaScript engine **`github.com/grafana/sobek v0.0.0-20241024150027-d91f02b05e9b`** [go.mod:L78], and the ESM/TypeScript transpiler **`github.com/evanw/esbuild v0.21.2`** [go.mod:L12] (which transpiles ESM/TypeScript test scripts to runnable JS before the module system executes them). `grafana/sobek` is a maintained fork of `dop251/goja`; crucially, the entire module-resolution machinery analyzed in this answer imports **`github.com/grafana/sobek`, not `dop251/goja`** — see the import lines [js/bundle.go:L14], [js/modules/resolution.go:L8], and [js/modules/require_impl.go:L9]. (The only `dop251/goja` occurrences anywhere under `js/` are attribution/link **comments** in unrelated experimental and TC39-conformance files, not imports.) This is precisely why every JavaScript-engine stack frame in the outputs below is named `github.com/grafana/sobek/...`. No dependency is added, upgraded, or removed.
+
 > **Reading the output:** k6 writes console and error logs to **stderr**, wrapped as `time="..." level=... msg="..." source=...`. Inside `msg="..."`, the sequences `\n\t` are literal escapes that render as multi-line stack traces. Outputs below are reproduced exactly as emitted. The `time="..."` timestamp varies from run to run and carries no meaning for this analysis.
 
-> **Version fidelity:** every value here is for the built version **`v0.55.0`, build commit `ddc3b0b1d2`, `go1.23.12`**. Line numbers, error strings, and exit codes are not generalized to other k6 versions.
+> **Version fidelity:** every value here is for the built version **`v0.55.0`, source-under-investigation commit `ddc3b0b1d2`, `go1.23.12`** (equivalently, the delivered-HEAD build `3e9f5aabc8`, which is behaviorally identical — the difference is doc-only, as shown above). Line numbers, error strings, and exit codes are not generalized to other k6 versions.
 
 ---
 
@@ -165,7 +184,7 @@ func (mr *ModuleResolver) resolve(basePWD *url.URL, arg string) (sobek.ModuleRec
 }
 ```
 
-- **Built-in / `k6*` branch** ([js/modules/resolution.go:L147]): the cache is keyed by the **raw specifier** (`"k6"`, `"k6/http"`, ...). A hit returns at [L150-L152] regardless of `locked`. A miss calls `mr.requireModule(arg)` [L153], whose very first act is the lock check:
+- **Built-in / `k6*` branch** ([js/modules/resolution.go:L147]): the cache is keyed by the **raw specifier** (`"k6"`, `"k6/http"`, ...). A hit returns at [js/modules/resolution.go:L150-L152] regardless of `locked`. A miss calls `mr.requireModule(arg)` [js/modules/resolution.go:L153], whose very first act is the lock check:
 
 ```
 // js/modules/resolution.go:L69-L71
@@ -175,7 +194,7 @@ func (mr *ModuleResolver) requireModule(name string) (sobek.ModuleRecord, error)
 	}
 ```
 
-- **File branch** (`default`, [js/modules/resolution.go:L156]): the specifier is first turned into an absolute URL by `resolveSpecifier` [L157] (this is where relative resolution happens — see §5). The cache is keyed by that **resolved URL string**; a hit returns at [L162-L164] regardless of `locked`. Only on a **miss** does the lock fire: `if mr.locked { return nil, fmt.Errorf(notPreviouslyResolvedModule, arg) }` [L166-L167]. If not locked, it loads and caches the module.
+- **File branch** (`default`, [js/modules/resolution.go:L156]): the specifier is first turned into an absolute URL by `resolveSpecifier` [js/modules/resolution.go:L157] (this is where relative resolution happens — see §5). The cache is keyed by that **resolved URL string**; a hit returns at [js/modules/resolution.go:L162-L164] regardless of `locked`. Only on a **miss** does the lock fire: `if mr.locked { return nil, fmt.Errorf(notPreviouslyResolvedModule, arg) }` [js/modules/resolution.go:L166-L167]. If not locked, it loads and caches the module.
 
 ### 3.2 Precise definitions (observed + code-grounded)
 
@@ -216,7 +235,7 @@ Because `unseen.js` is present on disk, the only possible cause of the failure i
 
 `k6/http` is a **valid, registered built-in** (`"k6/http": http.New()` in the registry [js/jsmodules.go:L61], built by `getJSModules()` [js/jsmodules.go:L71]). It is `require()`'d only inside `if (__VU >= 1) { ... }`, so it is never resolved at `__VU==0`. With `vus: 2`, later VUs take the branch and hit the built-in branch's lock check in `requireModule` [js/modules/resolution.go:L70-L71]. The failure is therefore **purely the lock**, not an "unknown module."
 
-**Observed — the common case (~96% of runs; stderr; exit 107):**
+**Observed — the common case (~97% of runs; stderr; exit 107):**
 
 ```
 time="2026-07-08T04:08:54Z" level=error msg="GoError: the module \"k6/http\" was not previously resolved during initialization (__VU==0)\n\tat go.k6.io/k6/js.(*requireImpl).require-fm (native)\n\tat file:///tmp/k6exp/exp6.js:4:23(18)\n" hint="error while initializing VU #2 (script exception)"
@@ -224,9 +243,18 @@ time="2026-07-08T04:08:54Z" level=error msg="GoError: the module \"k6/http\" was
 
 `EXIT CODE: 107`
 
-**Honest run-to-run inconsistency (OBSERVED, not inferred):** unlike EXP2 (file module, perfectly stable), EXP6 is **not** perfectly stable. Over **54 identical runs**, **~52 produced the clean exit 107 above and ~2 crashed** with a Go runtime `fatal error: concurrent map writes` and **exit code 2**. (The very first EXP6 invocation of the session crashed; a subsequent sweep produced 39/40 clean + 1 crash, plus one more crash caught at try 56.) I am reporting the observed distribution rather than hiding it behind a controlled single-VU variant.
+**Honest run-to-run inconsistency (OBSERVED, not inferred).** Unlike EXP2 (a *file* module, perfectly stable at exit 107), EXP6 is **not** perfectly stable: the built-in branch performs an **unsynchronized cache write** that races concurrent VU initialization, so a fraction of runs crash the Go runtime instead of cleanly rejecting. Over a single classified sweep of **700 identical runs** (`/tmp/k6bin run --quiet --no-summary /tmp/k6exp/exp6.js`, exit code recorded each time) the observed distribution was:
 
-The crash is real and its cause is visible in the source. In the **built-in branch**, the cache write happens **unconditionally after `requireModule` returns — even when `requireModule` returned the lock error**:
+| Outcome | Exit | Count / 700 | Crashing frame (top of stack) |
+|---|---|---|---|
+| clean lock reject (the `notPreviouslyResolvedModule` output shown above) | 107 | 682 (97.4%) | — |
+| `fatal error: concurrent map writes` | 2 | 16 | `js/modules/resolution.go:154` — the cache **write** |
+| `fatal error: concurrent map read and map write` | 2 | 1 | `js/modules/resolution.go:150` — built-in-branch cache **read** |
+| `fatal error: concurrent map read and map write` | 2 | 1 | `js/modules/resolution.go:162` — file-branch cache **read** |
+
+That is ~97.4% clean exit 107 and ~2.6% Go-runtime fatal (exit 2), spread across **two distinct fatal messages** and **three distinct crash frames**. The pattern held across ~250 additional runs. I report the observed distribution rather than hiding it behind a controlled single-VU variant; a deterministic built-in lock-reject can instead be obtained with the *file* case EXP2 (which never writes the cache on the locked path) or by avoiding concurrent init, but the 2-VU form is retained here precisely to exhibit the honest inconsistency the question asks about.
+
+**Why it crashes — the unconditional cache write.** In the **built-in branch**, the cache write happens **unconditionally after `requireModule` returns — even when `requireModule` returned the lock error**:
 
 ```
 // js/modules/resolution.go:L153-L155
@@ -235,34 +263,41 @@ The crash is real and its cause is visible in the source. In the **built-in bran
 		return mod, err
 ```
 
-When two VUs initialize **concurrently** (§2.4) and both miss the `k6/http` cache, they both reach the map write at [js/modules/resolution.go:L154] at the same time → `fatal error: concurrent map writes`. The **crashing goroutine** captured from a real run makes the causal chain explicit (the map write at `resolution.go:154`, reached from the concurrent VU-init path):
+`mr.cache` is a plain Go `map` with no synchronization, and VUs initialize **concurrently** (§2.4), so this write at [js/modules/resolution.go:L154] races other goroutines' accesses to the same map. Two collision shapes are observed, each shown here as a **complete contiguous top-of-stack excerpt** (no elision; the full unedited dumps are in Appendix B and Appendix B2):
+
+- **`concurrent map writes`** — two VUs both miss the `k6/http` cache and reach the **write** at [js/modules/resolution.go:L154] simultaneously (the `require_impl.go:28` frame is the specifier-resolution call [js/modules/require_impl.go:L28]):
 
 ```
 fatal error: concurrent map writes
 
-goroutine 233 [running]:
-go.k6.io/k6/js/modules.(*ModuleResolver).resolve(0xc0004f3180, 0xc0007ea510?, {0xc0005db328, 0x7})
+goroutine 141 [running]:
+go.k6.io/k6/js/modules.(*ModuleResolver).resolve(0xc000401b80, 0xc0007ccea0?, {0xc00051a798, 0x7})
 	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:154 +0x105
-go.k6.io/k6/js/modules.(*ModuleResolver).sobekModuleResolver(0xc0004f3180, {0x1b0c080?, 0xc0007aea00?}, {0xc0005db328, 0x7})
+go.k6.io/k6/js/modules.(*ModuleResolver).sobekModuleResolver(0xc000401b80, {0x1b0c080?, 0xc0007ba000?}, {0xc00051a798, 0x7})
 	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:195 +0x45
-go.k6.io/k6/js/modules.(*ModuleSystem).Require(0xc0007ba180, {0xc0005db328, 0x7})
+go.k6.io/k6/js/modules.(*ModuleSystem).Require(0xc0005aeb80, {0xc00051a798, 0x7})
 	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/require_impl.go:28 +0x165
-go.k6.io/k6/js.(*requireImpl).require(0xc000796130, {0xc0005db328, 0x7})
+go.k6.io/k6/js.(*requireImpl).require(0xc0006738c0, {0xc00051a798, 0x7})
 	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:428 +0x45
-...
-go.k6.io/k6/js.(*Bundle).Instantiate(0xc000799b88, {0x1f9c988, 0xc000850050}, 0x1)
-	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:257 +0x1f1
-go.k6.io/k6/js.(*Runner).newVU(0xc0003f8000, {0x1f9c988?, 0xc000850050?}, 0x1, 0x1, 0xc0004365b0)
-	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/runner.go:128 +0x58
-go.k6.io/k6/execution.(*Scheduler).initVU(0xc0002f2700, {0x1f9c988, 0xc000850050}, 0xc0004365b0, {0x1fb7da0, 0xc000832230})
-	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:133 +0x9f
-go.k6.io/k6/execution.(*Scheduler).initVUsConcurrently.func1()
-	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:172 +0xd2
-created by go.k6.io/k6/execution.(*Scheduler).initVUsConcurrently in goroutine 1
-	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:170 +0x97
 ```
 
-The complete 179-line dump is reproduced in Appendix EXP6 (the `...` above stands only for well-known intermediate `grafana/sobek` VM frames shown there in full; the remaining goroutines are k6/runtime background goroutines — scheduler, cobra, logrus writer, the REST API `net/http` server, signal handler, output flushers — unrelated to the crash site; goroutine IDs and hex addresses vary per run). The **file** branch does **not** have this race, because on a locked miss it returns at [js/modules/resolution.go:L166-L167] **without** writing the cache — which is exactly why EXP2 (file) is stable while EXP6 (built-in) is occasionally fatal. *(Inference, clearly labeled: the differing stability between EXP2 and EXP6 is attributable to this write-vs-no-write difference; the crash itself, its stack, and its exit code are observed facts.)*
+- **`concurrent map read and map write`** — one VU **reads** the cache while another **writes** it at [js/modules/resolution.go:L154]. The read site varies: I observed it both at the built-in-branch read [js/modules/resolution.go:L150] and at the file-branch read [js/modules/resolution.go:L162]. The L162 case below is the resolution of the **main script module itself** — its argument is the 25-byte (`0x19`) URL `file:///tmp/k6exp/exp6.js`, reached via the parent-module lookup at [js/modules/require_impl.go:L27]:
+
+```
+fatal error: concurrent map read and map write
+
+goroutine 215 [running]:
+go.k6.io/k6/js/modules.(*ModuleResolver).resolve(0xc0006e81e0, 0xc000af8bd0, {0xc0006ec180, 0x19})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:162 +0x1cb
+go.k6.io/k6/js/modules.(*ModuleResolver).sobekModuleResolver(0xc0006e81e0, {0x0?, 0x0?}, {0xc0006ec180, 0x19})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:195 +0x45
+go.k6.io/k6/js/modules.(*ModuleSystem).Require(0xc0004fa0e0, {0xc0005f0318, 0x7})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/require_impl.go:27 +0x125
+go.k6.io/k6/js.(*requireImpl).require(0xc0006c6090, {0xc0005f0318, 0x7})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:428 +0x45
+```
+
+The **file** branch never writes the cache on a locked miss — it returns at [js/modules/resolution.go:L166-L167] **without** touching the map — which is exactly why EXP2 (file) is perfectly stable while EXP6 (built-in) is occasionally fatal. *(Inference, clearly labeled: the differing stability between EXP2 and EXP6 is attributable to this write-vs-no-write difference; the crash messages, their stack frames, their source lines, and the exit code 2 are observed facts.)*
 
 ### 4.2 Failure mode (ii): `require()` **during an iteration** → init-context gate, exit 0 (logged, non-fatal)
 
@@ -326,7 +361,7 @@ time="2026-07-08T04:08:54Z" level=error msg="GoError: require() can't be used wi
 
 - **Init-time** module errors (the lock, EXP2/EXP6/EXP7; and the empty specifier, EXP-EMPTY) **abort the whole run** with **exit `107`** (k6's "script exception" abort code); the `hint="... while initializing VU #N ..."` / `hint="script exception"` confirms the init-time origin.
 - **Iteration-time** `require()` errors (EXP3) are treated as per-iteration script exceptions: they are **logged** (`source=stacktrace`) and the process **exits `0`** by default.
-- The **rare** built-in concurrent-map-write crash (EXP6) is a Go runtime fatal error → **exit `2`**.
+- The **rare** built-in cache-race crash (EXP6, ~2.6% of runs) is a Go runtime fatal error → **exit `2`**. It appears as **two** distinct messages — `fatal error: concurrent map writes` (crash frame [js/modules/resolution.go:L154], the write) and `fatal error: concurrent map read and map write` (crash frame at a cache **read**: [js/modules/resolution.go:L150] built-in or [js/modules/resolution.go:L162] file) — all rooted in the same unsynchronized write at [js/modules/resolution.go:L154] (see §4.1).
 
 
 ---
@@ -450,11 +485,12 @@ Every string below was reproduced **verbatim** from the runs above. The format s
 
 | # | Exact text (format string) | Source constant / origin | Emitted by | Exit code |
 |---|---|---|---|---|
-| 1 | `the module %q was not previously resolved during initialization (__VU==0)` | `notPreviouslyResolvedModule` [js/modules/resolution.go:L17]; enforced for files at [L166-L167] and for built-ins via `requireModule` [L70-L71] | EXP2 (file), EXP6 (built-in), EXP7 (@5 VUs) | 107 (init abort) |
+| 1 | `the module %q was not previously resolved during initialization (__VU==0)` | `notPreviouslyResolvedModule` [js/modules/resolution.go:L17]; enforced for files at [js/modules/resolution.go:L166-L167] and for built-ins via `requireModule` [js/modules/resolution.go:L70-L71] | EXP2 (file), EXP6 (built-in), EXP7 (@5 VUs) | 107 (init abort) |
 | 2 | `the "%s" function is only available in the init stage (i.e. the global scope), see https://grafana.com/docs/k6/latest/using-k6/test-lifecycle/ for more information` | `cantBeUsedOutsideInitContextMsg` [js/initcontext.go:L15-L16]; gate at [js/bundle.go:L425-L426] | EXP3 (`require()` in `default()`) | 0 (logged per-iteration) |
-| 3 | `require() can't be used with an empty specifier` | `errors.New(...)` [js/modules/require_impl.go:L21] (also [L100]) | EXP-EMPTY | 107 (init abort) |
-| 4 | `fatal error: concurrent map writes` | Go runtime, triggered at the map write [js/modules/resolution.go:L154] under concurrent VU init | EXP6 (rare, ~4%) | 2 (Go fatal) |
-| 5 | `open() can't be used with files that weren't previously opened during initialization (__VU==0), path: %q` | [js/initcontext.go:L40] — the **parallel `open()` behavior** the freeze deliberately mirrors (see §8). *Cited as the design mirror; not separately run in this investigation.* | — | — (init abort when triggered) |
+| 3 | `require() can't be used with an empty specifier` | `errors.New(...)` [js/modules/require_impl.go:L21] (also [js/modules/require_impl.go:L100]) | EXP-EMPTY | 107 (init abort) |
+| 4 | `fatal error: concurrent map writes` | Go runtime; the unsynchronized cache **write** at [js/modules/resolution.go:L154] under concurrent VU init | EXP6 (rare; observed 16/700 ≈ 2.3%) | 2 (Go fatal) |
+| 5 | `fatal error: concurrent map read and map write` | Go runtime; a cache **read** ([js/modules/resolution.go:L150] built-in branch, or [js/modules/resolution.go:L162] file branch) racing the write at [js/modules/resolution.go:L154] | EXP6 (very rare; observed 2/700 ≈ 0.3%) | 2 (Go fatal) |
+| 6 | `open() can't be used with files that weren't previously opened during initialization (__VU==0), path: %q` | [js/initcontext.go:L40] — the **parallel `open()` behavior** the freeze deliberately mirrors (see §8). *Cited as the design mirror; not separately run in this investigation.* | — | — (init abort when triggered) |
 
 **Shared stack frame:** every `require()`-origin error above contains the native frame
 
@@ -633,6 +669,62 @@ time="2026-07-08T04:08:40Z" level=info msg="[init] a.helperName=dir1  b.helperNa
 ```
 
 `EXIT CODE: 0`
+
+### EXP6 — never-seen built-in `k6/*` module in a later VU's init
+
+This is the built-in-module analogue of EXP2 (§4.1). `k6/http` is a perfectly
+valid built-in module, but here it is required only inside a conditional that
+runs in a later VU's init — so the specifier `k6/http` is never resolved at
+`__VU==0`, the resolver is already locked by the time VU #1/#2 re-runs its init,
+and the built-in branch of `resolve()` raises the same `notPreviouslyResolvedModule`
+error [js/modules/resolution.go:L17,L70-L71]. It demonstrates that the
+resolved-vs-new classification (§3) is enforced identically for built-in `k6/*`
+modules and for file modules.
+
+`exp6.js`:
+
+```js
+// exp6.js — k6/http is a VALID built-in, but it is required only inside a
+// conditional in a later VU's init, so it is never resolved at __VU==0.
+if (__VU >= 1) {
+  const http = require('k6/http');
+  console.log(`[init] __VU=${__VU} loaded k6/http`);
+}
+export const options = { vus: 2, iterations: 2 };
+export default function () {}
+```
+
+Command:
+
+```
+/tmp/k6bin run --quiet --no-summary /tmp/k6exp/exp6.js
+```
+
+Observed (stderr; representative clean run — exit 107, aborts the run; the
+reported VU number varies between #1 and #2 depending on which VU wins the race
+to re-run its init first):
+
+```
+time="2026-07-08T05:05:56Z" level=error msg="GoError: the module \"k6/http\" was not previously resolved during initialization (__VU==0)\n\tat go.k6.io/k6/js.(*requireImpl).require-fm (native)\n\tat file:///tmp/k6exp/exp6.js:4:23(18)\n" hint="error while initializing VU #2 (script exception)"
+```
+
+`EXIT CODE: 107`
+
+**Instability note (see §4.1 and Appendix B / Appendix B2 for the full analysis).**
+Unlike the file-module case (EXP2), which is perfectly stable at exit 107, EXP6
+is *usually* — but not always — a clean exit-107 abort. The built-in branch of
+`resolve()` performs an **unconditional** write to the unsynchronized `mr.cache`
+map at [js/modules/resolution.go:L154] even when the lookup returned the lock
+error, and VUs initialize concurrently [execution/scheduler.go:L169-L172]. This
+creates a data race on the plain Go map. Across an authoritative **700-run
+sweep** the observed distribution was **682 / 700 (97.4%)** clean exit-107
+aborts and **18 / 700 (2.6%)** fatal Go-runtime crashes (exit 2): 16 `concurrent
+map writes` at resolution.go:L154, 1 `concurrent map read and map write` reaching
+the built-in-branch read at resolution.go:L150, and 1 reaching the file-branch
+read at resolution.go:L162. This is reported honestly rather than hidden: the
+question's "sometimes works, sometimes fails" framing maps directly onto this
+observed distribution, and the same unchanged input was run repeatedly rather
+than constructing a variant that masks the inconsistency.
 
 ### EXP7 — few vs. many VUs
 
@@ -882,6 +974,278 @@ created by go.k6.io/k6/execution.(*Scheduler).emitVUsAndVUsMax in goroutine 1
 
 ---
 
+## Appendix B2 — EXP6 complete `concurrent map read and map write` crash dump (verbatim, one captured occurrence)
+
+This is the **complete, unedited** 261-line Go runtime dump from one captured EXP6 crash of the *other* observed fatal variant (the 1-in-700 `concurrent map read and map write` outcome described in §4.1). It is distinct from Appendix B: here the racing access is a map **read** at `js/modules/resolution.go:162` — the file-branch cache lookup — rather than the unconditional map **write** at `js/modules/resolution.go:154`. The read at line 162 is reached via the parent-module resolution path `require_impl.go:27` (resolving the main script's own URL, arg length `0x19` = 25 bytes = `file:///tmp/k6exp/exp6.js`), whereas the Appendix B write is reached via the specifier-resolution path `require_impl.go:28`. Both crashes have the same root cause — the unsynchronized `mr.cache` map written unconditionally at line 154 while other VUs initialize concurrently [execution/scheduler.go:L169-L172] — but they surface at different map accesses. Goroutine IDs and hexadecimal addresses vary from run to run.
+
+```
+fatal error: concurrent map read and map write
+
+goroutine 215 [running]:
+go.k6.io/k6/js/modules.(*ModuleResolver).resolve(0xc0006e81e0, 0xc000af8bd0, {0xc0006ec180, 0x19})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:162 +0x1cb
+go.k6.io/k6/js/modules.(*ModuleResolver).sobekModuleResolver(0xc0006e81e0, {0x0?, 0x0?}, {0xc0006ec180, 0x19})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:195 +0x45
+go.k6.io/k6/js/modules.(*ModuleSystem).Require(0xc0004fa0e0, {0xc0005f0318, 0x7})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/require_impl.go:27 +0x125
+go.k6.io/k6/js.(*requireImpl).require(0xc0006c6090, {0xc0005f0318, 0x7})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:428 +0x45
+reflect.Value.call({0x193c0c0?, 0xc0006c60b0?, 0xc0006583a8?}, {0x1c1f7d1, 0x4}, {0xc000010348, 0x1, 0xc0004f6090?})
+	/usr/local/go/src/reflect/value.go:584 +0xca6
+reflect.Value.Call({0x193c0c0?, 0xc0006c60b0?, 0xc0006fedc0?}, {0xc000010348?, 0xc0006c6700?, 0x40e45f?})
+	/usr/local/go/src/reflect/value.go:368 +0xb9
+github.com/grafana/sobek.(*Runtime).newWrappedFunc.(*Runtime).wrapReflectFunc.func1({{0x1fb1a08, 0x2fefba0}, {0xc0003c2250, 0x1, 0x3}})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2029 +0x3bd
+github.com/grafana/sobek.(*nativeFuncObject).vmCall(0xc000624180, 0xc0004d8000, 0x1)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:563 +0x184
+github.com/grafana/sobek.call.exec(0x6fedc0?, 0xc0004d8000)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:3719 +0x66
+github.com/grafana/sobek.(*vm).run(0xc0004d8000)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:635 +0x5b
+github.com/grafana/sobek.(*vm).runTryInner(0x1?)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:886 +0x52
+github.com/grafana/sobek.(*generator).step(0xc0002c5c00)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:762 +0x2b
+github.com/grafana/sobek.(*generator).next(0xc0002c5c00, {0x1fb1a08, 0x2fefba0})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:800 +0x1b1
+github.com/grafana/sobek.(*asyncRunner).onFulfilled(0xc0002c5c00, {{0x0, 0x0}, {0xc0006588b8, 0x1, 0x1}})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:686 +0xfb
+github.com/grafana/sobek.(*SourceTextModuleInstance).ExecuteModule(0xc0004fa580, 0xc00049a008, 0x0, 0x0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/modules_sourcetext.go:29 +0xec
+github.com/grafana/sobek.(*Runtime).innerModuleEvaluation(0xc00049a008, 0xc000262dc0, {0x1f9cd80, 0xc000bbadc0}, 0xc000658a98, 0x0, 0xc000658c18)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/modules.go:279 +0x8f1
+github.com/grafana/sobek.(*Runtime).CyclicModuleRecordEvaluate(0xc00049a008, {0x1fa5340, 0xc000bbadc0}, 0xc00064ec18)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/modules.go:183 +0x47d
+go.k6.io/k6/js/modules.(*ModuleSystem).RunSourceData(0xc0004fa0e0, 0xc0007456b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:255 +0x1c8
+go.k6.io/k6/js.(*Bundle).instantiate.func3()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:338 +0x27
+reflect.Value.call({0x18dd7e0?, 0xc0004fa460?, 0x10?}, {0x1c1f7d1, 0x4}, {0x2fefba0, 0x0, 0xc00064f288?})
+	/usr/local/go/src/reflect/value.go:584 +0xca6
+reflect.Value.Call({0x18dd7e0?, 0xc0004fa460?, 0xc0004fa480?}, {0x2fefba0?, 0xcc451d?, 0x35554aaaa?})
+	/usr/local/go/src/reflect/value.go:368 +0xb9
+github.com/grafana/sobek.(*Runtime).newWrappedFunc.(*Runtime).wrapReflectFunc.func1({{0x0, 0x0}, {0x0, 0x0, 0x0}})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2029 +0x3bd
+github.com/grafana/sobek.AssertFunction.func1.1()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2464 +0x56
+github.com/grafana/sobek.(*vm).try(0xc0004d8000, 0xc00064f5a8)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:863 +0x249
+github.com/grafana/sobek.(*Runtime).runWrapped(0xc00049a008, 0xc0004f6058?)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2508 +0x65
+github.com/grafana/sobek.AssertFunction.func1({0x0?, 0x0?}, {0x0?, 0x1?, 0xc0004f6050?})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2463 +0x8c
+go.k6.io/k6/js.(*Bundle).instantiate.func4()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:345 +0x23
+go.k6.io/k6/js/eventloop.(*EventLoop).Start(0xc000262730, 0xc0006c65b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/eventloop/eventloop.go:177 +0x19a
+go.k6.io/k6/js.(*Bundle).instantiate(0xc000b8fb88, 0xc000300b80, 0x1)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:344 +0x390
+go.k6.io/k6/js.(*Bundle).Instantiate(0xc000b8fb88, {0x1f9c988, 0xc000aaa0a0}, 0x1)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:257 +0x1f1
+go.k6.io/k6/js.(*Runner).newVU(0xc000478000, {0x1f9c988?, 0xc000aaa0a0?}, 0x1, 0x1, 0xc0007133b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/runner.go:128 +0x58
+go.k6.io/k6/js.(*Runner).NewVU(0xc000738900?, {0x1f9c988?, 0xc000aaa0a0?}, 0x466f34433454654d?, 0x4143737275486d56?, 0x1424f6141414577?)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/runner.go:116 +0x1d
+go.k6.io/k6/execution.(*Scheduler).initVU(0xc00034c900, {0x1f9c988, 0xc000aaa0a0}, 0xc0007133b0, {0x1fb7da0, 0xc000426230})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:133 +0x9f
+go.k6.io/k6/execution.(*Scheduler).initVUsConcurrently.func1()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:172 +0xd2
+created by go.k6.io/k6/execution.(*Scheduler).initVUsConcurrently in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:170 +0x97
+
+goroutine 1 [select]:
+go.k6.io/k6/execution.(*Scheduler).initVUsAndExecutors(0xc00034c900, {0x1f9c988, 0xc000aaa000}, 0xc0007133b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:283 +0x508
+go.k6.io/k6/execution.(*Scheduler).Init(0xc00034c900, {0x1f9c950, 0xc000745380}, 0xc0007133b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:412 +0x245
+go.k6.io/k6/cmd.(*cmdRun).run(0xc0007de040, 0xc0004302c8, {0xc000744180, 0x1, 0x3})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/run.go:367 +0x13fc
+github.com/spf13/cobra.(*Command).execute(0xc0004302c8, {0xc000744150, 0x3, 0x3})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/spf13/cobra/command.go:856 +0x68a
+github.com/spf13/cobra.(*Command).ExecuteC(0xc000359088)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/spf13/cobra/command.go:974 +0x38d
+github.com/spf13/cobra.(*Command).Execute(...)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/spf13/cobra/command.go:902
+go.k6.io/k6/cmd.(*rootCommand).execute(0xc000aa9e30)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/root.go:108 +0xfb
+go.k6.io/k6/cmd.Execute()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/root.go:130 +0x2f
+main.main()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/main.go:9 +0xf
+
+goroutine 120 [select]:
+io.(*pipe).read(0xc000738180, {0xc00054e000, 0x10000, 0xc0004bd5f0?})
+	/usr/local/go/src/io/pipe.go:57 +0xa5
+io.(*PipeReader).Read(0xc0004bd690?, {0xc00054e000?, 0x79895d11da68?, 0x10005?})
+	/usr/local/go/src/io/pipe.go:134 +0x1a
+bufio.(*Scanner).Scan(0xc000562f28)
+	/usr/local/go/src/bufio/scan.go:219 +0x81e
+github.com/sirupsen/logrus.(*Entry).writerScanner(0xc000712460, 0xc000738180, 0xc0006fe090)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/sirupsen/logrus/writer.go:86 +0x11d
+created by github.com/sirupsen/logrus.(*Entry).WriterLevel in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/sirupsen/logrus/writer.go:57 +0x31f
+
+goroutine 121 [chan receive]:
+go.k6.io/k6/cmd.(*rootCommand).setupLoggers.func2()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/root.go:276 +0x34
+created by go.k6.io/k6/cmd.(*rootCommand).setupLoggers in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/root.go:275 +0x637
+
+goroutine 193 [select]:
+go.k6.io/k6/cmd.handleTestAbortSignals.func1()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/common.go:104 +0x94
+created by go.k6.io/k6/cmd.handleTestAbortSignals in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/common.go:103 +0x185
+
+goroutine 125 [chan receive]:
+go.k6.io/k6/lib.(*GroupSummary).Start.func1()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/lib/test_state.go:128 +0x9d
+created by go.k6.io/k6/lib.(*GroupSummary).Start in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/lib/test_state.go:126 +0x4f
+
+goroutine 126 [select]:
+go.k6.io/k6/output.(*PeriodicFlusher).run(0xc00049c7e0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/output/helpers.go:67 +0xb6
+created by go.k6.io/k6/output.NewPeriodicFlusher in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/output/helpers.go:102 +0x11a
+
+goroutine 127 [select]:
+go.k6.io/k6/output.(*Manager).Start.func2()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/output/manager.go:63 +0x14c
+created by go.k6.io/k6/output.(*Manager).Start in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/output/manager.go:56 +0x139
+
+goroutine 128 [IO wait]:
+internal/poll.runtime_pollWait(0x7989164ece40, 0x72)
+	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc00045f280?, 0x10?, 0x0)
+	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0xc00045f280)
+	/usr/local/go/src/internal/poll/fd_unix.go:620 +0x295
+net.(*netFD).accept(0xc00045f280)
+	/usr/local/go/src/net/fd_unix.go:172 +0x29
+net.(*TCPListener).accept(0xc0007a8100)
+	/usr/local/go/src/net/tcpsock_posix.go:159 +0x1e
+net.(*TCPListener).Accept(0xc0007a8100)
+	/usr/local/go/src/net/tcpsock.go:372 +0x30
+net/http.(*Server).Serve(0xc0004781e0, {0x1f99040, 0xc0007a8100})
+	/usr/local/go/src/net/http/server.go:3330 +0x30c
+net/http.(*Server).ListenAndServe(0xc0004781e0)
+	/usr/local/go/src/net/http/server.go:3259 +0x71
+go.k6.io/k6/cmd.(*cmdRun).run.func12()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/run.go:322 +0x172
+created by go.k6.io/k6/cmd.(*cmdRun).run in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/run.go:316 +0x110d
+
+goroutine 161 [chan receive]:
+go.k6.io/k6/cmd.(*cmdRun).run.func13()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/run.go:334 +0x8b
+created by go.k6.io/k6/cmd.(*cmdRun).run in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/cmd/run.go:332 +0x11d2
+
+goroutine 177 [syscall]:
+os/signal.signal_recv()
+	/usr/local/go/src/runtime/sigqueue.go:152 +0x29
+os/signal.loop()
+	/usr/local/go/src/os/signal/signal_unix.go:23 +0x13
+created by os/signal.Notify.func1.1 in goroutine 1
+	/usr/local/go/src/os/signal/signal.go:151 +0x1f
+
+goroutine 194 [select]:
+go.k6.io/k6/execution.(*Scheduler).emitVUsAndVUsMax.func2()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:240 +0xf9
+created by go.k6.io/k6/execution.(*Scheduler).emitVUsAndVUsMax in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:232 +0x1d3
+
+goroutine 195 [runnable]:
+github.com/grafana/sobek.(*baseObject)._put(0xc0004e8380, {0x1c23c2f, 0x7}, {0x1fb1710, 0xc0003d3dd0})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/object.go:794 +0x10e
+github.com/grafana/sobek.(*baseObject)._putProp(0xc0004e8380, {0x1c23c2f, 0x7}, {0x1fb17a8, 0x2fc8170}, 0x1, 0x0, 0x1)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/object.go:811 +0xbf
+github.com/grafana/sobek.(*Runtime).createErrorPrototype(0xc000502008, {0x1fbae28, 0x2f8a7d0}, 0xc0003d3aa0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/builtin_error.go:206 +0x155
+github.com/grafana/sobek.(*Runtime).getGoError(0xc000502008)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/builtin_error.go:311 +0x8f
+github.com/grafana/sobek.(*Runtime).NewGoError(0xc000502008, {0x1f84c60, 0xc00029db50})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:558 +0x2f
+github.com/grafana/sobek.(*Runtime).newWrappedFunc.(*Runtime).wrapReflectFunc.func1({{0x1fb1a08, 0x2fefba0}, {0xc00027e350, 0x1, 0x3}})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2043 +0x5e9
+github.com/grafana/sobek.(*nativeFuncObject).vmCall(0xc0005ae180, 0xc000506000, 0x1)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:563 +0x184
+github.com/grafana/sobek.call.exec(0x6fedc0?, 0xc000506000)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:3719 +0x66
+github.com/grafana/sobek.(*vm).run(0xc000506000)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:635 +0x5b
+github.com/grafana/sobek.(*vm).runTryInner(0x1?)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:886 +0x52
+github.com/grafana/sobek.(*generator).step(0xc0002e9420)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:762 +0x2b
+github.com/grafana/sobek.(*generator).next(0xc0002e9420, {0x1fb1a08, 0x2fefba0})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:800 +0x1b1
+github.com/grafana/sobek.(*asyncRunner).onFulfilled(0xc0002e9420, {{0x0, 0x0}, {0xc000b128b8, 0x1, 0x1}})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/func.go:686 +0xfb
+github.com/grafana/sobek.(*SourceTextModuleInstance).ExecuteModule(0xc00030fb20, 0xc000502008, 0x0, 0x0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/modules_sourcetext.go:29 +0xec
+github.com/grafana/sobek.(*Runtime).innerModuleEvaluation(0xc000502008, 0xc0000502d0, {0x1f9cd80, 0xc000bbadc0}, 0xc000b12a98, 0x0, 0xc000b12c18)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/modules.go:279 +0x8f1
+github.com/grafana/sobek.(*Runtime).CyclicModuleRecordEvaluate(0xc000502008, {0x1fa5340, 0xc000bbadc0}, 0xc0005f4c18)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/modules.go:183 +0x47d
+go.k6.io/k6/js/modules.(*ModuleSystem).RunSourceData(0xc00030e7c0, 0xc0007456b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/modules/resolution.go:255 +0x1c8
+go.k6.io/k6/js.(*Bundle).instantiate.func3()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:338 +0x27
+reflect.Value.call({0x18dd7e0?, 0xc00030f960?, 0x10?}, {0x1c1f7d1, 0x4}, {0x2fefba0, 0x0, 0xc0005f5288?})
+	/usr/local/go/src/reflect/value.go:584 +0xca6
+reflect.Value.Call({0x18dd7e0?, 0xc00030f960?, 0xc00030f9a0?}, {0x2fefba0?, 0xcc451d?, 0x35554aaaa?})
+	/usr/local/go/src/reflect/value.go:368 +0xb9
+github.com/grafana/sobek.(*Runtime).newWrappedFunc.(*Runtime).wrapReflectFunc.func1({{0x0, 0x0}, {0x0, 0x0, 0x0}})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2029 +0x3bd
+github.com/grafana/sobek.AssertFunction.func1.1()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2464 +0x56
+github.com/grafana/sobek.(*vm).try(0xc000506000, 0xc0005f55a8)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/vm.go:863 +0x249
+github.com/grafana/sobek.(*Runtime).runWrapped(0xc000502008, 0xc00021a1a8?)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2508 +0x65
+github.com/grafana/sobek.AssertFunction.func1({0x0?, 0x0?}, {0x0?, 0x1?, 0xc00021a198?})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/vendor/github.com/grafana/sobek/runtime.go:2463 +0x8c
+go.k6.io/k6/js.(*Bundle).instantiate.func4()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:345 +0x23
+go.k6.io/k6/js/eventloop.(*EventLoop).Start(0xc0000500a0, 0xc00029d9a0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/eventloop/eventloop.go:177 +0x19a
+go.k6.io/k6/js.(*Bundle).instantiate(0xc000b8fb88, 0xc0004460c0, 0x2)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:344 +0x390
+go.k6.io/k6/js.(*Bundle).Instantiate(0xc000b8fb88, {0x1f9c988, 0xc000aaa0a0}, 0x2)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:257 +0x1f1
+go.k6.io/k6/js.(*Runner).newVU(0xc000478000, {0x1f9c988?, 0xc000aaa0a0?}, 0x2, 0x2, 0xc0007133b0)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/runner.go:128 +0x58
+go.k6.io/k6/js.(*Runner).NewVU(0xc000738ae0?, {0x1f9c988?, 0xc000aaa0a0?}, 0x0?, 0x0?, 0x100000000000000?)
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/runner.go:116 +0x1d
+go.k6.io/k6/execution.(*Scheduler).initVU(0xc00034c900, {0x1f9c988, 0xc000aaa0a0}, 0xc0007133b0, {0x1fb7da0, 0xc000426230})
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:133 +0x9f
+go.k6.io/k6/execution.(*Scheduler).initVUsConcurrently.func1()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:172 +0xd2
+created by go.k6.io/k6/execution.(*Scheduler).initVUsConcurrently in goroutine 1
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/execution/scheduler.go:170 +0x97
+
+goroutine 178 [select]:
+go.k6.io/k6/js.(*Bundle).instantiate.func2()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:322 +0x7e
+created by go.k6.io/k6/js.(*Bundle).instantiate in goroutine 195
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:321 +0x22a
+
+goroutine 337 [select]:
+go.k6.io/k6/js.(*Bundle).instantiate.func2()
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:322 +0x7e
+created by go.k6.io/k6/js.(*Bundle).instantiate in goroutine 215
+	/tmp/blitzy/k6/blitzy-05accdba-49bf-4421-bfc5-4f3d6c38fb4b_759c4b/js/bundle.go:321 +0x22a
+```
+
+`EXIT CODE: 2`
+
+---
+
 ## Appendix C — Coverage pass (Q1–Q6) and stability notes
 
 ### Coverage against the six sub-questions
@@ -892,12 +1256,12 @@ created by go.k6.io/k6/execution.(*Scheduler).emitVUsAndVUsMax in goroutine 1
 | **Q2** — does k6 "freeze" resolution after init? ("under pressure") | §1, §2 | Yes — a single deterministic `ModuleResolver.Lock()` [js/bundle.go:L129] right after `__VU==0`. The "under pressure" framing is **wrong** and is corrected. |
 | **Q3** — "already resolved" vs. "new module" | §3 | Cache membership (resolved-URL key for files, specifier key for built-ins), populated at `__VU==0`; miss-while-locked = "new". |
 | **Q4** — relative specifiers per calling module | §5 | Base dir comes from the JS call stack (`CaptureCallStack` → `reversePath` → `loader.Resolve`); same `./helper.js` → `dir1` vs `dir2`. |
-| **Q5** — real runs: (a) init module re-`require`d by VUs; (b) never-seen fails | §2.3/§3 (EXP1), §4 (EXP2/EXP6) | (a) EXP1 exit 0; (b) EXP2/EXP6 exit 107. |
+| **Q5** — real runs: (a) init module re-`require`d by VUs; (b) never-seen fails | §2.3/§3 (EXP1), §4 (EXP2/EXP6) | (a) EXP1 exit 0; (b) EXP2 (file) reliably exit 107; EXP6 (built-in) usually exit 107 (682/700) but can crash exit 2 (18/700) via the concurrent-cache race — see stability notes. |
 | **Q6** — exact error/warning text in each case | §4, §7 | All strings reproduced verbatim with source constants. |
 
 ### Named items covered
 
-`ModuleResolver` [resolution.go:L30], `locked` [L35], `Lock()` [L137-L139], `resolve()` [L145-L177], `requireModule()` [L69-L89], `reversePath()` [L198-L211], `ModuleSystem.Require()` [require_impl.go:L15], `getCurrentModuleScript()` [L185-L196] / `getPreviousRequiringFile()` [L198-L225], `CaptureCallStack` [L189], `inInitContext()` [bundle.go:L439], `cantBeUsedOutsideInitContextMsg` [initcontext.go:L15-L16], `notPreviouslyResolvedModule` [resolution.go:L17], `loader.Resolve()` [loader.go:L48] / `Dir()` [loader.go:L115], `vu.state` [runner.go:L230/L247]; experiments EXP1–EXP7 and EXP-EMPTY. Supporting: CommonJS wrapper `cjsModule` [cjsmodule.go:L11] / `cjsModuleInstance` [cjsmodule.go:L51]; `goModule` [gomodule.go:L8] / `basicGoModule` [gomodule_basic.go:L8] returned by `requireModule`; built-in registry `getJSModules()` [jsmodules.go:L71] with `"k6"` [jsmodules.go:L34] and `"k6/http"` [jsmodules.go:L61]; per-VU module context `moduleVUImpl` [modules_vu.go:L17] / `State()` [modules_vu.go:L38]; filesystem-backed loading `ReadSource` [readsource.go:L16] and `loader/filesystems.go`; console surfacing (`js/console.go`).
+`ModuleResolver` [js/modules/resolution.go:L30], `locked` [js/modules/resolution.go:L35], `Lock()` [js/modules/resolution.go:L137-L139], `resolve()` [js/modules/resolution.go:L145-L177], `requireModule()` [js/modules/resolution.go:L69-L89], `reversePath()` [js/modules/resolution.go:L198-L211], `ModuleSystem.Require()` [js/modules/require_impl.go:L15], `getCurrentModuleScript()` [js/modules/require_impl.go:L185-L196] / `getPreviousRequiringFile()` [js/modules/require_impl.go:L198-L225], `CaptureCallStack` [js/modules/require_impl.go:L189], `inInitContext()` [js/bundle.go:L439], `cantBeUsedOutsideInitContextMsg` [js/initcontext.go:L15-L16], `notPreviouslyResolvedModule` [js/modules/resolution.go:L17], `loader.Resolve()` [loader/loader.go:L48] / `Dir()` [loader/loader.go:L115], `vu.state` [js/runner.go:L230] / [js/runner.go:L247]; experiments EXP1–EXP7 and EXP-EMPTY. Supporting: CommonJS wrapper `cjsModule` [js/modules/cjsmodule.go:L11] / `cjsModuleInstance` [js/modules/cjsmodule.go:L51]; `goModule` [js/modules/gomodule.go:L8] / `basicGoModule` [js/modules/gomodule_basic.go:L8] returned by `requireModule`; built-in registry `getJSModules()` [js/jsmodules.go:L71] with `"k6"` [js/jsmodules.go:L34] and `"k6/http"` [js/jsmodules.go:L61]; per-VU module context `moduleVUImpl` [js/modules_vu.go:L17] / `State()` [js/modules_vu.go:L38]; filesystem-backed loading `ReadSource` [loader/readsource.go:L16] and `loader/filesystems.go`; console surfacing (`js/console.go`).
 
 ### Stability notes
 
@@ -906,11 +1270,16 @@ Every experiment was run **≥2×** with identical input. Exit codes and error s
 1. The **order** of the `__VU` init console lines (EXP1).
 2. The specific **VU number** named in the init-abort errors (EXP2: `#1`/`#2`; EXP7@5 VUs: `#3`/`#4`/`#5`).
 
-One further **honestly-reported inconsistency**: EXP6 (never-seen **built-in**, 2 concurrent VUs) is usually a clean exit 107 (~52/54 runs) but occasionally a `fatal error: concurrent map writes` exit 2 (~2/54), due to the unconditional cache write at [js/modules/resolution.go:L154]. The **file** case (EXP2) has no such write on the locked path [js/modules/resolution.go:L166-L167] and was perfectly stable.
+One further **honestly-reported inconsistency**: EXP6 (never-seen **built-in**, 2 concurrent VUs) is *usually* a clean exit 107 but occasionally a fatal Go-runtime crash (exit 2). Across an authoritative **700-run sweep** of the unchanged input the observed distribution was **682/700 (97.4%)** clean exit-107 aborts and **18/700 (2.6%)** crashes, comprising two distinct fatal variants:
+
+- **16/700** — `fatal error: concurrent map writes` at [js/modules/resolution.go:L154] (the unconditional cache write; complete dump in **Appendix B**).
+- **2/700** — `fatal error: concurrent map read and map write`: 1 reaching the built-in-branch read at [js/modules/resolution.go:L150] and 1 reaching the file-branch read at [js/modules/resolution.go:L162] (complete dump of the L162 case in **Appendix B2**).
+
+The root cause is the **unconditional** write to the unsynchronized `mr.cache` map at [js/modules/resolution.go:L154] — executed even when the built-in lookup returned the lock error — while other VUs initialize concurrently [execution/scheduler.go:L169-L172]. The **file** case (EXP2) has no such write on the locked path [js/modules/resolution.go:L166-L167] and was perfectly stable at exit 107. The same unchanged input was run repeatedly to surface this distribution rather than constructing a variant that hides it.
 
 ### Environment fidelity
 
-Binary: `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`; branch head `ddc3b0b1d23c128e34e2792fc9075f9126e32375`; toolchain `go1.23.12 linux/amd64`; offline vendored build. All values are specific to this version and are not generalized to other k6 releases.
+Source-under-investigation binary: `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)` — built from branch head `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (before this document existed). The runs embedded above were produced by a binary built from the delivered HEAD, which git-stamps `commit/3e9f5aabc8`; because the only difference between the two commits is this documentation file (zero `.go`/`go.mod`/`vendor/` changes — see §0), the two binaries are behaviorally identical and every line number, error string, and exit code is unchanged between them. Toolchain `go1.23.12 linux/amd64`; offline vendored build. All values are specific to this version (`v0.55.0`) and are not generalized to other k6 releases.
 
 ---
 
