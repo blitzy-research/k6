@@ -497,12 +497,10 @@ k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 **A build from the *delivered* tree stamps a different prefix - by construction, not by defect.** This
 answer document is delivered *committed* into the branch, one commit **above** the pinned source commit.
 Because Go stamps whichever commit is checked out, a build from the delivered tree (which contains this
-file) reports that documentation commit's own 10-character prefix instead of `ddc3b0b1d2` - for example
-`commit/021326f9e4` for the documentation commit observed at delivery time. That prefix is expected to
-differ for every documentation-only commit, since each commit has its own hash; it is **logically
-impossible** for a document to embed the hash of the very commit that adds it. The only difference between
-the pinned source commit and the delivered commit is this single markdown file, so the k6 binary - and every
-consolidation result proven below - is byte-for-byte identical either way:
+file) reports that documentation commit's own 10-character prefix instead of `ddc3b0b1d2`. That prefix is
+expected to differ for every documentation-only commit, since each commit has its own hash; it is
+**logically impossible** for a document to embed the hash of the very commit that adds it. The only
+*source* difference between the pinned source commit and the delivered commit is this single markdown file:
 
 **Command:**
 
@@ -515,6 +513,15 @@ git diff ddc3b0b1d23c..HEAD --name-status
 ```
 A	blitzy/documentation/k6_ddc3b0b1d23c.md
 ```
+
+Because that one added file is documentation and is never compiled into the binary, the compiled behavior -
+and therefore every consolidation result proven below - is identical no matter which of the two commits the
+binary is built from. The two canonically built binaries are **not** byte-for-byte identical, however: Go's
+default VCS stamping embeds the build's `vcs.revision` (whose first 10 hex characters become the banner's
+`commit/...` prefix [lib/consts/consts.go:30-35,52]) together with the commit's `vcs.time`. The pinned and
+delivered binaries therefore differ in exactly those embedded VCS-metadata bytes and in nothing else - a
+difference the banners above surface through the `commit/...` prefix (`commit/ddc3b0b1d2` versus the
+delivered-commit prefix).
 
 In short: the canonical, reproducible banner is **`commit/ddc3b0b1d2`**, obtained by building at the pinned
 source commit `ddc3b0b1d` as shown above; a build from the delivered (doc-committed) tree stamps that
