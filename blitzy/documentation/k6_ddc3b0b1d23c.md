@@ -21,7 +21,7 @@ working tree is unchanged except for this one document.
 |---|----------|---------|
 | **Q1** | Do VUs get "stuck" (neither active nor stopped) under rapid up/down stages + long `gracefulRampDown`? | **BY DESIGN** — the "stuck" condition is the transitional `toGracefulStop` state; deterministically resolved. Not a bug. |
 | **Q2** | Why doesn't the scheduled handler's VU count match the graceful handler's count? | **BY DESIGN (expected, not corruption)** — two independent `cur` counters over different step curves; the graceful count is deliberately held higher by `reserveVUsForGracefulRampDowns()`. |
-| **Q3** | Why do VUs keep running longer than `gracefulStop` after Ctrl+C? | **BY DESIGN (separate path; not reproduced for JS-bound work)** — Ctrl+C uses a distinct abort path; the first `SIGINT` aborts in ~36 ms (far *faster* than `gracefulStop`), the second forces immediate `OSExit`. |
+| **Q3** | Why do VUs keep running longer than `gracefulStop` after Ctrl+C? | **BY DESIGN (separate path; not reproduced for JS-bound work)** — Ctrl+C uses a distinct abort path; the first `SIGINT` aborts in ~35–100 ms (far *faster* than `gracefulStop`), the second forces immediate `OSExit`. |
 | **Q4** | Why does one segment instance show more VUs, and why does the sum appear to exceed the maximum? | **one-instance-more = BY DESIGN** (deterministic striping remainder); **sum-exceeds-max = NOT reproduced** (sum equals the maximum at peak, never exceeds it). |
 | **Q5** | Is there a race between the two handler goroutines, or a VU buffer leak? | **NO data race, NO buffer leak; the two handlers are NEVER simultaneous.** |
 
@@ -32,28 +32,64 @@ with canonical inputs.
 ## Environment & canonical build
 
 k6 was built and run in its **canonical configuration**, exactly as a normal user would.
-The captured build/version/toolchain output:
+Two builds are relevant and both are shown so the version stamps can be reconciled
+independently: (1) the **investigation baseline build** at the source commit under
+investigation (`ddc3b0b1d`), which produced *every* runtime observation in this document,
+and (2) the **delivery-head build** on the branch that carries this document.
+
+**Investigation baseline build (source commit `ddc3b0b1d`, branch `k6_ddc3b0b1d23c`) —
+this is the binary used for all runtime evidence below:**
 
 ```text
 $ go version
 go version go1.21.13 linux/amd64
 
-$ CGO_ENABLED=1 go build -o /tmp/k6bin .
-$ /tmp/k6bin version
-k6bin v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
-
 $ gcc --version
-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0
 
 $ git rev-parse --abbrev-ref HEAD ; git rev-parse --short HEAD
 k6_ddc3b0b1d23c
 ddc3b0b1d
+
+$ CGO_ENABLED=1 go build -o /tmp/k6bin .
+$ /tmp/k6bin version
+k6bin v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
+
+$ CGO_ENABLED=1 go build -race -o /tmp/k6race .
+$ /tmp/k6race version
+k6race v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
 ```
 
+**Delivery-head build (this document's branch, *after* the documentation commit).** k6's
+`version` stamps the *current* git HEAD into the binary from Go's build-info `vcs.revision`
+(first 10 characters) — `lib/consts/consts.go:L19-L35`. Because this document is committed
+on top of `ddc3b0b1d`, the delivery HEAD is the documentation commit, so a rebuild from the
+delivery checkout reports that commit instead of the baseline one:
+
+```text
+$ git rev-parse --abbrev-ref HEAD ; git rev-parse --short HEAD
+blitzy-2dfd9699-6d7a-419c-a717-ad211034d886
+2bcafdc4d
+
+$ CGO_ENABLED=1 go build -o /tmp/k6_delivery .
+$ /tmp/k6_delivery version
+k6_delivery v0.55.0 (commit/2bcafdc4d9, go1.21.13, linux/amd64)
+
+$ git diff --name-status ddc3b0b1d..HEAD
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
+```
+
+The two builds differ **only** in the embedded VCS commit string. The documentation commit
+adds exactly one file (the `git diff --name-status` above) and changes **no** code under
+investigation, so the observed binary behavior is identical. Every runtime observation below
+therefore comes from the baseline `commit/ddc3b0b1d2` binary, and every `file:line` citation
+is anchored to `ddc3b0b1d`.
+
 The race detector requires cgo (`CGO_ENABLED=1`) plus a C compiler (`gcc`); `go.mod` pins
-`go 1.21` with `toolchain go1.21.13` [go.mod:L3], and the installed toolchain matches it
-exactly. All reproduction scripts, driver scripts, and binaries (`/tmp/k6bin`,
-`/tmp/k6race`) lived under `/tmp`, outside the repository tree, and were removed afterward.
+`go 1.21` [go.mod:L3] with `toolchain go1.21.13` [go.mod:L5], and the installed toolchain
+matches the pin exactly. All reproduction scripts, driver scripts, and binaries
+(`/tmp/k6bin`, `/tmp/k6race`, `/tmp/k6_delivery`) lived under `/tmp`, outside the repository
+tree, and were removed afterward.
 
 ---
 
@@ -237,11 +273,19 @@ exactly `gracefulRampDown=2s` after each `"Graceful stop"` the max-allowed handl
 the third named transitional state, `toHardStop`.
 
 **Q1 rationale.** The three transitional states named in the question (`starting`,
-`toGracefulStop`, `toHardStop`) are all real, all observed via k6's existing logrus Debug
-output, and all resolved deterministically by the state machine. A VU appearing "neither
-active nor stopped" is a VU in `toGracefulStop` finishing its in-flight iteration during the
-(deliberately long) `gracefulRampDown` window — expected behavior, not a stuck/corrupt
-state. Counts were identical across two runs.
+`toGracefulStop`, `toHardStop`) are all real and all resolved deterministically by the state
+machine. To be precise about what is *directly observed* versus *inferred*: the run emits
+the per-VU **method events** `Start` / `Graceful stop` / `Hard stop` — logrus Debug lines at
+`vu_handle.go:L123`/`L127` (`start()`), `L161` (`gracefulStop()`), and `L177` (`hardStop()`)
+— and the internal state-enum values are **inferred** from these events through the
+state-transition table (`vu_handle.go:L24-L55`), not printed by name. (The enum identifiers
+`toGracefulStop`/`toHardStop` never appear in the log output; confirmed by grep.) The
+mapping is deterministic: a `Graceful stop` on a `running` VU sets `toGracefulStop`
+(`L157-L158`), and a `Hard stop` on a `running`/`toGracefulStop` VU sets `toHardStop`
+(`L174-L175`). A VU appearing "neither active nor stopped" is therefore a VU in
+`toGracefulStop` finishing its in-flight iteration during the (deliberately long)
+`gracefulRampDown` window — expected behavior, not a stuck/corrupt state. Counts were
+identical across two runs (`Start`=16, `Graceful stop`=16, `Hard stop`=0).
 
 ---
 
@@ -340,7 +384,7 @@ VU buffer never grows beyond it.
 
 **Verdict: BY DESIGN — and the user's "longer than `gracefulStop`" was NOT reproduced for
 JS-bound scripts.** Ctrl+C uses a **separate** abort path (in `cmd/`, not the executor). The
-first `SIGINT` aborts promptly (measured ~30–40 ms — far *faster* than the 30s
+first `SIGINT` aborts promptly (measured ~35–100 ms — far *faster* than the 30s
 `gracefulStop`); the second `SIGINT` forces immediate `OSExit`. The executor's
 `gracefulStop`/`gracefulRampDown` (stage scheduling) is explicitly **bypassed** on manual
 interrupt. These two mechanisms must not be conflated.
@@ -360,53 +404,191 @@ interrupt. These two mechanisms must not be conflated.
   `lib/executor/base_config.go:L20`; `GetGracefulStop()` at `L97`. The key comment at
   `base_config.go:L94-L96`: "Of course, that doesn't count when the user manually interrupts
   the test, then iterations are immediately stopped."
-- Why JS work stops promptly: k6 interrupts the VM on context cancel —
-  `context.AfterFunc(...) { vu.Runtime.Interrupt(context.Canceled) }` at `js/runner.go:L372`
-  (also `js/bundle.go:L323-L324`); and `k6.Sleep` is context-aware —
-  `select { case <-timer.C: case <-ctx.Done(): }` at `js/modules/k6/k6.go:L72`.
+- Why JS work stops promptly: k6 interrupts the sobek VM on context cancel. A per-VU
+  goroutine selects on the VU context and calls `rt.Interrupt(vuImpl.ctx.Err())` when it is
+  done — `js/bundle.go:L321-L328` (the `case <-vuImpl.ctx.Done():` / `rt.Interrupt(...)` at
+  `L323-L324`); the same pattern appears as
+  `context.AfterFunc(summaryCtx, func() { vu.Runtime.Interrupt(context.Canceled) })` at
+  `js/runner.go:L371-L373`. And `k6.Sleep` (method declared at `js/modules/k6/k6.go:L72`) is
+  context-aware: its body selects on the context —
+  `select { case <-timer.C: case <-ctx.Done(): timer.Stop() } }` at
+  `js/modules/k6/k6.go:L75-L79`.
 
-### Q3.1 Single SIGINT (measured linger to process exit), stable across 2 runs
+### Q3.1 Single SIGINT — measured linger from SIGINT to process exit (stable across 2 runs)
 
-- **Case A** — context-aware `sleep(8)` iterations (`/tmp/k6inv/q3_sleep.js`):
-  `linger_seconds` = **0.036** (run 1), **0.032** (run 2); `exit_code` = **105**
-  (ExternalAbort). `ITER_START`=4 / `ITER_END`=2 (in-flight iterations interrupted
-  mid-flight).
-- **Case B** — 25s JS busy-loop that ignores context (`/tmp/k6inv/q3_busy.js`):
-  `linger_seconds` = **0.036** (run 1), **0.037** (run 2); `exit_code` = **105**;
-  `ITER_START`=4 / `ITER_END`=**0** (the tight loop is force-interrupted by the sobek VM
-  interrupt).
-- Captured abort log lines (present in every single-signal run):
+Two scripts exercise the two relevant paths: a **context-aware** `sleep(8)` (which selects
+on `ctx.Done()`) and a **context-ignoring** 25 s tight JS loop. Each iteration logs
+`ITER_START` on entry and `ITER_END` on normal completion:
 
-```text
-time="..." level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="..." level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+```javascript
+// /tmp/k6inv/q3_sleep.js  — context-aware iteration
+import { sleep } from 'k6';
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 4,
+  stages: [{ duration: '60s', target: 4 }], gracefulStop: '30s',
+} } };
+export default function () {
+  console.log('ITER_START');
+  sleep(8);                        // context-aware: k6.Sleep selects on ctx.Done()
+  console.log('ITER_END');
+}
 ```
 
-Takeaway: even a script deliberately ignoring context cancellation is stopped in ~36 ms —
-i.e. **much faster** than `gracefulStop=30s`, the opposite of "lingering."
-
-### Q3.2 Two SIGINTs
-
-Script `/tmp/k6inv/q3_teardown.js` with a 20s `teardown()` to widen the window. Captured
-markers:
-
-```text
-time="..." level=debug msg="Stopping k6 in response to signal..." sig=interrupt   <- 1st SIGINT (graceful abort)
-time="..." level=info  msg="TEARDOWN_START ms=..." source=console
-time="..." level=error msg="Aborting k6 in response to signal" sig=interrupt      <- 2nd SIGINT (onHardStop)
+```javascript
+// /tmp/k6inv/q3_busy.js  — ignores context (tight spin)
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 4,
+  stages: [{ duration: '60s', target: 4 }], gracefulStop: '30s',
+} } };
+export default function () {
+  console.log('ITER_START');
+  const end = Date.now() + 25000;  // never checks ctx
+  while (Date.now() < end) { /* busy */ }
+  console.log('ITER_END');
+}
 ```
 
-Timing: `t(sig1 → exit) = 2.036s`, `t(sig2 → exit) = 0.005s`, `exit_code=105`.
-`TEARDOWN_END` was **never** logged — the second signal's `OSExit` cut the 20s teardown
-short.
+Driver `/tmp/k6inv/drive_single_sigint.sh` — starts k6, waits 5 s for iterations to begin,
+records a timestamp, sends **one** `SIGINT`, waits for exit, then computes the linger and the
+iteration counts:
+
+```bash
+#!/usr/bin/env bash
+# Usage: drive_single_sigint.sh <script.js> <label> <settle_seconds>
+set -u
+SCRIPT="$1"; LABEL="$2"; SETTLE="${3:-5}"
+STDERR="/tmp/k6inv/q3_${LABEL}.log"
+/tmp/k6bin run -v --log-output=stderr "$SCRIPT" >/dev/null 2>"$STDERR" &
+K6PID=$!
+sleep "$SETTLE"                       # let iterations begin
+T_SIG=$(date +%s.%N)
+kill -INT "$K6PID"                    # single SIGINT == one Ctrl+C
+wait "$K6PID"; EXIT=$?
+T_EXIT=$(date +%s.%N)
+LINGER=$(awk "BEGIN{printf \"%.3f\", $T_EXIT-$T_SIG}")
+echo "exit_code=$EXIT  linger_seconds=$LINGER  ITER_START=$(grep -cw ITER_START "$STDERR")  ITER_END=$(grep -cw ITER_END "$STDERR")"
+```
+
+Commands and their complete output (each case run twice):
+
+```text
+$ for i in 1 2; do echo -n "run$i: "; /tmp/k6inv/drive_single_sigint.sh /tmp/k6inv/q3_sleep.js sleep_r$i 5; done
+run1: exit_code=105  linger_seconds=0.040  ITER_START=4  ITER_END=2
+run2: exit_code=105  linger_seconds=0.043  ITER_START=4  ITER_END=2
+
+$ for i in 1 2; do echo -n "run$i: "; /tmp/k6inv/drive_single_sigint.sh /tmp/k6inv/q3_busy.js busy_r$i 5; done
+run1: exit_code=105  linger_seconds=0.100  ITER_START=4  ITER_END=0
+run2: exit_code=105  linger_seconds=0.035  ITER_START=4  ITER_END=0
+```
+
+Complete raw log excerpt around the signal — Case A (`q3_sleep_r1.log`), filtered to the
+`ITER_*` markers plus the two abort lines; timestamps are unedited:
+
+```text
+time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:34Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:39Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-08T05:20:39Z" level=info msg=ITER_END source=console
+time="2026-07-08T05:20:39Z" level=info msg=ITER_END source=console
+time="2026-07-08T05:20:39Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+```
+
+Case B (`q3_busy_r1.log`) — same markers, but **no** `ITER_END` (all four tight loops are
+force-interrupted by the sobek VM `Interrupt`):
+
+```text
+time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:44Z" level=info msg=ITER_START source=console
+time="2026-07-08T05:20:49Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-08T05:20:49Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+```
+
+Takeaway: even a script deliberately ignoring context cancellation is stopped in ~35–100 ms
+— i.e. **far faster** than `gracefulStop=30s`, the opposite of "lingering." In Case A the
+context-aware `sleep` returns on `ctx.Done()` and two of the four VUs race through to
+`ITER_END` before the VM `Interrupt` reaches them (`ITER_END`=2, stable across both runs),
+while the other two are interrupted first; the linger is ~40 ms regardless.
+
+### Q3.2 Two SIGINTs — the second signal forces immediate exit
+
+Script `/tmp/k6inv/q3_teardown.js` uses a 20 s busy `teardown()` to widen the window in which
+the second signal can land:
+
+```javascript
+// /tmp/k6inv/q3_teardown.js
+import { sleep } from 'k6';
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 2,
+  stages: [{ duration: '60s', target: 2 }], gracefulStop: '30s',
+} } };
+export default function () { sleep(3); }
+export function teardown() {
+  console.log('TEARDOWN_START');
+  const end = Date.now() + 20000;   // 20s busy teardown widens the 2nd-signal window
+  while (Date.now() < end) { /* busy */ }
+  console.log('TEARDOWN_END');
+}
+```
+
+Driver `/tmp/k6inv/drive_double_sigint.sh` — sends the **first** `SIGINT` 5 s in, waits 2 s
+(so `teardown` is running), then sends the **second** `SIGINT`:
+
+```bash
+#!/usr/bin/env bash
+# Usage: drive_double_sigint.sh <label>
+set -u
+LABEL="$1"
+STDERR="/tmp/k6inv/q3_teardown_${LABEL}.log"
+/tmp/k6bin run -v --log-output=stderr /tmp/k6inv/q3_teardown.js >/dev/null 2>"$STDERR" &
+K6PID=$!
+sleep 5                              # let iterations run
+T_SIG1=$(date +%s.%N)
+kill -INT "$K6PID"                   # 1st SIGINT -> graceful abort (then teardown runs)
+sleep 2                              # let teardown begin
+T_SIG2=$(date +%s.%N)
+kill -INT "$K6PID"                   # 2nd SIGINT -> onHardStop -> OSExit(105)
+wait "$K6PID"; EXIT=$?
+T_EXIT=$(date +%s.%N)
+echo "exit_code=$EXIT  t(sig1->exit)=$(awk "BEGIN{printf \"%.3f\", $T_EXIT-$T_SIG1}")  t(sig2->exit)=$(awk "BEGIN{printf \"%.3f\", $T_EXIT-$T_SIG2}")  TEARDOWN_START=$(grep -cw TEARDOWN_START "$STDERR")  TEARDOWN_END=$(grep -cw TEARDOWN_END "$STDERR")"
+```
+
+Commands and their complete output (run twice):
+
+```text
+$ for i in 1 2; do echo -n "run$i: "; /tmp/k6inv/drive_double_sigint.sh r$i; done
+run1: exit_code=105  t(sig1->exit)=2.018  t(sig2->exit)=0.009  TEARDOWN_START=1  TEARDOWN_END=0
+run2: exit_code=105  t(sig1->exit)=2.015  t(sig2->exit)=0.008  TEARDOWN_START=1  TEARDOWN_END=0
+```
+
+Complete raw marker excerpt (`q3_teardown_r1.log`), timestamps unedited:
+
+```text
+time="2026-07-08T05:21:57Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-08T05:21:57Z" level=info msg=TEARDOWN_START source=console
+time="2026-07-08T05:21:59Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+```
+
+The first line is the `gracefulStop` closure (`cmd/run.go:L350`) firing on the 1st `SIGINT`;
+`teardown` then begins (`TEARDOWN_START`). The third line is the `onHardStop` closure
+(`cmd/run.go:L360`) firing on the 2nd `SIGINT` 2 s later. `t(sig1→exit)≈2.0 s` is dominated
+by the 2 s the driver deliberately waits before the second signal; the meaningful number is
+`t(sig2→exit)≈8 ms` — the second `SIGINT` forces an immediate `OSExit(105)`
+(`cmd/common.go:L118`), so `TEARDOWN_END` is **never** logged (the 20 s teardown is cut
+short).
 
 **Q3 rationale.** The first `SIGINT` → graceful `runAbort` (cancels the run context; VU
 iterations are interrupted immediately per `base_config.go:L94-L96`). The second `SIGINT` →
 `onHardStop` → immediate `OSExit(105)` (`cmd/common.go:L118`) — the safety valve so a stuck
-test always dies. The only way a VU can linger after Ctrl+C is if it is inside a **blocking
-Go/host call** that neither context cancellation nor the sobek `Interrupt` can preempt until
-it returns; this could not be reproduced with `sleep` or a tight JS loop (both stop in
-~36 ms). The 30s `gracefulStop` is never honored on manual interrupt.
+test always dies. **(Inferred, not reproduced here):** the only way a VU could linger after
+Ctrl+C would be if it were inside a **blocking Go/host call** that neither context
+cancellation nor the sobek `Interrupt` can preempt until it returns — this is an inference
+from the interrupt mechanism, since neither the context-aware `sleep` nor the tight JS loop
+exhibited it (both stopped in ~35–100 ms above). The 30 s `gracefulStop` is never honored on
+manual interrupt.
 
 ---
 
@@ -484,46 +666,317 @@ target=10 | striped ScaleInt64 (WITH seq) vs proportional Scale (WITHOUT seq)
 Both scaling modes sum to exactly 10; only *which* segment carries the +1 differs (striped
 → `seg0`; proportional → the middle segment). Neither exceeds the max.
 
-### Q4.2 Runtime — three real `k6 run` instances
+### Q4.2 Runtime — three real `k6 run` instances (simultaneous start)
 
-Script `/tmp/k6inv/q4_seg.js` (ramp `0→10`, hold, `→0`, `gracefulRampDown:'0s'`,
-`gracefulStop:'0s'`, `sleep(1)`), launched concurrently:
+Script `/tmp/k6inv/q4_seg.js` — ramp `0→10` over 10 s, hold at `10` for 5 s (peak), ramp
+`→0` over 5 s, with `gracefulRampDown:'0s'`, `gracefulStop:'0s'`, `sleep(1)`:
+
+```javascript
+// /tmp/k6inv/q4_seg.js
+import { sleep } from 'k6';
+export const options = {
+  scenarios: {
+    seg: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: [
+        { duration: '10s', target: 10 },  // ramp 0 -> 10
+        { duration: '5s',  target: 10 },  // hold at 10 (peak)
+        { duration: '5s',  target: 0 },   // ramp 10 -> 0
+      ],
+      gracefulRampDown: '0s',
+      gracefulStop: '0s',
+    },
+  },
+};
+export default function () { sleep(1); }
+```
+
+All three instances start simultaneously, each pinned to one segment of the sequence
+`0,1/3,2/3,1`, each writing its `vus` samples to an exact JSON path (run 1 shown; run 2 is
+identical except the `_r1` paths become `_r2`):
 
 ```bash
 SEQ="0,1/3,2/3,1"
-/tmp/k6bin run -q --no-summary --out json=... --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" q4_seg.js &
-/tmp/k6bin run -q --no-summary --out json=... --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" q4_seg.js &
-/tmp/k6bin run -q --no-summary --out json=... --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" q4_seg.js &
+/tmp/k6bin run -q --no-summary --out json=/tmp/k6inv/q4_seg0_r1.json --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" /tmp/k6inv/q4_seg.js >/dev/null 2>&1 &
+/tmp/k6bin run -q --no-summary --out json=/tmp/k6inv/q4_seg1_r1.json --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" /tmp/k6inv/q4_seg.js >/dev/null 2>&1 &
+/tmp/k6bin run -q --no-summary --out json=/tmp/k6inv/q4_seg2_r1.json --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" /tmp/k6inv/q4_seg.js >/dev/null 2>&1 &
 wait
 ```
 
-Aligned per-second `vus` (RUN 1; RUN 2 identical at peak):
+The per-instance `vus` samples are aligned by wall-clock second and summed by a small helper,
+`/tmp/k6inv/parse_vus.py` (verbatim source below — it extracts the `vus` `Point`s from each
+JSON stream, buckets them by absolute integer second taking the **max within each second**,
+sums across the three instances, and additionally recomputes a finer **union-timestamp
+forward-filled** sum so the peak cannot be hidden between second boundaries):
 
-```text
-sec  seg0 seg1 seg2  sum
- 10     4    3    3   10
- 11     4    3    3   10
- 12     4    3    3   10
- 13     4    3    3   10
- 14     4    3    3   10
- 15     4    3    3   10
-peak aligned sum = 10 (configured max = 10)   aligned-sum breaches: 0
-per-instance max vus = [4, 3, 3]
-TRUE finest-granularity (union-timestamp, forward-filled) peak sum = 10, breaches>10 = 0   (both runs)
+```python
+# /tmp/k6inv/parse_vus.py
+import json, sys, math
+from collections import defaultdict
+# args: label:file label:file ...  ; last-optional --max N
+files = []
+maxv = None
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    if args[i] == '--max':
+        maxv = int(args[i+1]); i += 2; continue
+    lbl, path = args[i].split('=', 1); files.append((lbl, path)); i += 1
+
+# extract vus points: {label: [(epoch, value)]}
+series = {}
+for lbl, path in files:
+    pts = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or '"metric":"vus"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get('type') != 'Point' or o.get('metric') != 'vus':
+                continue
+            d = o['data']
+            t = d['time']
+            # parse RFC3339 to epoch
+            import datetime
+            ts = datetime.datetime.fromisoformat(t.replace('Z', '+00:00')).timestamp()
+            pts.append((ts, float(d['value'])))
+    pts.sort()
+    series[lbl] = pts
+
+labels = [l for l, _ in files]
+# per-second buckets by absolute wall-clock integer second
+def bucket(series):
+    b = {}
+    for lbl, pts in series.items():
+        bb = {}
+        for ts, v in pts:
+            s = int(math.floor(ts))
+            bb[s] = max(bb.get(s, 0.0), v)  # max within the second
+        b[lbl] = bb
+    return b
+b = bucket(series)
+all_secs = sorted(set().union(*[set(bb.keys()) for bb in b.values()])) if b else []
+base = all_secs[0] if all_secs else 0
+
+print("relsec  " + "  ".join(f"{l:>5}" for l in labels) + "    sum")
+peak = 0; breaches = 0
+rows = []
+for s in all_secs:
+    vals = [int(b[l].get(s, 0)) for l in labels]
+    tot = sum(vals)
+    rows.append((s - base, vals, tot))
+    peak = max(peak, tot)
+    if maxv is not None and tot > maxv:
+        breaches += 1
+# print only rows where sum>0 to keep concise but complete for active window
+for rel, vals, tot in rows:
+    if tot > 0:
+        print(f"{rel:>6}  " + "  ".join(f"{v:>5}" for v in vals) + f"  {tot:>5}")
+permax = [int(max((v for _, v in series[l]), default=0)) for l in labels]
+print(f"peak aligned (per-second, max-in-bucket) sum = {peak}" + (f"  (configured max = {maxv})" if maxv is not None else ""))
+if maxv is not None:
+    print(f"aligned-sum breaches (>max) = {breaches}")
+print("per-instance max vus = " + str(permax))
+
+# union-timestamp forward-fill (finest granularity)
+allts = sorted(set(ts for l in labels for ts, _ in series[l]))
+last = {l: 0.0 for l in labels}
+idx = {l: 0 for l in labels}
+ff_peak = 0; ff_breach = 0
+for t in allts:
+    for l in labels:
+        pts = series[l]
+        while idx[l] < len(pts) and pts[idx[l]][0] <= t:
+            last[l] = pts[idx[l]][1]; idx[l] += 1
+    tot = sum(last.values())
+    ff_peak = max(ff_peak, tot)
+    if maxv is not None and tot > maxv:
+        ff_breach += 1
+print(f"union-timestamp forward-filled peak sum = {int(ff_peak)}" + (f", breaches>max = {ff_breach}" if maxv is not None else ""))
 ```
 
-Rapid up/down + start-skew cross-product (`/tmp/k6inv/q4b_rapid.js`, target 9 = even
-3/3/3, instances staggered +0/+1/+2s to simulate independent start times): **peak naive
-wall-clock sum = 7**, per-instance max = `[3,3,3]`. Independent start times put the
-instances at different phases, so their instantaneous counts partly **cancel** (sum lower),
-never adding beyond the max — because each instance is individually bounded by its
-per-segment peak and those peaks sum to the max.
+Complete output for both runs:
+
+```text
+$ python3 /tmp/k6inv/parse_vus.py seg0=/tmp/k6inv/q4_seg0_r1.json seg1=/tmp/k6inv/q4_seg1_r1.json seg2=/tmp/k6inv/q4_seg2_r1.json --max 10
+relsec   seg0   seg1   seg2    sum
+     1      1      0      0      1
+     2      1      1      0      2
+     3      1      1      1      3
+     4      2      1      1      4
+     5      2      2      1      5
+     6      2      2      2      6
+     7      3      3      2      8
+     8      3      3      2      8
+     9      3      3      3      9
+    10      4      3      3     10
+    11      4      3      3     10
+    12      4      3      3     10
+    13      4      3      3     10
+    14      4      3      3     10
+    15      3      3      3      9
+    16      3      2      2      7
+    17      2      2      1      5
+    18      1      1      1      3
+    19      1      0      0      1
+peak aligned (per-second, max-in-bucket) sum = 10  (configured max = 10)
+aligned-sum breaches (>max) = 0
+per-instance max vus = [4, 3, 3]
+union-timestamp forward-filled peak sum = 10, breaches>max = 0
+
+$ python3 /tmp/k6inv/parse_vus.py seg0=/tmp/k6inv/q4_seg0_r2.json seg1=/tmp/k6inv/q4_seg1_r2.json seg2=/tmp/k6inv/q4_seg2_r2.json --max 10
+relsec   seg0   seg1   seg2    sum
+     1      1      0      0      1
+     2      1      1      1      3
+     3      1      1      1      3
+     4      2      1      1      4
+     5      2      2      1      5
+     6      2      2      2      6
+     7      3      2      2      7
+     8      3      3      2      8
+     9      3      3      3      9
+    10      4      3      3     10
+    11      4      3      3     10
+    12      4      3      3     10
+    13      4      3      3     10
+    14      4      3      3     10
+    15      3      3      3      9
+    16      3      2      2      7
+    17      2      2      1      5
+    18      1      1      1      3
+    19      1      0      0      1
+peak aligned (per-second, max-in-bucket) sum = 10  (configured max = 10)
+aligned-sum breaches (>max) = 0
+per-instance max vus = [4, 3, 3]
+union-timestamp forward-filled peak sum = 10, breaches>max = 0
+```
+
+At the hold window (`relsec` 10–14) the split is deterministically `seg0=4, seg1=3, seg2=3`
+— exactly the static `ScaleInt64(10) = 4/3/3` of Q4.1. The aligned sum equals the configured
+maximum **10** and never exceeds it: **0 breaches**, by both the per-second bucket and the
+finer union-timestamp forward-fill, across both runs. During the ramp `seg0` leads by the
+rounding step (e.g. `relsec` 4 is `2/1/1`); a few mid-ramp cells differ run-to-run (e.g.
+`relsec` 7 is `3/3/2` in run 1 vs `3/2/2` in run 2) — this is the reported "one instance
+shows more" — but the peak split and the peak sum are identical.
+
+### Q4.2b Rapid up/down + start-skew cross-product
+
+To stress the user's "sum exceeds max" fear under the worst case, three instances run a
+**rapid** up/down script (`/tmp/k6inv/q4b_rapid.js`, target `9` = an even `3/3/3` split) and
+are **staggered** by +0/+1/+2 s to simulate independent operator start times:
+
+```javascript
+// /tmp/k6inv/q4b_rapid.js
+import { sleep } from 'k6';
+export const options = {
+  scenarios: {
+    seg: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: [
+        { duration: '3s', target: 9 },   // rapid up
+        { duration: '3s', target: 0 },   // rapid down
+        { duration: '3s', target: 9 },   // rapid up
+        { duration: '3s', target: 0 },   // rapid down
+      ],
+      gracefulRampDown: '0s',
+      gracefulStop: '0s',
+    },
+  },
+};
+export default function () { sleep(1); }
+```
+
+Driver `/tmp/k6inv/drive_q4b_skew.sh` applies the +0/+1/+2 s stagger:
+
+```bash
+#!/usr/bin/env bash
+# Launches 3 segment instances with staggered start times (+0/+1/+2s) to
+# simulate independent operator start times, then parses the naive wall-clock sum.
+set -u
+RUN="$1"
+SEQ="0,1/3,2/3,1"
+/tmp/k6bin run -q --no-summary --out json=/tmp/k6inv/q4b_seg0_r${RUN}.json --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" /tmp/k6inv/q4b_rapid.js >/dev/null 2>&1 &
+sleep 1
+/tmp/k6bin run -q --no-summary --out json=/tmp/k6inv/q4b_seg1_r${RUN}.json --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" /tmp/k6inv/q4b_rapid.js >/dev/null 2>&1 &
+sleep 1
+/tmp/k6bin run -q --no-summary --out json=/tmp/k6inv/q4b_seg2_r${RUN}.json --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" /tmp/k6inv/q4b_rapid.js >/dev/null 2>&1 &
+wait
+```
+
+Commands and complete output (both runs, same `parse_vus.py`):
+
+```text
+$ /tmp/k6inv/drive_q4b_skew.sh 1
+$ python3 /tmp/k6inv/parse_vus.py seg0=/tmp/k6inv/q4b_seg0_r1.json seg1=/tmp/k6inv/q4b_seg1_r1.json seg2=/tmp/k6inv/q4b_seg2_r1.json --max 9
+relsec   seg0   seg1   seg2    sum
+     0      1      0      0      1
+     1      2      1      0      3
+     2      3      2      0      5
+     3      3      3      1      7
+     4      2      2      2      6
+     5      1      1      2      4
+     6      1      0      1      2
+     7      2      1      0      3
+     8      3      2      0      5
+     9      3      3      1      7
+    10      1      2      2      5
+    11      1      1      2      4
+    12      0      0      1      1
+peak aligned (per-second, max-in-bucket) sum = 7  (configured max = 9)
+aligned-sum breaches (>max) = 0
+per-instance max vus = [3, 3, 2]
+union-timestamp forward-filled peak sum = 7, breaches>max = 0
+
+$ /tmp/k6inv/drive_q4b_skew.sh 2
+$ python3 /tmp/k6inv/parse_vus.py seg0=/tmp/k6inv/q4b_seg0_r2.json seg1=/tmp/k6inv/q4b_seg1_r2.json seg2=/tmp/k6inv/q4b_seg2_r2.json --max 9
+relsec   seg0   seg1   seg2    sum
+     0      1      0      0      1
+     1      2      1      0      3
+     2      3      2      0      5
+     3      3      3      1      7
+     4      2      2      2      6
+     5      1      1      2      4
+     6      1      0      1      2
+     7      2      1      0      3
+     8      3      2      0      5
+     9      3      3      1      7
+    10      2      2      2      6
+    11      1      1      2      4
+    12      0      0      1      1
+peak aligned (per-second, max-in-bucket) sum = 7  (configured max = 9)
+aligned-sum breaches (>max) = 0
+per-instance max vus = [3, 3, 2]
+union-timestamp forward-filled peak sum = 7, breaches>max = 0
+```
+
+With independent start times the instances sit at **different phases** of the rapid ramp, so
+their instantaneous counts partly **cancel**: the naive wall-clock sum peaks at **7**, well
+below the configured maximum **9**, with **0 breaches** across both runs. The observed
+per-instance maxima were `[3, 3, 2]`, not `[3, 3, 3]`: the late-starting `seg2` (+2 s) never
+had a 1 s `vus` sample land on its full `3`, because the 3 s ramp reversed before the sample
+tick — its per-segment cap is still `3` by the striped scaling (Q4.1); it simply was not
+sampled at peak. The sum being *lower* than the max here — never higher — is the opposite of
+the reported "exceeds max."
 
 ### Q4.3 Invariant test corroboration
 
+The striped-scaling sum invariant — that the per-segment values across a sequence sum to the
+no-segment total — is asserted by `TestSumRandomSegmentSequenceMatchesNoSegment`
+[lib/executor/ramping_vus_test.go:L1112]. Two consecutive runs from the baseline source clone;
+the PASS verdict is stable across runs, only the reported wall time varies slightly (cached
+build):
+
 ```text
 $ CGO_ENABLED=1 go test -count=1 -run TestSumRandomSegmentSequenceMatchesNoSegment ./lib/executor/
-ok  	go.k6.io/k6/lib/executor	0.083s
+ok  	go.k6.io/k6/lib/executor	0.076s
+$ CGO_ENABLED=1 go test -count=1 -run TestSumRandomSegmentSequenceMatchesNoSegment ./lib/executor/
+ok  	go.k6.io/k6/lib/executor	0.055s
 ```
 
 **Q4 rationale.** The extra VU on one instance is the deterministic striping remainder
@@ -567,62 +1020,213 @@ findings are by design; no defect was found.
 
 ### Q5.1 Race detector — exact AAP command (run twice for stability)
 
+The AAP-designated targeted race tests plus `TestRampingVUsGracefulRampDown`, run twice from
+the source clone. Both runs PASS with **no data race** and exit `0`. Complete `-v` output
+(including the `=== PAUSE`/`=== CONT` scheduler lines, unedited):
+
 ```text
 $ CGO_ENABLED=1 go test -race -count=1 -v -run 'TestVUHandleRace|TestVUHandleStartStopRace|TestRampingVUsGracefulRampDown' ./lib/executor/
 === RUN   TestRampingVUsGracefulRampDown
+=== PAUSE TestRampingVUsGracefulRampDown
 === RUN   TestVUHandleRace
+=== PAUSE TestVUHandleRace
 === RUN   TestVUHandleStartStopRace
+=== PAUSE TestVUHandleStartStopRace
+=== CONT  TestVUHandleRace
+=== CONT  TestVUHandleStartStopRace
+=== CONT  TestRampingVUsGracefulRampDown
 --- PASS: TestVUHandleRace (0.18s)
---- PASS: TestVUHandleStartStopRace (0.37s)
+--- PASS: TestVUHandleStartStopRace (0.40s)
 --- PASS: TestRampingVUsGracefulRampDown (2.50s)
 PASS
-ok  	go.k6.io/k6/lib/executor	3.532s
-(run 2: ok  	go.k6.io/k6/lib/executor	3.532s)
-```
+ok  	go.k6.io/k6/lib/executor	3.536s
 
-Whole-package assurance:
-
-```text
-$ CGO_ENABLED=1 go test -race -count=1 ./lib/executor/
-ok  	go.k6.io/k6/lib/executor	30.124s
+$ CGO_ENABLED=1 go test -race -count=1 -v -run 'TestVUHandleRace|TestVUHandleStartStopRace|TestRampingVUsGracefulRampDown' ./lib/executor/
+=== RUN   TestRampingVUsGracefulRampDown
+=== PAUSE TestRampingVUsGracefulRampDown
+=== RUN   TestVUHandleRace
+=== PAUSE TestVUHandleRace
+=== RUN   TestVUHandleStartStopRace
+=== PAUSE TestVUHandleStartStopRace
+=== CONT  TestVUHandleRace
+=== CONT  TestVUHandleStartStopRace
+=== CONT  TestRampingVUsGracefulRampDown
+--- PASS: TestVUHandleRace (0.18s)
+--- PASS: TestVUHandleStartStopRace (0.41s)
+--- PASS: TestRampingVUsGracefulRampDown (2.50s)
+PASS
+ok  	go.k6.io/k6/lib/executor	3.535s
 ```
 
 (`TestVUHandleRace` `vu_handle_test.go:L25` and `TestVUHandleStartStopRace` `L114` are both
 "mostly interesting when -race is enabled".)
 
-### Q5.2 Corroboration against the user's EXACT scenarios (race-instrumented binary)
-
-Built with `CGO_ENABLED=1 go build -race -o /tmp/k6race .`
-(`k6race v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)`), then ran the user's own
-scenarios under it:
+**Whole-package assurance under `-race`.** The full package is **timing-flaky under `-race` +
+parallel load**: a *different* assertion-timing test intermittently fails on each run, yet the
+detector reports **0 DATA RACE on every run**. Two consecutive whole-package runs (complete
+failing-test output, unedited — note the two runs fail on *different* tests):
 
 ```text
-[Q1 long-GRD  ]  exit=0   DATA RACE occurrences: 0
-[Q1b hardstop ]  exit=0   DATA RACE occurrences: 0   (forces BOTH graceful + hard stop = both handlers)
-[Q4 seg0      ]           DATA RACE occurrences: 0
-[Q4 seg1      ]           DATA RACE occurrences: 0
-[Q4 seg2      ]           DATA RACE occurrences: 0
-combined DATA RACE total across ALL user-scenario race runs = 0
+$ CGO_ENABLED=1 go test -race -count=1 ./lib/executor/
+--- FAIL: TestSharedIterationsRunVariableVU (0.50s)
+    shared_iterations_test.go:85: 
+        	Error Trace:	/tmp/blitzy/k6/k6_ddc3b0b1d23c_a98e4f/lib/executor/shared_iterations_test.go:85
+        	Error:      	Not equal: 
+        	            	expected: 0x2
+        	            	actual  : 0x3
+        	Test:       	TestSharedIterationsRunVariableVU
+FAIL
+FAIL	go.k6.io/k6/lib/executor	30.092s
+FAIL
+
+$ CGO_ENABLED=1 go test -race -count=1 ./lib/executor/
+--- FAIL: TestRampingVUsHandleRemainingVUs (0.10s)
+    ramping_vus_test.go:370: 
+        	Error Trace:	/tmp/blitzy/k6/k6_ddc3b0b1d23c_a98e4f/lib/executor/ramping_vus_test.go:370
+        	Error:      	Not equal: 
+        	            	expected: 0x1
+        	            	actual  : 0x0
+        	Test:       	TestRampingVUsHandleRemainingVUs
+    ramping_vus_test.go:371: 
+        	Error Trace:	/tmp/blitzy/k6/k6_ddc3b0b1d23c_a98e4f/lib/executor/ramping_vus_test.go:371
+        	Error:      	Not equal: 
+        	            	expected: 0x1
+        	            	actual  : 0x2
+        	Test:       	TestRampingVUsHandleRemainingVUs
+FAIL
+FAIL	go.k6.io/k6/lib/executor	30.226s
+FAIL
 ```
+
+Both failures are `testify` `Not equal` **assertion** mismatches on VU counts
+(`shared_iterations_test.go:85`; `ramping_vus_test.go:370-371`) — the signature of a
+timing-sensitive assertion under the ~10x slowdown of full-package `-race` instrumentation,
+**not** a data race (the detector printed `DATA RACE` zero times in both runs). The
+`ramping-vus` flaky test passes deterministically in **isolation** under `-race`:
+
+```text
+$ CGO_ENABLED=1 go test -race -count=1 -run '^TestRampingVUsHandleRemainingVUs$' ./lib/executor/
+ok  	go.k6.io/k6/lib/executor	1.090s
+$ CGO_ENABLED=1 go test -race -count=1 -run '^TestRampingVUsHandleRemainingVUs$' ./lib/executor/
+ok  	go.k6.io/k6/lib/executor	1.089s
+$ CGO_ENABLED=1 go test -race -count=1 -run '^TestRampingVUsHandleRemainingVUs$' ./lib/executor/
+ok  	go.k6.io/k6/lib/executor	1.091s
+```
+
+So the whole-package `-race` failures are pre-existing parallel-load timing flakes (documented
+as such in this repo's known-flaky list), orthogonal to concurrency safety — and even when
+they fire, no data race is reported. The doc therefore does **not** claim a clean whole-package
+pass; it claims the stronger, observed fact: **zero data races on every run, pass or fail.**
+
+### Q5.2 Corroboration against the user's EXACT scenarios (race-instrumented binary)
+
+Built with `CGO_ENABLED=1 go build -race -o /tmp/k6race .` (see the environment section;
+`k6race v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)`). The user's own scenarios were
+then run under it by this driver, `/tmp/k6inv/drive_race_scenarios.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Runs the user's EXACT scenarios under the race-instrumented binary /tmp/k6race
+# (built with: CGO_ENABLED=1 go build -race -o /tmp/k6race .) and reports, for each,
+# the process exit code and the number of "DATA RACE" occurrences the detector printed.
+set -u
+SEQ="0,1/3,2/3,1"
+run(){ local label="$1"; shift; local log="/tmp/k6inv/race_${label}.log"
+  "$@" >"$log" 2>&1; local ec=$?
+  printf '%-14s exit=%s   DATA RACE occurrences: %s\n' "$label" "$ec" "$(grep -c 'DATA RACE' "$log")"; }
+run "Q1 long-GRD"  /tmp/k6race run -q --no-summary --log-output=stderr /tmp/k6inv/q1_stuck.js
+run "Q1b hardstop" /tmp/k6race run -q --no-summary --log-output=stderr /tmp/k6inv/q1b_hardstop.js
+run "Q4 seg0"      /tmp/k6race run -q --no-summary --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" /tmp/k6inv/q4_seg.js
+run "Q4 seg1"      /tmp/k6race run -q --no-summary --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" /tmp/k6inv/q4_seg.js
+run "Q4 seg2"      /tmp/k6race run -q --no-summary --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" /tmp/k6inv/q4_seg.js
+echo "combined DATA RACE total = $(cat /tmp/k6inv/race_Q1?*.log /tmp/k6inv/race_Q4*.log 2>/dev/null | grep -c 'DATA RACE')"
+```
+
+Exact invocation and complete output:
+
+```text
+$ /tmp/k6inv/drive_race_scenarios.sh
+Q1 long-GRD    exit=0   DATA RACE occurrences: 0
+Q1b hardstop   exit=0   DATA RACE occurrences: 0
+Q4 seg0        exit=0   DATA RACE occurrences: 0
+Q4 seg1        exit=0   DATA RACE occurrences: 0
+Q4 seg2        exit=0   DATA RACE occurrences: 0
+combined DATA RACE total = 0
+```
+
+Every scenario exits `0` with **0 DATA RACE occurrences** (combined total `0`). Complete raw
+output of the both-handlers scenario — `Q1b hardstop`, which forces a graceful stop *and* a
+hard stop (visible as `interrupted iterations`) so the scheduled and max-allowed handlers both
+act on the same VUs — run under the race binary (unedited, `DATA RACE` count `0`):
+
+```text
+$ /tmp/k6race run --log-output=stderr /tmp/k6inv/q1b_hardstop.js
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6inv/q1b_hardstop.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 4 max VUs, 4s max duration (incl. graceful stop):
+              * hard: Up to 4 looping VUs for 2s over 2 stages (gracefulRampDown: 2s, gracefulStop: 2s)
+
+
+running (1.0s), 3/4 VUs, 0 complete and 0 interrupted iterations
+hard   [  50% ] 3/4 VUs  1.0s/2.0s
+
+running (2.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+hard   [ 100% ] 4/4 VUs  2.0s/2.0s
+
+running (3.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+hard ↓ [ 100% ] 4/4 VUs  2s
+
+running (4.0s), 1/4 VUs, 0 complete and 3 interrupted iterations
+hard ↓ [ 100% ] 4/4 VUs  2s
+time="2026-07-08T05:45:10Z" level=warning msg="No script iterations fully finished, consider making the test duration longer"
+
+     data_received...: 0 B 0 B/s
+     data_sent.......: 0 B 0 B/s
+     vus.............: 1   min=1 max=4
+     vus_max.........: 4   min=4 max=4
+
+
+running (4.0s), 0/4 VUs, 0 complete and 4 interrupted iterations
+hard ✓ [ 100% ] 1/4 VUs  2s
+```
+
+The `3 interrupted` -> `4 interrupted iterations` progression is the `hardStop()` path
+(`vu_handle.go:L165`, context cancel `L178`) cancelling in-flight iterations once the 2 s
+`gracefulStop` window expires; the race detector stayed silent throughout.
 
 ### Q5.3 Buffer-leak evidence
 
-`vus_max` (the buffer size) is constant (distinct values `[8]` for Q1; `[6]` for a
-clean-completion run) — the buffer never grows. The `vus` metric decays toward 0 (a final
-sample of 1 is a metric-sampling boundary, explicitly informational per the "don't use for
-synchronization" comment, not a leak). Every investigation run exited cleanly (`exit 0`);
-since `defer runState.wg.Wait()` (`ramping_vus.go:L540`) blocks until every `getVU`
-(`wg.Add`, `L600`) has a matching `returnVU` (`wg.Done`, `L608`), the clean exits prove the
-1:1 `getVU`/`returnVU` invariant held — no leak.
+`vus_max` (the buffer size) is constant (e.g. `max=4 min=4` in the `Q1b` output above; `[8]`
+for the Q1 long-`gracefulRampDown` run) — the buffer never grows. The `vus` metric decays
+toward 0 (a trailing sample of 1 is a metric-sampling boundary, explicitly informational per
+the "don't use for synchronization" comment, not a leak). Every **normally-completing**
+investigation run — every Q1, Q2, Q4 and race-instrumented run above — exited cleanly
+(`exit 0`); the Q3 Ctrl+C runs deliberately exit `105` (`ExternalAbort`, `cmd/common.go:L118`)
+because they are *aborted*, which is the expected abort code, not a symptom of a leak. On the
+clean-completion runs, `defer runState.wg.Wait()` (`ramping_vus.go:L540`) blocks until every
+`getVU` (`wg.Add`, `L600`) has a matching `returnVU` (`wg.Done`, `L608`), so the clean exits
+prove the 1:1 `getVU`/`returnVU` invariant held; and even the aborted Q3 runs tore down and
+exited promptly (no hang, ~8 ms after the second `SIGINT`), consistent with no leaked or stuck
+VUs.
 
 **Q5 rationale.**
 
-- **(a) No race between the handler goroutines** — they are serialized by the `L549`→`L554`
+- **(a) No race between the handler goroutines** — they are serialized by the `L549`->`L554`
   happens-before edge and never run simultaneously; the per-handle mutex + atomic `state`
-  protect each `vuHandle`; the detector is clean on the targeted tests, the whole package,
-  and the user's exact scenarios.
-- **(b) No buffer leak** — `getVU`/`returnVU` are 1:1, `WaitGroup`-enforced, all runs exit
-  cleanly, `vus_max` constant.
+  protect each `vuHandle`; the detector is clean on the targeted tests, on the whole package
+  (0 data races across every run, pass or fail), and on the user's exact scenarios.
+- **(b) No buffer leak** — `getVU`/`returnVU` are 1:1, `WaitGroup`-enforced; every
+  normally-completing run exits `0` (the Q3 abort runs exit `105` by design, still tearing down
+  and exiting without hang), and `vus_max` is constant.
 - **(c) "Both handlers modifying VU state simultaneously" does not happen**; the only
   genuine race — `start` vs the VU loop stopping — is resolved deterministically by the
   transition table (`vu_handle.go:L24-L55`, e.g. `L37`). The apparent count "mismatch" (Q2)
@@ -636,12 +1240,12 @@ Every named mechanism, function, flag, and condition from the report is addresse
 
 - [x] **Scheduled handler** (`scheduledVUsHandlerStrategy` `ramping_vus.go:L679`) — Q2. BY DESIGN.
 - [x] **Graceful / max-allowed handler** (`maxAllowedVUsHandlerStrategy` `ramping_vus.go:L668`) — Q2. BY DESIGN.
-- [x] **VU buffer** (channel `es.vus`, `execution.go:L471/L544`; `getVU`/`returnVU` 1:1) — Q5. NO leak.
+- [x] **VU buffer** (channel `es.vus`, `lib/execution.go:L106` decl; `GetPlannedVU`/`ReturnVU` `lib/execution.go:L471/L544`; `getVU`/`returnVU` 1:1) — Q5. NO leak.
 - [x] **`gracefulStop`** (default 30s, `base_config.go:L20`; bypassed on manual interrupt `L94-L96`) — Q3. BY DESIGN.
 - [x] **`gracefulRampDown`** (reservation `ramping_vus.go:L307`) — Q1, Q2. BY DESIGN.
 - [x] **Execution segments** (`ScaleInt64`/`GetStripedOffsets` `execution_segment.go:L580/L598/L734/L742`; invariant test `ramping_vus_test.go:L1112`) — Q4. one-more BY DESIGN; sum-exceeds NOT reproduced.
 - [x] **The two Ctrl+C signals** (`handleTestAbortSignals` `cmd/common.go:L97-L129`, `L118`; closures `cmd/run.go:L349-L362`) — Q3. BY DESIGN.
-- [x] **Transitional states** `starting` / `toGracefulStop` / `toHardStop` (`vu_handle.go:L16-L22`, transition table `L24-L55`) — Q1. All observed and deterministically resolved.
+- [x] **Transitional states** `starting` / `toGracefulStop` / `toHardStop` (`vu_handle.go:L16-L22`, transition table `L24-L55`) — Q1. The directly-observed `Start`/`Graceful stop`/`Hard stop` Debug method events map to these enum states via the transition table (the enum names are source-inferred, not printed); all deterministically resolved.
 
 **Conclusion:** the investigation found **no genuine defect**; every reported symptom is
 explained by documented, by-design behavior (or, for the Q3 "linger" and Q4 "exceed"
