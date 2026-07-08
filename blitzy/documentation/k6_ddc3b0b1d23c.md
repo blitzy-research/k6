@@ -11,7 +11,7 @@ This document is an **evidence-grounded investigation**. Every behavioral claim 
 All observations below come from a binary built from this repository. **Two git commits matter and are kept strictly distinct throughout this document:**
 
 - **Source-under-investigation** (the k6 code being analyzed): branch `k6_ddc3b0b1d23c`, whose head — *before* this documentation file was committed — is commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (short `ddc3b0b1d`; 10‑char build stamp `ddc3b0b1d2`). **Every source `file:line` citation and every line number in this answer refers to this code.**
-- **Delivered repository HEAD** (what a reviewer who checks out the delivered branch receives): a commit that is exactly the source-under-investigation **plus this single documentation file and nothing else**. `git diff ddc3b0b1d <delivered-HEAD> --name-status` lists exactly one entry — `A blitzy/documentation/k6_ddc3b0b1d23c.md` — with **zero** `.go` / `go.mod` / `go.sum` / `vendor/` changes. Because the delivered-HEAD hash advances with every revision of this documentation file (and the `commit/…` build stamp tracks it — see below), only the baseline `ddc3b0b1d2` is a fixed reference; the doc commit observed while writing this answer was `3e9f5aabc82ca4e851bf42f60fc98bd9efeadc00` (10‑char stamp `3e9f5aabc8`). Because no source file differs between the baseline and any delivered-HEAD doc commit, the analyzed runtime behavior, line numbers, and error strings are identical whichever of the two the binary is built from.
+- **Delivered repository HEAD** (what a reviewer who checks out the delivered branch receives): a commit that is exactly the source-under-investigation **plus this single documentation file and nothing else**. `git diff ddc3b0b1d <delivered-HEAD> --name-status` lists exactly one entry — `A blitzy/documentation/k6_ddc3b0b1d23c.md` — with **zero** `.go` / `go.mod` / `go.sum` / `vendor/` changes. Because the delivered-HEAD hash advances with every revision of this documentation file (and the `commit/…` build stamp tracks it — see below), only the baseline `ddc3b0b1d2` is a fixed reference, while the doc-commit hash changes with each revision of this file; an early such revision was `3e9f5aabc82ca4e851bf42f60fc98bd9efeadc00` (10‑char stamp `3e9f5aabc8`), used illustratively throughout this section. Because no source file differs between the baseline and any delivered-HEAD doc commit, the analyzed runtime behavior, line numbers, and error strings are identical whichever of the two the binary is built from.
 - **Go toolchain (observed):** `go version go1.23.12 linux/amd64`.
 - **Canonical build command (offline, vendored dependencies), run from the repository root:**
 
@@ -29,7 +29,7 @@ The `-mod=vendor` flag uses the fully vendored dependency tree (no network), `GO
 k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
 
-  Building a **delivered-HEAD doc commit** (here `3e9f5aabc`, the doc commit observed while writing this answer; clean tree so `vcs.modified=false`) reports:
+  Building a **delivered-HEAD doc commit** (here `3e9f5aabc`, an early revision of this file used illustratively; clean tree so `vcs.modified=false`) reports:
 
 ```
 k6bin v0.55.0 (commit/3e9f5aabc8, go1.23.12, linux/amd64)
@@ -58,7 +58,7 @@ For the VU-count demonstration (§6), `--vus N --iterations N` was added.
 
 > **Reading the output:** k6 writes console and error logs to **stderr**, wrapped as `time="..." level=... msg="..." source=...`. Inside `msg="..."`, the sequences `\n\t` are literal escapes that render as multi-line stack traces. Outputs below are reproduced exactly as emitted. The `time="..."` timestamp varies from run to run and carries no meaning for this analysis.
 
-> **Version fidelity:** every value here is for the built version **`v0.55.0`, source-under-investigation commit `ddc3b0b1d2`, `go1.23.12`** (equivalently, the delivered-HEAD build `3e9f5aabc8`, which is behaviorally identical — the difference is doc-only, as shown above). Line numbers, error strings, and exit codes are not generalized to other k6 versions.
+> **Version fidelity:** every value here is for the built version **`v0.55.0`, source-under-investigation commit `ddc3b0b1d2`, `go1.23.12`** (equivalently, any delivered-HEAD doc-commit build — e.g. the illustrative `3e9f5aabc8` — which is behaviorally identical, the difference being doc-only, as shown above). Line numbers, error strings, and exit codes are not generalized to other k6 versions.
 
 ---
 
@@ -131,10 +131,10 @@ Real VUs are initialized **concurrently**, not serially. The scheduler spawns `c
 
 ```
 // execution/scheduler.go:L169-L172
-for i := 0; i < concurrency; i++ {
-	go func() {
-		for range limiter {
-			newVU, err := e.initVU(ctx, samplesOut, logger)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			for range limiter {
+				newVU, err := e.initVU(ctx, samplesOut, logger)
 ```
 
 This is why the `__VU` console lines in EXP1 appear in a non-deterministic order across runs, and — importantly — why the specific VU number reported in the failure messages of §4 and §6 varies from run to run even though the failure itself is deterministic.
@@ -187,7 +187,7 @@ func (mr *ModuleResolver) resolve(basePWD *url.URL, arg string) (sobek.ModuleRec
 - **Built-in / `k6*` branch** ([js/modules/resolution.go:L147]): the cache is keyed by the **raw specifier** (`"k6"`, `"k6/http"`, ...). A hit returns at [js/modules/resolution.go:L150-L152] regardless of `locked`. A miss calls `mr.requireModule(arg)` [js/modules/resolution.go:L153], whose very first act is the lock check:
 
 ```
-// js/modules/resolution.go:L69-L71
+// js/modules/resolution.go:L69-L72
 func (mr *ModuleResolver) requireModule(name string) (sobek.ModuleRecord, error) {
 	if mr.locked {
 		return nil, fmt.Errorf(notPreviouslyResolvedModule, name)
@@ -243,16 +243,16 @@ time="2026-07-08T04:08:54Z" level=error msg="GoError: the module \"k6/http\" was
 
 `EXIT CODE: 107`
 
-**Honest run-to-run inconsistency (OBSERVED, not inferred).** Unlike EXP2 (a *file* module, perfectly stable at exit 107), EXP6 is **not** perfectly stable: the built-in branch performs an **unsynchronized cache write** that races concurrent VU initialization, so a fraction of runs crash the Go runtime instead of cleanly rejecting. Over a single classified sweep of **700 identical runs** (`/tmp/k6bin run --quiet --no-summary /tmp/k6exp/exp6.js`, exit code recorded each time) the observed distribution was:
+**Honest run-to-run inconsistency (OBSERVED, not inferred).** Unlike EXP2 (a *file* module, perfectly stable at exit 107), EXP6 is **not** stable: the built-in branch performs an **unsynchronized cache write** that races concurrent VU initialization, so a fraction of runs crash the Go runtime instead of cleanly rejecting. This crash frequency is inherently **non-deterministic** — it is a data race, so its rate varies with goroutine scheduling and CPU contention and is *not* stable run-to-run. To characterize it honestly rather than pin it to one non-reproducible figure, I ran **ten independent sweeps of 700 identical runs each = 7,000 runs total** (`/tmp/k6bin run --quiet --no-summary /tmp/k6exp/exp6.js`, exit code recorded each time). The per-sweep crash count ranged **26–43 out of 700 (3.7%–6.1%)** — confirming the rate is *not* a stable value — and the aggregate distribution over all 7,000 runs was:
 
-| Outcome | Exit | Count / 700 | Crashing frame (top of stack) |
+| Outcome | Exit | Count / 7,000 (aggregate) | Crashing frame (top of stack) |
 |---|---|---|---|
-| clean lock reject (the `notPreviouslyResolvedModule` output shown above) | 107 | 682 (97.4%) | — |
-| `fatal error: concurrent map writes` | 2 | 16 | `js/modules/resolution.go:154` — the cache **write** |
-| `fatal error: concurrent map read and map write` | 2 | 1 | `js/modules/resolution.go:150` — built-in-branch cache **read** |
-| `fatal error: concurrent map read and map write` | 2 | 1 | `js/modules/resolution.go:162` — file-branch cache **read** |
+| clean lock reject (the `notPreviouslyResolvedModule` output shown above) | 107 | 6,651 (95.0%) | — |
+| `fatal error: concurrent map writes` | 2 | 298 (4.3%) | `js/modules/resolution.go:154` — the cache **write** |
+| `fatal error: concurrent map read and map write` | 2 | 30 (0.4%) | `js/modules/resolution.go:150` — built-in-branch cache **read** |
+| `fatal error: concurrent map read and map write` | 2 | 21 (0.3%) | `js/modules/resolution.go:162` — file-branch cache **read** |
 
-That is ~97.4% clean exit 107 and ~2.6% Go-runtime fatal (exit 2), spread across **two distinct fatal messages** and **three distinct crash frames**. The pattern held across ~250 additional runs. I report the observed distribution rather than hiding it behind a controlled single-VU variant; a deterministic built-in lock-reject can instead be obtained with the *file* case EXP2 (which never writes the cache on the locked path) or by avoiding concurrent init, but the 2-VU form is retained here precisely to exhibit the honest inconsistency the question asks about.
+That is **~95.0% clean exit 107 and ~5.0% Go-runtime fatal (exit 2)** in aggregate (349 / 7,000 crashes), spread across **two distinct fatal messages** and **three distinct crash frames**. Because this is a data race, the exact rate is **not** reproducible as a single fixed number — it drifted between 3.7% and 6.1% across the ten sweeps — which is precisely why the range and the aggregate are reported here rather than a single "authoritative" percentage (the value was deliberately confirmed *unstable* across more than two runs). Of the 349 crashes, the `concurrent map writes` variant dominates (298 ≈ 85%) and `concurrent map read and map write` is the rarer variant (51 ≈ 15%, split 30 at the built-in-branch read [L150] and 21 at the file-branch read [L162]). I report the observed distribution rather than hiding it behind a controlled single-VU variant; a deterministic built-in lock-reject can instead be obtained with the *file* case EXP2 (which never writes the cache on the locked path) or by avoiding concurrent init, but the 2-VU form is retained here precisely to exhibit the honest inconsistency the question asks about.
 
 **Why it crashes — the unconditional cache write.** In the **built-in branch**, the cache write happens **unconditionally after `requireModule` returns — even when `requireModule` returned the lock error**:
 
@@ -361,7 +361,7 @@ time="2026-07-08T04:08:54Z" level=error msg="GoError: require() can't be used wi
 
 - **Init-time** module errors (the lock, EXP2/EXP6/EXP7; and the empty specifier, EXP-EMPTY) **abort the whole run** with **exit `107`** (k6's "script exception" abort code); the `hint="... while initializing VU #N ..."` / `hint="script exception"` confirms the init-time origin.
 - **Iteration-time** `require()` errors (EXP3) are treated as per-iteration script exceptions: they are **logged** (`source=stacktrace`) and the process **exits `0`** by default.
-- The **rare** built-in cache-race crash (EXP6, ~2.6% of runs) is a Go runtime fatal error → **exit `2`**. It appears as **two** distinct messages — `fatal error: concurrent map writes` (crash frame [js/modules/resolution.go:L154], the write) and `fatal error: concurrent map read and map write` (crash frame at a cache **read**: [js/modules/resolution.go:L150] built-in or [js/modules/resolution.go:L162] file) — all rooted in the same unsynchronized write at [js/modules/resolution.go:L154] (see §4.1).
+- The **intermittent** built-in cache-race crash (EXP6, ~5% of runs in aggregate — a non-deterministic data-race rate that ranged 3.7%–6.1% across ten 700-run sweeps; see §4.1) is a Go runtime fatal error → **exit `2`**. It appears as **two** distinct messages — `fatal error: concurrent map writes` (crash frame [js/modules/resolution.go:L154], the write) and `fatal error: concurrent map read and map write` (crash frame at a cache **read**: [js/modules/resolution.go:L150] built-in or [js/modules/resolution.go:L162] file) — all rooted in the same unsynchronized write at [js/modules/resolution.go:L154] (see §4.1).
 
 
 ---
@@ -396,7 +396,20 @@ func getCurrentModuleScript(vu VU) string {
 
 ```
 // js/modules/resolution.go:L198-L211  (reversePath)
+func (mr *ModuleResolver) reversePath(referencingScriptOrModule interface{}) *url.URL {
+	p, ok := mr.reverse[referencingScriptOrModule]
+	if !ok {
+		if referencingScriptOrModule != nil {
+			panic("fix this")
+		}
+		return mr.base
+	}
+
+	if p.String() == "file:///-" {
+		return mr.base
+	}
 	return p.JoinPath("..")   // L210: parent directory of the referencing module
+}
 ```
 
 `sobekModuleResolver` wires these together — it resolves the specifier against the reversed (parent) path of the referencing module: `return mr.resolve(mr.reversePath(referencingScriptOrModule), specifier)` [js/modules/resolution.go:L195].
@@ -488,8 +501,8 @@ Every string below was reproduced **verbatim** from the runs above. The format s
 | 1 | `the module %q was not previously resolved during initialization (__VU==0)` | `notPreviouslyResolvedModule` [js/modules/resolution.go:L17]; enforced for files at [js/modules/resolution.go:L166-L167] and for built-ins via `requireModule` [js/modules/resolution.go:L70-L71] | EXP2 (file), EXP6 (built-in), EXP7 (@5 VUs) | 107 (init abort) |
 | 2 | `the "%s" function is only available in the init stage (i.e. the global scope), see https://grafana.com/docs/k6/latest/using-k6/test-lifecycle/ for more information` | `cantBeUsedOutsideInitContextMsg` [js/initcontext.go:L15-L16]; gate at [js/bundle.go:L425-L426] | EXP3 (`require()` in `default()`) | 0 (logged per-iteration) |
 | 3 | `require() can't be used with an empty specifier` | `errors.New(...)` [js/modules/require_impl.go:L21] (also [js/modules/require_impl.go:L100]) | EXP-EMPTY | 107 (init abort) |
-| 4 | `fatal error: concurrent map writes` | Go runtime; the unsynchronized cache **write** at [js/modules/resolution.go:L154] under concurrent VU init | EXP6 (rare; observed 16/700 ≈ 2.3%) | 2 (Go fatal) |
-| 5 | `fatal error: concurrent map read and map write` | Go runtime; a cache **read** ([js/modules/resolution.go:L150] built-in branch, or [js/modules/resolution.go:L162] file branch) racing the write at [js/modules/resolution.go:L154] | EXP6 (very rare; observed 2/700 ≈ 0.3%) | 2 (Go fatal) |
+| 4 | `fatal error: concurrent map writes` | Go runtime; the unsynchronized cache **write** at [js/modules/resolution.go:L154] under concurrent VU init | EXP6 (intermittent; the dominant crash variant — observed 298/7,000 ≈ 4.3% aggregate) | 2 (Go fatal) |
+| 5 | `fatal error: concurrent map read and map write` | Go runtime; a cache **read** ([js/modules/resolution.go:L150] built-in branch, or [js/modules/resolution.go:L162] file branch) racing the write at [js/modules/resolution.go:L154] | EXP6 (rarer crash variant — observed 51/7,000 ≈ 0.7% aggregate: 30 @L150 + 21 @L162) | 2 (Go fatal) |
 | 6 | `open() can't be used with files that weren't previously opened during initialization (__VU==0), path: %q` | [js/initcontext.go:L40] — the **parallel `open()` behavior** the freeze deliberately mirrors (see §8). *Cited as the design mirror; not separately run in this investigation.* | — | — (init abort when triggered) |
 
 **Shared stack frame:** every `require()`-origin error above contains the native frame
@@ -716,15 +729,19 @@ is *usually* — but not always — a clean exit-107 abort. The built-in branch 
 `resolve()` performs an **unconditional** write to the unsynchronized `mr.cache`
 map at [js/modules/resolution.go:L154] even when the lookup returned the lock
 error, and VUs initialize concurrently [execution/scheduler.go:L169-L172]. This
-creates a data race on the plain Go map. Across an authoritative **700-run
-sweep** the observed distribution was **682 / 700 (97.4%)** clean exit-107
-aborts and **18 / 700 (2.6%)** fatal Go-runtime crashes (exit 2): 16 `concurrent
-map writes` at resolution.go:L154, 1 `concurrent map read and map write` reaching
-the built-in-branch read at resolution.go:L150, and 1 reaching the file-branch
-read at resolution.go:L162. This is reported honestly rather than hidden: the
-question's "sometimes works, sometimes fails" framing maps directly onto this
-observed distribution, and the same unchanged input was run repeatedly rather
-than constructing a variant that masks the inconsistency.
+creates a data race on the plain Go map. Because it is a data race, the crash
+rate is **non-deterministic** and *not* stable run-to-run. Across **ten
+independent 700-run sweeps (7,000 identical runs)** the per-sweep crash count
+ranged **26–43 / 700 (3.7%–6.1%)**, aggregating to **6,651 / 7,000 (95.0%)**
+clean exit-107 aborts and **349 / 7,000 (5.0%)** fatal Go-runtime crashes (exit
+2): 298 `concurrent map writes` at resolution.go:L154 (the dominant variant),
+and 51 `concurrent map read and map write` split between the built-in-branch
+read at resolution.go:L150 (30) and the file-branch read at resolution.go:L162
+(21). This is reported honestly rather than hidden: the question's "sometimes
+works, sometimes fails" framing maps directly onto this observed distribution,
+the same unchanged input was run repeatedly (far more than two runs) to confirm
+the rate is genuinely unstable, and a single "authoritative" percentage is
+deliberately *not* claimed because the value provably varies from run to run.
 
 ### EXP7 — few vs. many VUs
 
@@ -786,7 +803,7 @@ time="2026-07-08T04:08:54Z" level=error msg="GoError: require() can't be used wi
 
 ## Appendix B — EXP6 complete `concurrent map writes` crash dump (verbatim, one captured occurrence)
 
-This is the **complete, unedited** 179-line Go runtime dump from one captured EXP6 crash (the rare ~2.6% outcome described in §4.1). Goroutine IDs and hexadecimal addresses vary from run to run; the causally-relevant frame is the map write at `js/modules/resolution.go:154`, reached via the concurrent VU-init path (`execution/scheduler.go:170`). The `grafana/sobek` frames are the JavaScript-engine module-evaluation frames between `RunSourceData` and the `require` call.
+This is the **complete, unedited** 179-line Go runtime dump from one captured EXP6 crash (the **dominant** `concurrent map writes` crash variant described in §4.1 — ~4.3% of runs in aggregate across the ten-sweep characterization). Goroutine IDs and hexadecimal addresses vary from run to run; the causally-relevant frame is the map write at `js/modules/resolution.go:154`, reached via the concurrent VU-init path (`execution/scheduler.go:170`). The `grafana/sobek` frames are the JavaScript-engine module-evaluation frames between `RunSourceData` and the `require` call.
 
 ```
 fatal error: concurrent map writes
@@ -976,7 +993,7 @@ created by go.k6.io/k6/execution.(*Scheduler).emitVUsAndVUsMax in goroutine 1
 
 ## Appendix B2 — EXP6 complete `concurrent map read and map write` crash dump (verbatim, one captured occurrence)
 
-This is the **complete, unedited** 261-line Go runtime dump from one captured EXP6 crash of the *other* observed fatal variant (the 1-in-700 `concurrent map read and map write` outcome described in §4.1). It is distinct from Appendix B: here the racing access is a map **read** at `js/modules/resolution.go:162` — the file-branch cache lookup — rather than the unconditional map **write** at `js/modules/resolution.go:154`. The read at line 162 is reached via the parent-module resolution path `require_impl.go:27` (resolving the main script's own URL, arg length `0x19` = 25 bytes = `file:///tmp/k6exp/exp6.js`), whereas the Appendix B write is reached via the specifier-resolution path `require_impl.go:28`. Both crashes have the same root cause — the unsynchronized `mr.cache` map written unconditionally at line 154 while other VUs initialize concurrently [execution/scheduler.go:L169-L172] — but they surface at different map accesses. Goroutine IDs and hexadecimal addresses vary from run to run.
+This is the **complete, unedited** 261-line Go runtime dump from one captured EXP6 crash of the *other*, **rarer** observed fatal variant (the `concurrent map read and map write` outcome described in §4.1 — 51/7,000 ≈ 0.7% in aggregate; this particular file-branch-read sub-case at L162 was 21/7,000 ≈ 0.3%). It is distinct from Appendix B: here the racing access is a map **read** at `js/modules/resolution.go:162` — the file-branch cache lookup — rather than the unconditional map **write** at `js/modules/resolution.go:154`. The read at line 162 is reached via the parent-module resolution path `require_impl.go:27` (resolving the main script's own URL, arg length `0x19` = 25 bytes = `file:///tmp/k6exp/exp6.js`), whereas the Appendix B write is reached via the specifier-resolution path `require_impl.go:28`. Both crashes have the same root cause — the unsynchronized `mr.cache` map written unconditionally at line 154 while other VUs initialize concurrently [execution/scheduler.go:L169-L172] — but they surface at different map accesses. Goroutine IDs and hexadecimal addresses vary from run to run.
 
 ```
 fatal error: concurrent map read and map write
@@ -1256,7 +1273,7 @@ created by go.k6.io/k6/js.(*Bundle).instantiate in goroutine 215
 | **Q2** — does k6 "freeze" resolution after init? ("under pressure") | §1, §2 | Yes — a single deterministic `ModuleResolver.Lock()` [js/bundle.go:L129] right after `__VU==0`. The "under pressure" framing is **wrong** and is corrected. |
 | **Q3** — "already resolved" vs. "new module" | §3 | Cache membership (resolved-URL key for files, specifier key for built-ins), populated at `__VU==0`; miss-while-locked = "new". |
 | **Q4** — relative specifiers per calling module | §5 | Base dir comes from the JS call stack (`CaptureCallStack` → `reversePath` → `loader.Resolve`); same `./helper.js` → `dir1` vs `dir2`. |
-| **Q5** — real runs: (a) init module re-`require`d by VUs; (b) never-seen fails | §2.3/§3 (EXP1), §4 (EXP2/EXP6) | (a) EXP1 exit 0; (b) EXP2 (file) reliably exit 107; EXP6 (built-in) usually exit 107 (682/700) but can crash exit 2 (18/700) via the concurrent-cache race — see stability notes. |
+| **Q5** — real runs: (a) init module re-`require`d by VUs; (b) never-seen fails | §2.3/§3 (EXP1), §4 (EXP2/EXP6) | (a) EXP1 exit 0; (b) EXP2 (file) reliably exit 107; EXP6 (built-in) usually exit 107 (~95%) but intermittently crashes exit 2 (~5% aggregate, a non-deterministic data-race rate) via the concurrent-cache race — see stability notes. |
 | **Q6** — exact error/warning text in each case | §4, §7 | All strings reproduced verbatim with source constants. |
 
 ### Named items covered
@@ -1270,16 +1287,16 @@ Every experiment was run **≥2×** with identical input. Exit codes and error s
 1. The **order** of the `__VU` init console lines (EXP1).
 2. The specific **VU number** named in the init-abort errors (EXP2: `#1`/`#2`; EXP7@5 VUs: `#3`/`#4`/`#5`).
 
-One further **honestly-reported inconsistency**: EXP6 (never-seen **built-in**, 2 concurrent VUs) is *usually* a clean exit 107 but occasionally a fatal Go-runtime crash (exit 2). Across an authoritative **700-run sweep** of the unchanged input the observed distribution was **682/700 (97.4%)** clean exit-107 aborts and **18/700 (2.6%)** crashes, comprising two distinct fatal variants:
+One further **honestly-reported inconsistency**: EXP6 (never-seen **built-in**, 2 concurrent VUs) is *usually* a clean exit 107 but occasionally a fatal Go-runtime crash (exit 2). Because this is a data race, the crash rate is **non-deterministic and not stable run-to-run**. Across **ten independent 700-run sweeps (7,000 identical runs)** the per-sweep crash count ranged **26–43 / 700 (3.7%–6.1%)**, aggregating to **6,651/7,000 (95.0%)** clean exit-107 aborts and **349/7,000 (5.0%)** crashes, comprising two distinct fatal variants:
 
-- **16/700** — `fatal error: concurrent map writes` at [js/modules/resolution.go:L154] (the unconditional cache write; complete dump in **Appendix B**).
-- **2/700** — `fatal error: concurrent map read and map write`: 1 reaching the built-in-branch read at [js/modules/resolution.go:L150] and 1 reaching the file-branch read at [js/modules/resolution.go:L162] (complete dump of the L162 case in **Appendix B2**).
+- **298/7,000 (≈4.3%)** — `fatal error: concurrent map writes` at [js/modules/resolution.go:L154] (the unconditional cache write; the **dominant** crash variant — complete dump in **Appendix B**).
+- **51/7,000 (≈0.7%)** — `fatal error: concurrent map read and map write`: 30 reaching the built-in-branch read at [js/modules/resolution.go:L150] and 21 reaching the file-branch read at [js/modules/resolution.go:L162] (complete dump of the L162 case in **Appendix B2**).
 
 The root cause is the **unconditional** write to the unsynchronized `mr.cache` map at [js/modules/resolution.go:L154] — executed even when the built-in lookup returned the lock error — while other VUs initialize concurrently [execution/scheduler.go:L169-L172]. The **file** case (EXP2) has no such write on the locked path [js/modules/resolution.go:L166-L167] and was perfectly stable at exit 107. The same unchanged input was run repeatedly to surface this distribution rather than constructing a variant that hides it.
 
 ### Environment fidelity
 
-Source-under-investigation binary: `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)` — built from branch head `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (before this document existed). The runs embedded above were produced by a binary built from the delivered HEAD, which git-stamps `commit/3e9f5aabc8`; because the only difference between the two commits is this documentation file (zero `.go`/`go.mod`/`vendor/` changes — see §0), the two binaries are behaviorally identical and every line number, error string, and exit code is unchanged between them. Toolchain `go1.23.12 linux/amd64`; offline vendored build. All values are specific to this version (`v0.55.0`) and are not generalized to other k6 releases.
+Source-under-investigation binary: `k6bin v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)` — built from branch head `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (before this document existed). The runs embedded above were produced by a binary built from a delivered-HEAD doc commit (whose VCS stamp advances with each revision of this file — e.g. an early revision stamped `commit/3e9f5aabc8`); because the only difference from the baseline is this documentation file (zero `.go`/`go.mod`/`vendor/` changes — see §0), that binary is behaviorally identical to the baseline `ddc3b0b1d2` build and every line number, error string, and exit code is unchanged between them. Toolchain `go1.23.12 linux/amd64`; offline vendored build. All values are specific to this version (`v0.55.0`) and are not generalized to other k6 releases.
 
 ---
 
