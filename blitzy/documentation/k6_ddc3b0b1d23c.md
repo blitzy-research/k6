@@ -31,7 +31,8 @@
 |------|-------|
 | Repository | `go.k6.io/k6` (Grafana k6) |
 | Git branch | `k6_ddc3b0b1d23c` |
-| HEAD commit | `ddc3b0b1d23c128e34e2792fc9075f9126e32375` |
+| Pinned source commit (subject of this investigation) | `ddc3b0b1d23c128e34e2792fc9075f9126e32375` |
+| Working-branch `HEAD` | a **descendant** of the pinned commit whose only delta is this document (`git diff --name-status ddc3b0b1d23c..HEAD` → `A  blitzy/documentation/k6_ddc3b0b1d23c.md`); the pinned commit stays an ancestor — see §0 *Read-only proof* |
 | k6 version | `k6 v0.55.0` |
 | Go toolchain | `go1.23.12`, `linux/amd64` |
 
@@ -61,9 +62,10 @@ toolchain go1.21.13
 `go.mod:3` floors the language at `go 1.21` and `go.mod:5` pins `toolchain go1.21.13`, while the
 project's CI pins the `1.23.x` line — so 1.23.12 is a valid, in-support choice. Installing this
 toolchain is **environment setup, not a repository change**. All Go caches were kept outside the
-repo tree (`GOPATH=/root/go`, `GOCACHE=/root/.cache/go-build`, `GOMODCACHE=/root/go/pkg/mod`),
-and the module's 94 dependencies are **vendored** under `vendor/`, so builds and tests run
-fully offline with `-mod=vendor`.
+repo tree (`GOPATH`, `GOCACHE`, and `GOMODCACHE` all pointed at directories **outside** the
+repository — e.g. `GOPATH=<outside-repo>/go`, `GOCACHE=<outside-repo>/.cache/go-build`,
+`GOMODCACHE=<outside-repo>/go/pkg/mod`), and the module's 94 dependencies are **vendored** under
+`vendor/`, so builds and tests run fully offline with `-mod=vendor`.
 
 **Build.** k6 was built from the repository root in its default configuration. The canonical
 `build:` target is a plain `go build` (`Makefile:7-8`):
@@ -84,18 +86,32 @@ $ /tmp/k6bin/k6 version
 k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
 
-The version banner confirms the exact commit (`ddc3b0b1d2`), Go version (`go1.23.12`) and
-platform (`linux/amd64`) that all evidence below was produced with.
+The banner's `commit/` field is k6's build-time embedding of the **short git `HEAD` hash** at the
+moment `go build` runs — the first 10 hex digits of `HEAD`. `ddc3b0b1d2` is exactly the first 10
+hex of the pinned source commit `ddc3b0b1d23c…`, so a binary built from the **pinned source tree**
+(as the convenience binary provisioned for this investigation was) stamps `commit/ddc3b0b1d2`.
+Because this read-only deliverable is committed **on top** of that pinned source (see *Read-only
+proof* below), a build made on the current documentation branch instead stamps *that branch's*
+short `HEAD` hash — only the `commit/` field tracks `HEAD`. The `k6 v0.55.0`, `go1.23.12` and
+`linux/amd64` fields are invariant, and that version/Go/platform triple is what all evidence below
+was produced with.
 
 **Read-only proof.** Before and after every build/run/trace step, the working tree was verified
-clean:
+clean, and the *only* difference from the pinned source commit was confirmed to be this one added
+document:
 
 ```
-$ git rev-parse HEAD
-ddc3b0b1d23c128e34e2792fc9075f9126e32375
 $ git status --porcelain
-              # (empty output — repository byte-for-byte unchanged)
+              # (empty output — no uncommitted edits, no stray build/test artifacts)
+$ git diff --name-status ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
 ```
+
+`git status --porcelain` is empty, and the pinned-commit→`HEAD` diff lists exactly one **added**
+file — no existing repository file is modified or deleted. `git rev-parse HEAD` returns a
+**descendant** of the pinned commit (not `ddc3b0b1d23c…` itself), precisely because this read-only
+deliverable is committed on top of the pinned source; the pinned commit remains an ancestor of
+`HEAD`.
 
 **Commands used for the answers.**
 
@@ -122,25 +138,37 @@ category counted separately (and found to be zero in both runs).
 ### Direct answer
 
 Running the canonical suite (`go test ./...` across all 82 packages), the **overwhelming
-majority of tests pass** — **≈99.5%**. Concretely, across two cache-free runs (all counts below
-are computed by `/tmp/k6test/tally.py`, whose unedited output is embedded further down):
+majority of tests pass** — **≈99.5%**. Concretely, across two cache-free runs captured at
+investigation time (all counts below are computed by `/tmp/k6test/tally.py`, whose unedited output
+is embedded further down). Because the suite is **highly timing-sensitive under `-race`**, the
+*exact* per-run pass/fail counts — and *which* timing tests flake — vary from run to run and from
+machine to machine; the **stable, reproducible** result is the overall picture, summarised in the
+*Final verification note* at the end of this section:
 
 - **Zero build-broken tests.** No package failed to compile — there were no build/compile failures
-  (`[build failed]` count = **0** in both runs). Panics were **zero in run #1** and **exactly one in
-  run #2**: a single, rare teardown-race `send on closed channel` panic (`js/runner.go:868`) inside
-  an already-failing test — **not** a k6 code defect (see the *"Broken"?* section below).
+  (`[build failed]` count = **0**, stable in every run). Separately, a **rare, timing-dependent**
+  teardown-race `send on closed channel` panic (`js/runner.go:868`) can surface inside an
+  already-failing test. In the two runs captured here it appeared **once** (run #2); on a later
+  re-verification of the same commit it appeared instead in the *other* run, and a separate check
+  observed it in *neither* — so **whether, and in which run, this panic fires is run-specific**, not
+  a stable per-run value. It is **not** a k6 code defect (see the *"Broken"?* section below).
 - **Exactly one skipped test** in each run — an opt-in external conformance suite that is
   intentionally skipped when its fixtures aren't downloaded (not a defect).
-- **A small set of failures**, all environmental/non-hermetic or timing-tolerance tests:
-  a **deterministic core of 14** tests failed in **both** runs, and a further **10** tests were
-  **flaky** (failed in exactly one of the two runs) — **24 distinct** failing tests in total.
+- **A small set of failures**, all environmental/non-hermetic or timing-tolerance tests: in these
+  two captured runs, a **deterministic core of 14** failed in **both** runs and a further **10** were
+  **flaky** (failed in exactly one run) — **24 distinct** here. (The exact counts and the
+  deterministic/flaky membership are **run-specific** — a re-verification of the same commit saw 17
+  deterministic / 28 distinct; see the *Final verification note*.)
 - **None of the failures is a k6 code defect**, and per this exploration's scope they are
   **not** to be fixed.
 
-Per-run headline (tests, including subtests): **run #1 = 4407 pass / 18 fail / 1 skip** (of 4426);
-**run #2 = 4386 pass / 20 fail / 1 skip** (of 4407). The magnitude (**≈99.5% pass, zero broken,
-one skip**) was **stable across both runs**; only *which* timing/scheduling tests flake shifted
-between runs (detailed below).
+Per-run headline for the two captured runs (tests, including subtests): **run #1 = 4407 pass / 18
+fail / 1 skip** (of 4426); **run #2 = 4386 pass / 20 fail / 1 skip** (of 4407). These *exact* counts
+are **run-specific snapshots** — a re-verification on the same commit produced slightly different
+totals (≈4390–4404 pass, 21–24 fail, still exactly 1 skip, still 0 build-broken), because the number
+of dynamically generated subtests and *which* timing tests flake shift with CPU scheduling. What is
+**stable across every run** is the magnitude: **≈99.5% pass, zero build-broken, exactly one skip**
+(see the *Final verification note* at the end of this section).
 
 ### Commands
 
@@ -303,7 +331,7 @@ $ python3 -c "import json;[print(l.rstrip()) for l in open('/tmp/k6test/run1.jso
 > fire first. The **pass rate / magnitude is stable** (≈99.5% both runs); the count wobble is an
 > artifact of dynamic subtest generation, not of tests appearing or disappearing.
 
-### "Broken"? — zero build failures; one timing-induced panic in run #2
+### "Broken"? — zero build failures; a rare, run-specific teardown-race panic
 
 "Broken" is **not** a formal `go test` status, so it is reported as its own category, split two
 ways:
@@ -317,7 +345,9 @@ $ grep -c 'build failed' /tmp/k6test/run1.json /tmp/k6test/run2.json
 /tmp/k6test/run2.json:0
 ```
 
-**(b) Panics — zero in run #1, exactly one in run #2.** Counting `panic:` output events:
+**(b) Panics — a rare, run-specific teardown race.** Counting `panic:` output events in the two
+runs captured here (zero in run #1, one in run #2 — but *which* run exhibits it, if any, is not
+stable; see the run-specific note after the mechanism):
 
 ```
 $ grep -c '"Output":"panic: ' /tmp/k6test/run1.json /tmp/k6test/run2.json
@@ -354,6 +384,14 @@ subtests, `TestExecutionInfoScenarioIter`, `TestSchedulerRunCustomConfigNoCrosso
 report in run #2 — the concrete reason run #2 observed fewer `execution` tests. This is a
 concurrency race in the **teardown** path (not a compile break, and not a fault in the steady-state
 metrics pipeline of a normal `k6 run`); per this exploration's scope it is **reported, not fixed**.
+
+> **Run-specific — do not read the panic distribution as stable.** Whether this teardown race fires
+> at all, and in *which* run, varies between runs and machines. In the two runs captured above it
+> hit run #2; an independent re-verification of the same pinned commit hit **run #1** instead
+> (same `panic: send on closed channel` at `js/runner.go:868`, same
+> `TestRealTimeAndSetupTeardownMetrics`), and a separate check observed **no** panic in either run.
+> The **build-broken = 0** result, by contrast, is stable in every run. So "one panic in run #2" is
+> a captured-run observation, not a per-run constant.
 
 ### The one SKIP (both runs)
 
@@ -739,16 +777,44 @@ twice. None reflects a k6 code defect.
 ### Bottom line for Q1
 
 - **Pass ≈ 99.5%** (run #1 4407/4426, run #2 4386/4407), **build-broken = 0**, **skip = 1** (the
-  opt-in TC39 suite), stable across two runs.
-- The failures decompose into **14 deterministic** + **10 flaky** (24 distinct), every one
-  attributable to a concrete mechanism: self-signed-TLS trust, live-internet OCSP, a 24 ms
-  CPU-timing budget, event-loop/VU-count/scheduling timing under `-race`, and — in run #2 only — one
-  teardown-time `send on closed channel` panic (`js/runner.go:868`) that aborted 19 sibling
-  `execution` tests.
+  opt-in TC39 suite). The **magnitude is stable across every run**; the exact pass/fail counts are
+  run-specific snapshots (see *Final verification note*).
+- The failures decompose (in these two captured runs) into **14 deterministic** + **10 flaky** (24
+  distinct), every one attributable to a concrete mechanism: self-signed-TLS trust, live-internet
+  OCSP, a 24 ms CPU-timing budget, and event-loop/VU-count/scheduling timing under `-race`. A
+  **rare, run-specific** teardown-time `send on closed channel` panic (`js/runner.go:868`) may also
+  surface (it hit run #2 here, aborting 19 sibling `execution` tests); its occurrence varies run to
+  run.
 - **None is a compile break, and none reflects a functional defect in the normal metrics/execution
   path**; the failures are non-hermetic (TLS/OCSP), timing-tolerance, or concurrency-under-load
   effects. Per this exploration's scope they are **reported, not fixed**.
 
+### Final verification note (stability vs. run-specific detail)
+
+Because the suite runs under `-race` with heavy `t.Parallel()`, the *exact* numbers above are
+**run-specific snapshots**, not fixed constants. Re-running the identical command
+(`go test -mod=vendor -race -timeout 210s -count=1 -json ./...`) on the **same pinned commit**
+reproduces the **picture** but not the exact counts. What is **stable and reproducible across every
+run** observed:
+
+- **≈99.5% pass** (observed 99.43%–99.57% across the runs captured here and on re-verification).
+- **Exactly one skip** — `js/tc39 :: TestTC39` (opt-in conformance suite; skipped when fixtures
+  aren't downloaded).
+- **Zero build-broken** (`[build failed]` = 0) — every one of the 82 packages compiles.
+- The **deterministic failing core** is the same *category* every run: self-signed-TLS trust (gRPC
+  `TestClient_TlsParameters` + subtests), live-internet OCSP
+  (`TestRequestAndBatchTLS/ocsp_stapled_good`), and the 24 ms CPU-timing budget
+  (`TestConstantArrivalRateRunCorrectTiming` + segments).
+- **None of the failures is a k6 code defect.**
+
+What **varies run to run** (and machine to machine): the exact pass/fail counts, the number of
+dynamically generated subtests, *which* additional timing/scheduling tests flake, and **whether the
+rare teardown `send on closed channel` panic surfaces at all** (and in which run). Concretely, the
+two runs embedded above recorded **4407/18/1** and **4386/20/1** with the panic in run #2; an
+independent re-verification of the same commit recorded **≈4390/24/1** and **≈4404/21/1** (17
+deterministic / 28 distinct failures) with the panic in **run #1** instead, and a separate check
+saw **no** panic. These are the expected, honest consequences of a timing-sensitive suite — not
+tests appearing or disappearing, and not a code regression.
 
 ---
 
@@ -840,8 +906,9 @@ The stages, in the order a sample travels, each named with `file:line`:
 - `metrics/metric.go` — the metric model: `type Metric struct` (`:12`) with `Name` (`:14`),
   `Type` (`:15`), `Thresholds` (`:21`), and `Sink` (`:24`).
 - `metrics/metric_type.go:10-13` — the `MetricType` enum: `Counter`, `Gauge`, `Trend`, `Rate`.
-- `metrics/sample.go` — the sample types: `TimeSeries` (`:14`), `Sample` (`:23`),
-  `SampleContainer` (`:37`, whose `Samples` slice is at `:43`).
+- `metrics/sample.go` — the sample types: `TimeSeries` (`:14`), `Sample` (`:23`), and the
+  `SampleContainer` **interface** (`:37`, `GetSamples() []Sample`); its simplest implementation is
+  the named slice type `type Samples []Sample` (`:43`, `GetSamples` at `:46`).
 
 **2. Sample transport (VU egress)** — `lib/vu_state.go`, `cmd/run.go`, `cmd/options.go` **(inferred from reading)**
 - `lib/vu_state.go:59` — `Samples chan<- metrics.SampleContainer`: the **write-only** channel a
@@ -1075,7 +1142,9 @@ iterations, both `iterations` and `my_custom_counter` therefore read **6**, exac
 
 The `trace.js` script was authored under `/tmp/k6scripts/` (outside the repo). `git status
 --porcelain` was **empty** immediately before and after each `k6 run`, and the script is removed
-during finalization. HEAD remained `ddc3b0b1d23c128e34e2792fc9075f9126e32375` throughout.
+during finalization. No existing repository file was modified at any point; the pinned source
+commit `ddc3b0b1d23c…` remained an ancestor of `HEAD` throughout (the sole added file is this
+document).
 
 ---
 
@@ -1084,10 +1153,13 @@ during finalization. HEAD remained `ddc3b0b1d23c128e34e2792fc9075f9126e32375` th
 **Coverage of every named item**
 
 - **Q1** reports **pass / fail / skip** *and* **broken** as a separate category (zero build/compile
-  failures in both runs; **one** timing-induced panic in run #2 only), across **two** runs, with an
-  explicit **deterministic (14) vs. flaky (10)** split — **24 distinct** failing tests — and a
-  per-failure root cause (self-signed TLS trust, live-internet OCSP, 24 ms CPU-timing tolerance,
-  scheduling/ordering races) each with `file:line` and unedited output.
+  failures — stable in every run; plus a **rare, run-specific** teardown-race panic that surfaced in
+  one captured run), across **two** runs, with an explicit **deterministic (14) vs. flaky (10)**
+  split — **24 distinct** failing tests in those runs — and a per-failure root cause (self-signed
+  TLS trust, live-internet OCSP, 24 ms CPU-timing tolerance, scheduling/ordering races) each with
+  `file:line` and unedited output. The overall picture (≈99.5% pass, one skip, zero build-broken, no
+  code defects) is confirmed stable across re-verification; exact counts are run-specific (see §1
+  *Final verification note*).
 - **Q2** names **both** iteration-counting mechanisms (the `iterations` Counter metric *and* the
   atomic `fullIterationsCount` tally) and **every** pipeline stage (registry, sample transport,
   output manager, output interface/buffering, metrics-engine ingester, sinks, observed-metrics
@@ -1111,7 +1183,9 @@ labelled **"(inferred from reading)"**.
 
 **Read-only proof.** All artifacts (Go toolchain, the `/tmp/k6bin/k6` binary, `/tmp/k6scripts/`
 trace script, `/tmp/k6test/` output) live **outside** the repository tree. `git status
---porcelain` was verified **empty** before and after building, testing, and tracing; HEAD
-remained `ddc3b0b1d23c128e34e2792fc9075f9126e32375`. The **only** change to the repository is the
-creation of this document, `blitzy/documentation/k6_ddc3b0b1d23c.md`.
+--porcelain` was verified **empty** before and after building, testing, and tracing; the pinned
+source commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375` remained an **ancestor** of `HEAD`
+throughout. The **only** change to the repository is the addition of this document,
+`blitzy/documentation/k6_ddc3b0b1d23c.md` — confirmed by `git diff --name-status
+ddc3b0b1d23c..HEAD` listing a single added file.
 
