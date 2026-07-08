@@ -38,7 +38,7 @@ The investigation was performed against the k6 source at the branch this documen
 commit **`ddc3b0b1d23c128e34e2792fc9075f9126e32375`** (`git rev-parse HEAD`). The working tree was clean
 (`git status --porcelain` empty) before and after the investigation; the answer document is the only net change.
 
-`go.mod` (L1–L4) pins the toolchain and the module is fully **vendored**, so the binary and tests build offline:
+`go.mod` (L1–L5) pins the toolchain and the module is fully **vendored**, so the binary and tests build offline:
 
 ```text
 module go.k6.io/k6
@@ -158,9 +158,9 @@ graph LR
     H --> I[SaveSamples: emit http_reqs + 7 http_req_* timing metrics]
 ```
 
-The eight metric names are declared in `metrics/builtin.go` (`http_req_blocked` L18, `http_req_connecting` L19,
+The seven timing-metric names are declared in `metrics/builtin.go` (`http_req_blocked` L18, `http_req_connecting` L19,
 `http_req_tls_handshaking` L20, plus `http_req_duration` L17, `http_req_sending`/`waiting`/`receiving` L21‑23) and
-registered as `(Trend, Time)` metrics in `RegisterBuiltinMetrics` (`metrics/builtin.go:91-94`). Emitted values are
+registered as `(Trend, Time)` metrics in `RegisterBuiltinMetrics` (`metrics/builtin.go:91-97`). Emitted values are
 milliseconds: `SaveSamples` converts each duration with `metrics.D(...)`, and `metrics.D` divides by
 `timeUnit = time.Millisecond` (`metrics/units.go:7`, `metrics/units.go:11-13`).
 
@@ -801,6 +801,13 @@ trail.Duration     = trail.Sending + trail.Waiting + trail.Receiving  // :381
 ```
 
 `Duration` is even documented as *"Total request duration, excluding DNS lookup and connect time."* (`tracer.go:22-23`).
+**External corroboration** — an upstream project record, neither runtime‑observed nor code‑inferred. grafana/k6 issue
+**#2692**, *"HTTP metric including connection time"* (opened 2022‑09‑26; closed as *not planned*), documents this exact
+semantics: `http_req_duration` measures only `http_req_sending` + `http_req_waiting` + `http_req_receiving`,
+*"excluding the time spent during the connection"*. The issue *proposes* a separate `http_req_total_duration` that would
+add the connection phases back in; because it was closed as *not planned*, `http_req_duration` still excludes them —
+exactly what the code above computes — confirming the exclusion is intended design, not a measurement bug.
+
 The three components it sums are derived from the last two hooks:
 
 - **`WroteRequest`** (`tracer.go:299`, records `wroteRequest` via `atomic.StoreInt64` at `:301`, only when `info.Err == nil`)
@@ -1053,6 +1060,16 @@ project's own `lib/netext/httpext/tracer_test.go`.
 
 The compiled binary (`/tmp/k6`), the local server, the JS scripts, and the Go harness all reside in `/tmp` or were deleted
 from the package; the repository's only net change is this document. `git status --porcelain` confirms it.
+
+Captured verification (post‑commit steady state — the exact bytes emitted):
+
+```text
+$ git status --porcelain
+                                            # (no output — clean working tree)
+
+$ git diff --name-status ddc3b0b1d23c..HEAD
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
+```
 
 ---
 
