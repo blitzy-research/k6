@@ -125,8 +125,10 @@ Running the canonical suite (`go test ./...` across all 82 packages), the **over
 majority of tests pass** — **≈99.5%**. Concretely, across two cache-free runs (all counts below
 are computed by `/tmp/k6test/tally.py`, whose unedited output is embedded further down):
 
-- **Zero "broken" tests.** No package failed to compile; there were no build/compile failures and
-  no panics. (`[build failed]` count = **0** in both runs.)
+- **Zero build-broken tests.** No package failed to compile — there were no build/compile failures
+  (`[build failed]` count = **0** in both runs). Panics were **zero in run #1** and **exactly one in
+  run #2**: a single, rare teardown-race `send on closed channel` panic (`js/runner.go:868`) inside
+  an already-failing test — **not** a k6 code defect (see the *"Broken"?* section below).
 - **Exactly one skipped test** in each run — an opt-in external conformance suite that is
   intentionally skipped when its fixtures aren't downloaded (not a defect).
 - **A small set of failures**, all environmental/non-hermetic or timing-tolerance tests:
@@ -458,12 +460,17 @@ the captured Error Traces so every citation is independently resolvable from the
 
 ##### (1) gRPC TLS trust — self-signed test CA not trusted → `x509: certificate signed by unknown authority` (4 tests)
 
-The gRPC client tests dial a server presenting a certificate signed by an **embedded, self-signed
-test CA** — `clientAuthCA := []byte(...)` at `js/modules/k6/grpc/client_test.go:1159`, CN "Acme
-Co". The assertion helper `assertResponse` (`js/modules/k6/grpc/helpers_test.go:14`) asserts no
-error at `js/modules/k6/grpc/helpers_test.go:19` (`assert.NoError(t, err)`), reached from
-`client_test.go:1287`. When the sandbox root store doesn't trust that CA, the handshake fails —
-here is subtest `ConnectTls` (run #1):
+The gRPC client tests configure the k6 client to trust an **embedded, self-signed test CA** by
+passing it as `cacerts` — that cert is `localHostCert` (`O=Acme Co`) at
+`js/modules/k6/grpc/client_test.go:1160`, supplied to `client.connect(...)` as the `cacerts` trust
+anchor at `client_test.go:1217`/`1228`/`1263`. (A **separate** embedded CA, `clientAuthCA` at
+`client_test.go:1159`, `CN=My CA`, is used for the opposite direction — client-certificate auth,
+appended to the server's `clientCAPool` at `client_test.go:1212`/`1223`/`1246` — and is **not** the
+cert named in the error.) The assertion helper `assertResponse`
+(`js/modules/k6/grpc/helpers_test.go:14`) asserts no error at `js/modules/k6/grpc/helpers_test.go:19`
+(`assert.NoError(t, err)`), reached from `client_test.go:1287`. When the sandbox cannot verify the
+server against that embedded "Acme Co" CA, the handshake fails — here is subtest `ConnectTls`
+(run #1):
 
 ```
 $ python3 /tmp/k6test/extract.py /tmp/k6test/run1.json grpc 'TestClient_TlsParameters/ConnectTls' | sed 's/\t/    /g' | tail -n +4
