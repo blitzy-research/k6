@@ -48,14 +48,13 @@ This also exposes a REST API to interact with it. Various k6 subcommands offer
 a commandline interface for interacting with it.`,
 ```
 
-**The REST API is ON by default** at `localhost:6565` for this v0.55.0 build. The default address comes from `GetDefaultFlags` (`cmd/state/state.go:150`, `Address: "localhost:6565"`) and the server is constructed by `api.GetServer` (`api/server.go:50-70`). Probing it live *while a test was running* (a background `k6 run -d 15s loop.js`, queried from a small Go client) returned:
+**The REST API is ON by default** at `localhost:6565` for this v0.55.0 build. The default address comes from `GetDefaultFlags` (`cmd/state/state.go:150`, `Address: "localhost:6565"`) and the server is constructed by `api.GetServer` (`api/server.go:50-70`). It was probed live *while a test was running*: a background `k6 run -d 15s loop.js` was queried with a small Go `net/http` client (`http.Get`), because `curl` is **not** installed in the test container. The `GET http://localhost:6565/v1/status` request returned the following body — the real, unedited output printed by the Go client:
 
-```bash
-$ curl http://localhost:6565/v1/status
+```text
 {"data":{"type":"status","id":"default","attributes":{"status":7,"paused":false,"vus":1,"vus-max":1,"stopped":false,"running":true,"tainted":false}}}
 ```
 
-(The value above is the real JSON body returned by the endpoint; `curl` is not installed in the test container, so it was fetched with an equivalent Go `http.Get`.) The companion endpoint `http://localhost:6565/v1/metrics` returned **16** live metric objects during the same run (observed). **Version caveat:** newer k6 (v2.x) turns this REST API off by default; this v0.55.0 build has it **on**.
+(The equivalent user-facing command on a machine that has `curl` installed is `curl http://localhost:6565/v1/status`; it is shown only as the equivalent form and was **not** the command actually executed here.) The companion endpoint `http://localhost:6565/v1/metrics`, fetched by the same Go client, returned **16** live metric objects during the same run (observed). **Version caveat:** newer k6 (v2.x) turns this REST API off by default; this v0.55.0 build has it **on**.
 
 ## Q2 — Basic workflow of writing and running a script
 
@@ -181,24 +180,24 @@ The single-request run emitted **16 metrics** (the same 16 the REST API reported
 
 | Metric | Metric type | Value type | Rendered (Q4 run #1) | Source: name / registration |
 |---|---|---|---|---|
-| `checks` | Rate | Default (rendered `%`) | `100.00% 1 out of 1` | `metrics/builtin.go:12` / `:86` |
-| `data_received` | Counter | Data (bytes) | `12 kB   10 kB/s` | `metrics/builtin.go:35` / `:109` |
-| `data_sent` | Counter | Data (bytes) | `1.1 kB  916 B/s` | `metrics/builtin.go:34` / `:108` |
-| `http_req_blocked` | Trend | Time (ms) | `avg=82.36ms` | `metrics/builtin.go:18` / `:92` |
-| `http_req_connecting` | Trend | Time (ms) | `avg=17.03ms` | `metrics/builtin.go:19` / `:93` |
-| `http_req_duration` | Trend | Time (ms) | `avg=17.27ms` | `metrics/builtin.go:17` / `:91` |
-| `http_req_receiving` | Trend | Time (ms) | `avg=105.03µs` | `metrics/builtin.go:23` / `:97` |
-| `http_req_sending` | Trend | Time (ms) | `avg=161.28µs` | `metrics/builtin.go:21` / `:95` |
-| `http_req_tls_handshaking` | Trend | Time (ms) | `avg=30.2ms` | `metrics/builtin.go:20` / `:94` |
-| `http_req_waiting` | Trend | Time (ms) | `avg=17ms` | `metrics/builtin.go:22` / `:96` |
-| `http_req_failed` | Rate | Default (rendered `%`) | `0.00%   0 out of 2` | `metrics/builtin.go:16` / `:90` |
-| `http_reqs` | Counter | Default | `2       1.666025/s` | `metrics/builtin.go:15` / `:89` |
-| `iteration_duration` | Trend | Time (ms) | `avg=1.2s` | `metrics/builtin.go:9` / `:83` |
-| `iterations` | Counter | Default | `1       0.833012/s` | `metrics/builtin.go:8` / `:82` |
-| `vus` | Gauge | Default | `1       min=1      max=1` | `metrics/builtin.go:6` / `:80` |
-| `vus_max` | Gauge | Default | `1       min=1      max=1` | `metrics/builtin.go:7` / `:81` |
+| `checks` | Rate | Default (rendered `%`) | `100.00% 1 out of 1` | `metrics/builtin.go:12` / `metrics/builtin.go:86` |
+| `data_received` | Counter | Data (bytes) | `12 kB   10 kB/s` | `metrics/builtin.go:35` / `metrics/builtin.go:109` |
+| `data_sent` | Counter | Data (bytes) | `1.1 kB  916 B/s` | `metrics/builtin.go:34` / `metrics/builtin.go:108` |
+| `http_req_blocked` | Trend | Time (ms) | `avg=82.36ms` | `metrics/builtin.go:18` / `metrics/builtin.go:92` |
+| `http_req_connecting` | Trend | Time (ms) | `avg=17.03ms` | `metrics/builtin.go:19` / `metrics/builtin.go:93` |
+| `http_req_duration` | Trend | Time (ms) | `avg=17.27ms` | `metrics/builtin.go:17` / `metrics/builtin.go:91` |
+| `http_req_receiving` | Trend | Time (ms) | `avg=105.03µs` | `metrics/builtin.go:23` / `metrics/builtin.go:97` |
+| `http_req_sending` | Trend | Time (ms) | `avg=161.28µs` | `metrics/builtin.go:21` / `metrics/builtin.go:95` |
+| `http_req_tls_handshaking` | Trend | Time (ms) | `avg=30.2ms` | `metrics/builtin.go:20` / `metrics/builtin.go:94` |
+| `http_req_waiting` | Trend | Time (ms) | `avg=17ms` | `metrics/builtin.go:22` / `metrics/builtin.go:96` |
+| `http_req_failed` | Rate | Default (rendered `%`) | `0.00%   0 out of 2` | `metrics/builtin.go:16` / `metrics/builtin.go:90` |
+| `http_reqs` | Counter | Default | `2       1.666025/s` | `metrics/builtin.go:15` / `metrics/builtin.go:89` |
+| `iteration_duration` | Trend | Time (ms) | `avg=1.2s` | `metrics/builtin.go:9` / `metrics/builtin.go:83` |
+| `iterations` | Counter | Default | `1       0.833012/s` | `metrics/builtin.go:8` / `metrics/builtin.go:82` |
+| `vus` | Gauge | Default | `1       min=1      max=1` | `metrics/builtin.go:6` / `metrics/builtin.go:80` |
+| `vus_max` | Gauge | Default | `1       min=1      max=1` | `metrics/builtin.go:7` / `metrics/builtin.go:81` |
 
-Notes: `http_req_duration` additionally shows a `{ expected_response:true }` **submetric** line (visible in the Q4 block) — it is the same Trend split by the `expected_response` tag, not a separate metric. The `checks` metric is a `Rate` registered at `metrics/builtin.go:86`; `http_req_failed` is a `Rate` at `:90`. This accounts for all 16 emitted metrics.
+Notes: `http_req_duration` additionally shows a `{ expected_response:true }` **submetric** line (visible in the Q4 block) — it is the same Trend split by the `expected_response` tag, not a separate metric. The `checks` metric is a `Rate` registered at `metrics/builtin.go:86`; `http_req_failed` is a `Rate` at `metrics/builtin.go:90`. This accounts for all 16 emitted metrics.
 
 ### Units
 
@@ -270,7 +269,7 @@ Key flags (each cited to its definition; all also visible in `k6 run --help`):
 - `-e, --env VAR=value` — add/override an environment variable (`cmd/runtime_options.go:32`)
 - `--summary-export <file>` — write the end-of-test summary to a JSON file (`cmd/runtime_options.go:35-38`); `--no-summary` suppresses the summary (`cmd/runtime_options.go:34`)
 - `--summary-trend-stats` — trend stats to show, default `avg,min,med,max,p(90),p(95)` (`cmd/options.go:58`); `--summary-time-unit` — `s`/`ms`/`us` (`cmd/options.go:59`)
-- `-a, --address` — REST API address, **default `localhost:6565`** (`cmd/state/state.go:150`); `-q, --quiet` — disable progress updates
+- `-a, --address` — REST API address; flag defined at `cmd/root.go:186` (`flags.StringVarP(&gs.Flags.Address, "address", "a", ...)`), **default `localhost:6565`** from `GetDefaultFlags` (`cmd/state/state.go:150`); `-q, --quiet` — disable progress updates; flag defined at `cmd/root.go:185` (`flags.BoolVarP(&gs.Flags.Quiet, "quiet", "q", ...)`)
 
 The command's built-in examples, printed verbatim by `k6 run --help` (the templates at `cmd/run.go:471-488` render `{{.}}` as `k6`):
 
@@ -297,50 +296,138 @@ Examples:
 
 ## Q7 — Configuration and environment variables
 
-**No configuration is required for a basic run.** The defaults are 1 VU / 1 iteration, and the default config-file path (`homeDir/loadimpact/k6/config.json`, `cmd/state/state.go:152`) need not exist — every run in this document used no config file. There are, however, **two distinct environment-variable mechanisms**, and their difference is worth stating precisely:
+**No configuration is required for a basic run.** The defaults are 1 VU / 1 iteration, and the default config-file path (`homeDir/loadimpact/k6/config.json` — `defaultConfigFileName = "config.json"` at `cmd/state/state.go:20`, joined in `GetDefaultFlags` at `cmd/state/state.go:152`) need not exist. Every run in this document used no config file.
 
-**(a) `-e VAR=value` injects into the script's `__ENV`.** The flag is `-e, --env` (`cmd/runtime_options.go:32`). Setting `-e MY_TARGET=...` makes `__ENV.MY_TARGET` available in the script (banner elided; decision-relevant lines shown verbatim):
+k6 has **two distinct environment-variable mechanisms**, and the distinction is the whole point of this question:
+
+- **`-e VAR=value` injects a variable into the script's `__ENV` object** — a *script-visible* variable, **not** a k6 option. The flag is `-e, --env` (`cmd/runtime_options.go:32`, declared as `flags.StringArrayP("env", "e", nil, ...)`).
+- **Real `K6_*` environment variables configure k6 options** — each option binds to a `K6_*` name via an `envconfig` struct tag, e.g. `VUs null.Int ... envconfig:"K6_VUS"` (`lib/options.go:234`) and `Iterations null.Int ... envconfig:"K6_ITERATIONS"` (`lib/options.go:236`).
+
+**(a) `-e VAR=value` → the script's `__ENV` (does not set options).** Passing `-e MY_TARGET=https://example.com` makes `__ENV.MY_TARGET` readable inside the script (see the `source=console` line); the execution plan stays at the default **1 VU / 1 iteration**. Complete, unedited output (exit `0`):
 
 ```text
-$ k6 run -e MY_TARGET=https://example.com env_script.js
+$ k6 run -e MY_TARGET=https://example.com env_script.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: env_script.js
+        output: -
+
      scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
               * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
-time="2026-07-08T04:36:39Z" level=info msg="MY_TARGET from __ENV = https://example.com" source=console
+
+time="2026-07-08T05:43:48Z" level=info msg="MY_TARGET from __ENV = https://example.com" source=console
+
+     data_received..................: 13 kB  55 kB/s
+     data_sent......................: 1.1 kB 4.8 kB/s
+     http_req_blocked...............: avg=98.04ms  min=75.57ms  med=98.04ms  max=120.51ms p(90)=116.02ms p(95)=118.26ms
+     http_req_connecting............: avg=16.87ms  min=12.2ms   med=16.87ms  max=21.54ms  p(90)=20.6ms   p(95)=21.07ms 
+     http_req_duration..............: avg=17.3ms   min=12.89ms  med=17.3ms   max=21.71ms  p(90)=20.82ms  p(95)=21.26ms 
+       { expected_response:true }...: avg=17.3ms   min=12.89ms  med=17.3ms   max=21.71ms  p(90)=20.82ms  p(95)=21.26ms 
+     http_req_failed................: 0.00%  0 out of 2
+     http_req_receiving.............: avg=91.45µs  min=53.11µs  med=91.45µs  max=129.8µs  p(90)=122.13µs p(95)=125.96µs
+     http_req_sending...............: avg=164.74µs min=102.74µs med=164.74µs max=226.75µs p(90)=214.35µs p(95)=220.55µs
+     http_req_tls_handshaking.......: avg=29.45ms  min=15.25ms  med=29.45ms  max=43.64ms  p(90)=40.8ms   p(95)=42.22ms 
+     http_req_waiting...............: avg=17.04ms  min=12.61ms  med=17.04ms  max=21.47ms  p(90)=20.59ms  p(95)=21.03ms 
+     http_reqs......................: 2      8.652409/s
+     iteration_duration.............: avg=231.04ms min=231.04ms med=231.04ms max=231.04ms p(90)=231.04ms p(95)=231.04ms
+     iterations.....................: 1      4.326205/s
+
+
 running (00m00.2s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m00.2s/10m0s  1/1 iters, 1 per VU
+exit=0
 ```
 
-**(b) `K6_*` environment variables configure k6 options.** k6 binds options to `K6_*` names via `envconfig` (e.g. `Out ... envconfig:"K6_OUT"`, `cmd/config.go:45`). Passing real env vars `K6_VUS=2 K6_ITERATIONS=4` changes the execution plan to 2 VUs / 4 iterations:
+**(b) Real `K6_*` environment variables → k6 options.** Setting the real environment variables `K6_VUS=2` and `K6_ITERATIONS=4` reconfigures the execution plan to **2 VUs / 4 iterations** — note `2 max VUs`, `4 iterations shared among 2 VUs`, and `4 complete` (`K6_VUS` → `lib/options.go:234`; `K6_ITERATIONS` → `lib/options.go:236`). Complete, unedited output (exit `0`):
 
 ```text
-$ K6_VUS=2 K6_ITERATIONS=4 k6 run env_script.js
+$ K6_VUS=2 K6_ITERATIONS=4 k6 run env_script.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: env_script.js
+        output: -
+
      scenarios: (100.00%) 1 scenario, 2 max VUs, 10m30s max duration (incl. graceful stop):
               * default: 4 iterations shared among 2 VUs (maxDuration: 10m0s, gracefulStop: 30s)
-running (00m00.2s), 0/2 VUs, 4 complete and 0 interrupted iterations
-default ✓ [ 100% ] 2 VUs  00m00.2s/10m0s  4/4 shared iters
-```
 
-**Important nuance (observed, and contrary to a common simplification).** Because `-e` variables are merged into the same environment k6 consults for `K6_*` options (system env vars are included by default — `--include-system-env-vars` defaults to **true**, `cmd/runtime_options.go:24`), an *option-shaped* `-e` variable **is** read by the option loader. Passing `-e K6_VUS=2` alone makes k6 warn that `vus=2` will be ignored (it needs a companion `iterations`/`duration`/`stages`), and the run stays 1 VU / 1 iteration:
+time="2026-07-08T05:43:58Z" level=info msg="MY_TARGET from __ENV = undefined" source=console
+time="2026-07-08T05:43:58Z" level=info msg="MY_TARGET from __ENV = undefined" source=console
+time="2026-07-08T05:43:58Z" level=info msg="MY_TARGET from __ENV = undefined" source=console
+time="2026-07-08T05:43:58Z" level=info msg="MY_TARGET from __ENV = undefined" source=console
 
-```text
-$ k6 run -e K6_VUS=2 env_script.js
-time="2026-07-08T04:36:39Z" level=warning msg="the `vus=2` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"
-     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
-              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
-time="2026-07-08T04:36:39Z" level=info msg="MY_TARGET from __ENV = undefined" source=console
-running (00m00.2s), 0/1 VUs, 1 complete and 0 interrupted iterations
-```
+     data_received..................: 32 kB  125 kB/s
+     data_sent......................: 2.4 kB 9.4 kB/s
+     http_req_blocked...............: avg=46.6ms   min=352ns   med=41.57ms  max=103.19ms p(90)=102.59ms p(95)=102.89ms
+     http_req_connecting............: avg=8.43ms   min=0s      med=5.91ms   max=21.89ms  p(90)=21.82ms  p(95)=21.86ms 
+     http_req_duration..............: avg=17.39ms  min=12.53ms med=17.51ms  max=22.02ms  p(90)=22.01ms  p(95)=22.02ms 
+       { expected_response:true }...: avg=17.39ms  min=12.53ms med=17.51ms  max=22.02ms  p(90)=22.01ms  p(95)=22.02ms 
+     http_req_failed................: 0.00%  0 out of 8
+     http_req_receiving.............: avg=71.28µs  min=29.84µs med=57.27µs  max=144.91µs p(90)=124.05µs p(95)=134.48µs
+     http_req_sending...............: avg=99.55µs  min=53.93µs med=77.58µs  max=241.84µs p(90)=156.73µs p(95)=199.28µs
+     http_req_tls_handshaking.......: avg=9.94ms   min=0s      med=7.82ms   max=23.86ms  p(90)=23.48ms  p(95)=23.67ms 
+     http_req_waiting...............: avg=17.22ms  min=12.4ms  med=17.26ms  max=21.9ms   p(90)=21.87ms  p(95)=21.88ms 
+     http_reqs......................: 8      31.088513/s
+     iteration_duration.............: avg=128.27ms min=34.55ms med=128.28ms max=221.96ms p(90)=221.77ms p(95)=221.86ms
+     iterations.....................: 4      15.544257/s
 
-…but supplying both via `-e` reproduces the real-env result **exactly** — 2 VUs / 4 shared iterations — proving `-e K6_*` does feed option configuration:
 
-```text
-$ k6 run -e K6_VUS=2 -e K6_ITERATIONS=4 env_script.js
-     scenarios: (100.00%) 1 scenario, 2 max VUs, 10m30s max duration (incl. graceful stop):
-              * default: 4 iterations shared among 2 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 running (00m00.3s), 0/2 VUs, 4 complete and 0 interrupted iterations
 default ✓ [ 100% ] 2 VUs  00m00.3s/10m0s  4/4 shared iters
+exit=0
 ```
 
-So: `-e` is the mechanism for **script-visible** variables (`__ENV`), while **`K6_*`** (whether set in the real environment or via `-e`) is the mechanism for **k6 options**. The script used for these observations:
+**(c) `-e` is not a substitute for real `K6_*` option configuration.** Passing an option-shaped name through `-e` (e.g. `-e K6_VUS=2`) does **not** reconfigure the execution plan: the run stays at the default **1 VU / 1 iteration** (`1 complete`). k6 prints a warning that the bare `vus=2` value is ignored because it needs a companion `iterations`/`duration`/`stages`; the effective plan is unchanged, and a re-run produced the same 1 VU / 1 iteration result. Contrast this with (b), where the real `K6_VUS`/`K6_ITERATIONS` environment variables did reconfigure the plan. Complete, unedited output (exit `0`):
+
+```text
+$ k6 run -e K6_VUS=2 env_script.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+time="2026-07-08T05:44:13Z" level=warning msg="the `vus=2` option will be ignored, it only works in conjunction with `iterations`, `duration`, or `stages`"
+     execution: local
+        script: env_script.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+time="2026-07-08T05:44:13Z" level=info msg="MY_TARGET from __ENV = undefined" source=console
+
+     data_received..................: 13 kB  99 kB/s
+     data_sent......................: 1.1 kB 8.6 kB/s
+     http_req_blocked...............: avg=45.97ms  min=37.15ms  med=45.97ms  max=54.78ms  p(90)=53.02ms  p(95)=53.9ms  
+     http_req_connecting............: avg=16.97ms  min=12.31ms  med=16.97ms  max=21.63ms  p(90)=20.69ms  p(95)=21.16ms 
+     http_req_duration..............: avg=17.58ms  min=13.18ms  med=17.58ms  max=21.98ms  p(90)=21.1ms   p(95)=21.54ms 
+       { expected_response:true }...: avg=17.58ms  min=13.18ms  med=17.58ms  max=21.98ms  p(90)=21.1ms   p(95)=21.54ms 
+     http_req_failed................: 0.00%  0 out of 2
+     http_req_receiving.............: avg=94.63µs  min=48.57µs  med=94.63µs  max=140.69µs p(90)=131.48µs p(95)=136.08µs
+     http_req_sending...............: avg=129.22µs min=100.64µs med=129.22µs max=157.79µs p(90)=152.08µs p(95)=154.94µs
+     http_req_tls_handshaking.......: avg=19.02ms  min=14.65ms  med=19.02ms  max=23.38ms  p(90)=22.51ms  p(95)=22.95ms 
+     http_req_waiting...............: avg=17.36ms  min=12.98ms  med=17.36ms  max=21.74ms  p(90)=20.86ms  p(95)=21.3ms  
+     http_reqs......................: 2      15.66032/s
+     iteration_duration.............: avg=127.56ms min=127.56ms med=127.56ms max=127.56ms p(90)=127.56ms p(95)=127.56ms
+     iterations.....................: 1      7.83016/s
+
+
+running (00m00.1s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m00.1s/10m0s  1/1 iters, 1 per VU
+exit=0
+```
+
+So the practical distinction is: use **`-e`** for script-visible `__ENV` variables (mechanism (a)), and use real **`K6_*`** environment variables to configure k6 options (mechanism (b)). (For the `run` command, `--include-system-env-vars` defaults to `true` — `cmd/run.go:441` calls `runtimeOptionFlagSet(true)`, with the flag defined at `cmd/runtime_options.go:24`.) The script used for these observations:
 
 ```javascript
 import http from 'k6/http';
@@ -352,25 +439,233 @@ export default function () {
 
 ## Q8 — External files the tool generates
 
-**By default k6 writes nothing to disk.** The banner reports `output: -`, and a clean directory was byte-identical before and after a default run (observed — the before/after listings were identical). Files are produced only when explicitly requested:
-
-- **`--out json=out.json`** → banner shows `output: json (out.json)`. The file is newline-delimited JSON of two record kinds: `{"type":"Metric",...}` metadata (the `"Metric"` type string is set at `output/json/json.go:156`) and `{"type":"Point",...}` samples. For the single-request run it contained **16 `Metric` + 25 `Point`** records (~9112 bytes; observed).
-- **`--out csv=out.csv`** → banner shows `output: csv (out.csv)` (~2968 bytes, 26 lines). Its header row and first data row, verbatim:
+**By default k6 writes nothing to disk.** The banner reports `output: -`, and a working directory is byte-identical before and after a default run. Observed (working directory listed with `ls -1`):
 
 ```text
+$ ls -1                       # before: only the script
+single_request.js
+$ grep output: run.stdout     # banner destination line from the default run
+        output: -
+$ ls -1                       # after a default run: unchanged, no file written
+single_request.js
+```
+
+k6 produces files only when explicitly asked. Four file-producing mechanisms were each exercised below — the exact command, its complete unedited output, and the resulting file.
+
+**(1) `--out json=<file>`** streams newline-delimited JSON to the file. The banner destination becomes `output: json (out.json)`. Each line is one of two record kinds: a `{"type":"Metric",...}` metadata record (the literal `"Metric"` type string is set in `wrapMetric`/`metricEnvelope` at `output/json/json.go:156`) or a `{"type":"Point",...}` sample record. Complete, unedited output (exit `0`):
+
+```text
+$ k6 run --out json=out.json single_request.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: single_request.js
+        output: json (out.json)
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/1 iters, 1 per VU
+
+     ✓ status is 200
+
+     checks.........................: 100.00% 1 out of 1
+     data_received..................: 13 kB   11 kB/s
+     data_sent......................: 1.1 kB  944 B/s
+     http_req_blocked...............: avg=63.82ms  min=39.17ms  med=63.82ms  max=88.48ms  p(90)=83.54ms  p(95)=86.01ms 
+     http_req_connecting............: avg=16.26ms  min=11.85ms  med=16.26ms  max=20.67ms  p(90)=19.79ms  p(95)=20.23ms 
+     http_req_duration..............: avg=17.96ms  min=12.55ms  med=17.96ms  max=23.38ms  p(90)=22.3ms   p(95)=22.84ms 
+       { expected_response:true }...: avg=17.96ms  min=12.55ms  med=17.96ms  max=23.38ms  p(90)=22.3ms   p(95)=22.84ms 
+     http_req_failed................: 0.00%   0 out of 2
+     http_req_receiving.............: avg=678.22µs min=46.38µs  med=678.22µs max=1.31ms   p(90)=1.18ms   p(95)=1.24ms  
+     http_req_sending...............: avg=139.19µs min=104.32µs med=139.19µs max=174.06µs p(90)=167.09µs p(95)=170.57µs
+     http_req_tls_handshaking.......: avg=18.69ms  min=15.1ms   med=18.69ms  max=22.29ms  p(90)=21.57ms  p(95)=21.93ms 
+     http_req_waiting...............: avg=17.15ms  min=12.33ms  med=17.15ms  max=21.96ms  p(90)=21ms     p(95)=21.48ms 
+     http_reqs......................: 2       1.716242/s
+     iteration_duration.............: avg=1.16s    min=1.16s    med=1.16s    max=1.16s    p(90)=1.16s    p(95)=1.16s   
+     iterations.....................: 1       0.858121/s
+     vus............................: 1       min=1      max=1
+     vus_max........................: 1       min=1      max=1
+
+
+running (00m01.2s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m01.2s/10m0s  1/1 iters, 1 per VU
+exit=0
+```
+
+The generated file (byte size varies with timestamps/latency — **(inferred)**; the record kinds and counts are structural and were identical across runs — observed):
+
+```text
+$ wc -c < out.json
+9104
+$ wc -l < out.json
+41
+$ grep -c '"type":"Metric"' out.json
+16
+$ grep -c '"type":"Point"' out.json
+25
+$ head -1 out.json
+{"type":"Metric","data":{"name":"http_reqs","type":"counter","contains":"default","thresholds":[],"submetrics":null},"metric":"http_reqs"}
+$ grep -m1 '"type":"Point".*http_req_duration' out.json
+{"metric":"http_req_duration","type":"Point","data":{"time":"2026-07-08T05:52:50.298780874Z","value":12.554568,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://test.k6.io","proto":"HTTP/2.0","scenario":"default","status":"302","tls_version":"tls1.3","url":"https://test.k6.io"}}}
+```
+
+**(2) `--out csv=<file>`** writes a CSV file; the banner destination becomes `output: csv (out.csv)`. Complete, unedited output (exit `0`):
+
+```text
+$ k6 run --out csv=out.csv single_request.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: single_request.js
+        output: csv (out.csv)
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/1 iters, 1 per VU
+
+     ✓ status is 200
+
+     checks.........................: 100.00% 1 out of 1
+     data_received..................: 13 kB   11 kB/s
+     data_sent......................: 1.1 kB  927 B/s
+     http_req_blocked...............: avg=75.53ms  min=69.26ms med=75.53ms  max=81.79ms  p(90)=80.54ms  p(95)=81.17ms
+     http_req_connecting............: avg=16.52ms  min=11.83ms med=16.52ms  max=21.21ms  p(90)=20.27ms  p(95)=20.74ms
+     http_req_duration..............: avg=17.4ms   min=13.07ms med=17.4ms   max=21.74ms  p(90)=20.87ms  p(95)=21.3ms 
+       { expected_response:true }...: avg=17.4ms   min=13.07ms med=17.4ms   max=21.74ms  p(90)=20.87ms  p(95)=21.3ms 
+     http_req_failed................: 0.00%   0 out of 2
+     http_req_receiving.............: avg=71.73µs  min=42.24µs med=71.73µs  max=101.23µs p(90)=95.33µs  p(95)=98.28µs
+     http_req_sending...............: avg=123.29µs min=99.61µs med=123.29µs max=146.97µs p(90)=142.23µs p(95)=144.6µs
+     http_req_tls_handshaking.......: avg=18.43ms  min=14.1ms  med=18.43ms  max=22.75ms  p(90)=21.89ms  p(95)=22.32ms
+     http_req_waiting...............: avg=17.21ms  min=12.88ms med=17.21ms  max=21.54ms  p(90)=20.67ms  p(95)=21.1ms 
+     http_reqs......................: 2       1.685376/s
+     iteration_duration.............: avg=1.18s    min=1.18s   med=1.18s    max=1.18s    p(90)=1.18s    p(95)=1.18s  
+     iterations.....................: 1       0.842688/s
+     vus............................: 1       min=1      max=1
+     vus_max........................: 1       min=1      max=1
+
+
+running (00m01.2s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m01.2s/10m0s  1/1 iters, 1 per VU
+exit=0
+```
+
+The generated file — its header row and first data row, verbatim (byte size **(inferred)**; column set is structural — observed):
+
+```text
+$ wc -c < out.csv
+2968
+$ wc -l < out.csv
+26
+$ head -2 out.csv
 metric_name,timestamp,metric_value,check,error,error_code,expected_response,group,method,name,proto,scenario,service,status,subproto,tls_version,url,extra_tags,metadata
-http_reqs,1783485401,1.000000,,,,true,,GET,https://test.k6.io,HTTP/2.0,default,,302,,tls1.3,https://test.k6.io,,
+http_reqs,1783489997,1.000000,,,,true,,GET,https://test.k6.io,HTTP/2.0,default,,302,,tls1.3,https://test.k6.io,,
 ```
 
-- **`--summary-export=summary-export.json`** → this is **separate** from `--out`; the banner still shows `output: -`. The file's top-level keys are `{metrics, root_group}` (~3423 bytes; observed).
-- **`handleSummary(data)` export** → its returned object's **keys are destinations**. Returning `{'stdout': '...', 'custom_summary.json': JSON.stringify(data)}` replaced the default stdout summary and wrote `custom_summary.json` (~2451 bytes; top-level keys `{options, state, metrics, root_group}`). Observed:
+**(3) `--summary-export=<file>`** is **separate** from `--out`: it writes the end-of-test summary to a JSON file while the metrics-output banner still shows `output: -`. The flag is defined at `cmd/runtime_options.go:35-38`. Complete, unedited output (exit `0`) — note `output: -`:
 
 ```text
-time="2026-07-08T04:36:44Z" level=info msg="handleSummary called: 2 http_reqs" source=console
-custom stdout summary
+$ k6 run --summary-export=summary-export.json single_request.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: single_request.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/1 iters, 1 per VU
+
+     ✓ status is 200
+
+     checks.........................: 100.00% 1 out of 1
+     data_received..................: 13 kB   10 kB/s
+     data_sent......................: 1.1 kB  901 B/s
+     http_req_blocked...............: avg=92.85ms  min=71.6ms  med=92.85ms  max=114.1ms  p(90)=109.85ms p(95)=111.98ms
+     http_req_connecting............: avg=16.65ms  min=12ms    med=16.65ms  max=21.29ms  p(90)=20.36ms  p(95)=20.82ms 
+     http_req_duration..............: avg=17.13ms  min=12.87ms med=17.13ms  max=21.39ms  p(90)=20.54ms  p(95)=20.96ms 
+       { expected_response:true }...: avg=17.13ms  min=12.87ms med=17.13ms  max=21.39ms  p(90)=20.54ms  p(95)=20.96ms 
+     http_req_failed................: 0.00%   0 out of 2
+     http_req_receiving.............: avg=84.71µs  min=47.55µs med=84.71µs  max=121.86µs p(90)=114.43µs p(95)=118.14µs
+     http_req_sending...............: avg=142.73µs min=133µs   med=142.73µs max=152.46µs p(90)=150.51µs p(95)=151.48µs
+     http_req_tls_handshaking.......: avg=18.71ms  min=14.63ms med=18.71ms  max=22.79ms  p(90)=21.97ms  p(95)=22.38ms 
+     http_req_waiting...............: avg=16.9ms   min=12.67ms med=16.9ms   max=21.13ms  p(90)=20.29ms  p(95)=20.71ms 
+     http_reqs......................: 2       1.637641/s
+     iteration_duration.............: avg=1.22s    min=1.22s   med=1.22s    max=1.22s    p(90)=1.22s    p(95)=1.22s   
+     iterations.....................: 1       0.81882/s
+     vus............................: 1       min=1      max=1
+     vus_max........................: 1       min=1      max=1
+
+
+running (00m01.2s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m01.2s/10m0s  1/1 iters, 1 per VU
+exit=0
 ```
 
-The script used:
+The generated file has top-level keys `{metrics, root_group}` (byte size **(inferred)**; key set structural — observed):
+
+```text
+$ wc -c < summary-export.json
+3482
+$ python3 -c "import json;print(sorted(json.load(open('summary-export.json')).keys()))"
+['metrics', 'root_group']
+```
+
+**(4) `handleSummary(data)` export** — if the script exports `handleSummary`, its returned object's **keys are treated as destinations**: `'stdout'` (or `'stderr'`) replaces the default terminal summary, and any other key is written as a file. Here it returned `{'stdout': 'custom stdout summary\n', 'custom_summary.json': JSON.stringify(data)}`, which replaced the terminal summary and wrote `custom_summary.json`. Complete, unedited output (exit `0`) — the default metric summary is gone, replaced by the `console.log` line and `custom stdout summary`:
+
+```text
+$ k6 run with_handlesummary.js; echo "exit=$?"
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: with_handlesummary.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+time="2026-07-08T05:53:34Z" level=info msg="handleSummary called: 2 http_reqs" source=console
+custom stdout summary
+
+running (00m00.2s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m00.2s/10m0s  1/1 iters, 1 per VU
+exit=0
+```
+
+The generated file has top-level keys `{options, state, metrics, root_group}` (byte size **(inferred)**; key set structural — observed):
+
+```text
+$ wc -c < custom_summary.json
+2404
+$ python3 -c "import json;print(sorted(json.load(open('custom_summary.json')).keys()))"
+['metrics', 'options', 'root_group', 'state']
+```
+
+The `handleSummary` script used:
 
 ```javascript
 import http from 'k6/http';
@@ -381,49 +676,74 @@ export function handleSummary(data) {
 }
 ```
 
-The available `--out` backends are confirmed by the sub-packages under `output/`: **`json`, `csv`, `influxdb`, `cloud`** (`output/json/`, `output/csv/`, `output/influxdb/`, `output/cloud/`). `-o/--out` takes a URI and may be repeated (`cmd/config.go:31`). Reported byte sizes are approximate and vary with timestamps/latency **(inferred)**; the record kinds, CSV header columns, and JSON key sets are structural and were identical across runs (observed).
+The available `--out` backends are the sub-packages under `output/`: **`json`, `csv`, `influxdb`, `cloud`** (`output/json/`, `output/csv/`, `output/influxdb/`, `output/cloud/`). `-o/--out` takes a `uri` and may be repeated — it is a `StringArrayP` (`cmd/config.go:31`: `flags.StringArrayP("out", "o", []string{}, "uri for an external metrics database")`).
 
 ## Q9 — Script validation logic (with error text and exit codes)
 
-k6 enforces three validation gates before/at execution. Each was exercised with a deliberately invalid input; all three print the ASCII banner and then fail. Exit codes are defined in `errext/exitcodes/codes.go`.
+k6 enforces three validation gates before/at execution. Each was exercised with a deliberately invalid input; for each the exact command, its complete unedited output (banner + error), and the explicit exit status (via `; echo "exit=$?"`) are shown. Exit codes are defined in `errext/exitcodes/codes.go`.
 
-**1. The module must be resolvable.** A non-existent script fails with exit **255** (generic/unmapped). The message is `fileSchemeCouldntBeLoadedMsg` (`loader/loader.go:31-37`), surfaced by `ReadSource` (`loader/readsource.go:15-58`, returned at `loader/readsource.go:53`):
+**1. The module must be resolvable.** A non-existent script fails with exit **255** (generic/unmapped). The message is `fileSchemeCouldntBeLoadedMsg` (`loader/loader.go:31-37`), surfaced by `ReadSource` (`loader/readsource.go:15-58`, returned at `loader/readsource.go:53`). Complete, unedited output:
 
 ```text
+$ k6 run does_not_exist.js; echo "exit=$?"
          /\      Grafana   /‾‾/  
     /\  /  \     |\  __   /  /   
    /  \/    \    | |/ /  /   ‾‾\ 
   /          \   |   (  |  (‾)  |
  / __________ \  |_|\_\  \_____/ 
 
-time="2026-07-08T04:31:17Z" level=error msg="The moduleSpecifier \"does_not_exist.js\" couldn't be found on local disk. Make sure that you've specified the right path to the file. If you're running k6 using the Docker image make sure you have mounted the local directory (-v /local/path/:/inside/docker/path) containing your script and modules so that they're accessible by k6 from inside of the container, see https://grafana.com/docs/k6/latest/using-k6/modules/#using-local-modules-with-docker."
+time="2026-07-08T05:58:13Z" level=error msg="The moduleSpecifier \"does_not_exist.js\" couldn't be found on local disk. Make sure that you've specified the right path to the file. If you're running k6 using the Docker image make sure you have mounted the local directory (-v /local/path/:/inside/docker/path) containing your script and modules so that they're accessible by k6 from inside of the container, see https://grafana.com/docs/k6/latest/using-k6/modules/#using-local-modules-with-docker."
+exit=255
 ```
 
-**2. A callable `default` executor must exist.** A script with no `default` export fails with exit **104** (`InvalidConfig`, `errext/exitcodes/codes.go:36`). The title comes from `consolidateErrorMessage` (`cmd/config.go:271`; title literal at `cmd/config.go:268`) and the detail from `validateScenarioConfig`'s `fmt.Errorf("executor %s: function '%s' not found in exports", ...)` (`cmd/config.go:287`) — note the `executor default:` prefix (executor name = scenario name). A defensive mirror `panic` exists at `js/runner.go:752` but is normally unreachable because config validation fires first (the comment at `js/runner.go:751` reads "Shouldn't happen; this is validated in cmd.validateScenarioConfig()"):
+**2. A callable `default` executor must exist.** A script with no `default` export fails with exit **104** (`InvalidConfig`, `errext/exitcodes/codes.go:36`). The title comes from `consolidateErrorMessage` (`cmd/config.go:271`; title literal at `cmd/config.go:268`) and the detail from `validateScenarioConfig`'s `fmt.Errorf("executor %s: function '%s' not found in exports", ...)` (`cmd/config.go:287`) — note the `executor default:` prefix (executor name = scenario name). A defensive mirror `panic` exists at `js/runner.go:752` but is normally unreachable because config validation fires first (the comment at `js/runner.go:751` reads "Shouldn't happen; this is validated in cmd.validateScenarioConfig()"). Complete, unedited output for `no_default.js`:
 
 ```text
+$ k6 run no_default.js; echo "exit=$?"
          /\      Grafana   /‾‾/  
     /\  /  \     |\  __   /  /   
    /  \/    \    | |/ /  /   ‾‾\ 
   /          \   |   (  |  (‾)  |
  / __________ \  |_|\_\  \_____/ 
 
-time="2026-07-08T04:31:17Z" level=error msg="There were problems with the specified script configuration:\n\t- executor default: function 'default' not found in exports"
+time="2026-07-08T05:58:13Z" level=error msg="There were problems with the specified script configuration:\n\t- executor default: function 'default' not found in exports"
+exit=104
 ```
 
-**3. The JavaScript must parse.** A syntax error fails with exit **107** (`ScriptException`, `errext/exitcodes/codes.go:48`). The `Line 4:7` position corresponds to the specific malformed content of the test script (line 4 is `  foo bar baz`; column 7 is the unexpected identifier `bar`), so the exact position reflects this input:
+with `no_default.js` (a non-`default` export):
+
+```javascript
+import http from 'k6/http';
+export function notdefault() {
+  http.get('https://test.k6.io');
+}
+```
+
+**3. The JavaScript must parse.** A syntax error fails with exit **107** (`ScriptException`, `errext/exitcodes/codes.go:48`). The `Line 4:7` position corresponds to the malformed content of `broken.js` (line 4 is `  foo bar baz`; column 7 is the unexpected identifier `bar`), so the exact position reflects this input. The `file://` path in the message is the absolute path of the script as run (here `/work` is the working directory inside the build/run container). Complete, unedited output:
 
 ```text
+$ k6 run broken.js; echo "exit=$?"
          /\      Grafana   /‾‾/  
     /\  /  \     |\  __   /  /   
    /  \/    \    | |/ /  /   ‾‾\ 
   /          \   |   (  |  (‾)  |
  / __________ \  |_|\_\  \_____/ 
 
-time="2026-07-08T04:31:17Z" level=error msg="GoError: file:///out/work/broken.js: Line 4:7 Unexpected identifier\n" hint="script exception"
+time="2026-07-08T05:58:14Z" level=error msg="GoError: file:///work/broken.js: Line 4:7 Unexpected identifier\n" hint="script exception"
+exit=107
 ```
 
-**Validation order (observed):** (1) module resolvable via the loader → else exit **255**; then (2) parseable JavaScript → else exit **107**; then (3) a callable `default` executor → else exit **104**.
+with `broken.js`:
+
+```javascript
+import http from 'k6/http';
+export default function () {
+  http.get('https://test.k6.io');
+  foo bar baz
+}
+```
+
+**Validation order (observed):** (1) module resolvable via the loader → else exit **255**; then (2) parseable JavaScript → else exit **107**; then (3) a callable `default` executor → else exit **104**. This ordering is consistent with the three isolated cases above: a missing file never reaches parsing (exit 255); `broken.js` fails to parse before its exports can be inspected (exit 107); and `no_default.js` parses successfully and only then fails the executor-function check (exit 104).
 
 The **full exit-code taxonomy** (`errext/exitcodes/codes.go:10-56`) — `InvalidConfig=104`, `ScriptException=107`, and the rest:
 
@@ -482,7 +802,7 @@ const (
 All citations were verified against the source tree at commit `ddc3b0b1d`, and all behavioural claims come from the runtime output of a `k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)` binary built from that source. Read-only source files consulted and/or executed as evidence:
 
 - `examples/http_get.js`, `README.md`
-- `main.go`, `cmd/run.go`, `cmd/config.go`, `cmd/state/state.go`, `cmd/options.go`, `cmd/runtime_options.go`
+- `main.go`, `cmd/run.go`, `cmd/root.go`, `cmd/config.go`, `cmd/state/state.go`, `cmd/options.go`, `cmd/runtime_options.go`
 - `metrics/builtin.go`, `metrics/metric_type.go`, `metrics/value_type.go`, `metrics/units.go`
 - `js/summary.js`, `js/runner.go`
 - `loader/readsource.go`, `loader/loader.go`, `errext/exitcodes/codes.go`, `api/server.go`
