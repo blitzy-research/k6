@@ -292,6 +292,42 @@ ramp   [   5% ] 6/6 VUs  0m06.0s/2m03.0s
 time="2026-07-08T04:26:30Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
 ```
 
+### (c2) Exit status - captured at runtime (proof, not assertion)
+
+The exit status is read straight from the shell with `wait $K6PID; echo "exit=$?"`
+immediately after each run, so the value is **observed**, not asserted. Every run -
+single SIGINT (twice, for stability) and double SIGINT - exits **105**:
+
+```text
+# single SIGINT - run 1
+$ ./k6 run --verbose /tmp/k6smoke/q1.js > /tmp/k6smoke/q1_single.log 2>&1 &
+$ K6PID=$!
+$ sleep 6
+$ kill -INT $K6PID
+$ wait $K6PID; echo "exit=$?"
+exit=105
+
+# single SIGINT - run 2 (stability)
+$ ./k6 run --verbose /tmp/k6smoke/q1.js > /tmp/k6smoke/q1_single2.log 2>&1 &
+$ K6PID=$!
+$ sleep 6
+$ kill -INT $K6PID
+$ wait $K6PID; echo "exit=$?"
+exit=105
+
+# double SIGINT
+$ ./k6 run --verbose /tmp/k6smoke/q1.js > /tmp/k6smoke/q1_double.log 2>&1 &
+$ K6PID=$!
+$ sleep 6
+$ kill -INT $K6PID; sleep 0.05; kill -INT $K6PID
+$ wait $K6PID; echo "exit=$?"
+exit=105
+```
+
+`105` is `exitcodes.ExternalAbort`, defined at `errext/exitcodes/codes.go:41`
+(`ExternalAbort ExitCode = 105`) - the code k6 returns for a run aborted by an
+external signal.
+
 ### (d) file:line citations
 
 - **Signal trap.** `cmd/common.go:98` logs `Trapping interrupt signals so k6 can handle
@@ -300,8 +336,9 @@ time="2026-07-08T04:26:30Z" level=error msg="Aborting k6 in response to signal" 
 - **First signal - graceful-stop handler.** `cmd/run.go:350` logs the debug line
   `Stopping k6 in response to signal...` with field `sig=interrupt`, then aborts the run
   with the error at `cmd/run.go:354`:
-  `test run was aborted because k6 received a '%s' signal` (exit code
-  `exitcodes.ExternalAbort` = 105).
+  `test run was aborted because k6 received a '%s' signal`. This maps to exit code
+  `exitcodes.ExternalAbort` = 105, defined at `errext/exitcodes/codes.go:41`
+  (`ExternalAbort ExitCode = 105`).
 - **Second signal - hard stop.** `cmd/run.go:360` logs `Aborting k6 in response to
   signal` at **error** level; the second signal then causes an immediate
   `gs.OSExit(int(exitcodes.ExternalAbort))` at `cmd/common.go:118`.
@@ -360,7 +397,7 @@ summary. (Run >=2 times; report the distribution.)
 The in-repository gRPC example server is a **separate nested Go module**
 (`examples/grpc_server/go.mod`, with `replace go.k6.io/k6 => ../../`). To avoid dirtying
 the tree, it was copied outside the repo, its `replace` retargeted to the absolute repo
-path, built, and started on `localhost:10000` (`examples/grpc_server/main.go:51`). Its
+path, built, and started on `localhost:10000` (the `--port` flag defaults to `10000` at `examples/grpc_server/main.go:51`; the startup log `gRPC server starting on localhost:%d` is at `:57`, and `net.Listen` binds at `:59`). Its
 `route_guide.proto` was copied next to the temp script (k6's `client.load()` resolves the
 proto path relative to the **script** directory).
 
@@ -564,7 +601,7 @@ time="2026-07-08T04:31:26Z" level=error msg="test run was aborted because k6 rec
 ### (c) Stability across runs
 
 The server streams one `Feature` roughly every 100 ms per active stream
-(`lib/testutils/grpcservice/service.go:57` sleeps 100 ms before each `stream.Send`), so
+(`lib/testutils/grpcservice/service.go:57` declares `ListFeatures`; it sleeps 100 ms at `:62` before each `stream.Send` at `:63`), so
 `grpc_streams_msgs_received` is **inherently timing-dependent** - it scales with how long
 the streams ran before interruption. Using the **same** unchanged script and the **same**
 ~7 s single-SIGINT timing:
@@ -636,20 +673,299 @@ export default () => {
 };
 ```
 ```text
-$ ./k6 run --verbose /tmp/k6smoke/q2_close.js > /tmp/k6smoke/q2_close.log 2>&1
-# captured (verbatim):
-time="...Z" level=info msg="STREAM_ERROR_HANDLER code=2 message=canceled by client (k6)" source=console
-time="...Z" level=info msg="STREAM_ERROR_HANDLER code=2 message=canceled by client (k6)" source=console
-     grpc_streams_msgs_received...: 8     1.217522/s
-# interruption-warning count in this run: 0
+$ cd /tmp/k6smoke   # so 'route_guide.proto' resolves next to the script
+$ ./k6 run --verbose /tmp/k6smoke/q2_close.js > /tmp/k6smoke/q2_close.log 2>&1; echo "exit=$?"
+exit=0
+$ cat /tmp/k6smoke/q2_close.log
+time="2026-07-08T06:09:06Z" level=debug msg="Logger format: TEXT"
+time="2026-07-08T06:09:06Z" level=debug msg="k6 version: v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)"
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+time="2026-07-08T06:09:06Z" level=debug msg="Resolving and reading test '/tmp/k6smoke/q2_close.js'..."
+time="2026-07-08T06:09:06Z" level=debug msg=Loading... moduleSpecifier="file:///tmp/k6smoke/q2_close.js" originalModuleSpecifier=/tmp/k6smoke/q2_close.js
+time="2026-07-08T06:09:06Z" level=debug msg="'/tmp/k6smoke/q2_close.js' resolved to 'file:///tmp/k6smoke/q2_close.js' and successfully loaded 1277 bytes!"
+time="2026-07-08T06:09:06Z" level=debug msg="Gathering k6 runtime options..."
+time="2026-07-08T06:09:06Z" level=debug msg="Initializing k6 runner for '/tmp/k6smoke/q2_close.js' (file:///tmp/k6smoke/q2_close.js)..."
+time="2026-07-08T06:09:06Z" level=debug msg="Detecting test type for..." test_path="file:///tmp/k6smoke/q2_close.js"
+time="2026-07-08T06:09:06Z" level=debug msg="Trying to load as a JS test..." test_path="file:///tmp/k6smoke/q2_close.js"
+time="2026-07-08T06:09:06Z" level=debug msg="Runner successfully initialized!"
+time="2026-07-08T06:09:06Z" level=debug msg="Parsing CLI flags..."
+time="2026-07-08T06:09:06Z" level=debug msg="Consolidating config layers..."
+time="2026-07-08T06:09:06Z" level=debug msg="Parsing thresholds and validating config..."
+time="2026-07-08T06:09:06Z" level=debug msg="Initializing the execution scheduler..."
+time="2026-07-08T06:09:06Z" level=debug msg="Starting 2 outputs..." component=output-manager
+time="2026-07-08T06:09:06Z" level=debug msg=Starting... component=metrics-engine-ingester
+time="2026-07-08T06:09:06Z" level=debug msg="Started!" component=metrics-engine-ingester
+     execution: local
+        script: /tmp/k6smoke/q2_close.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 2 iterations shared among 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+time="2026-07-08T06:09:06Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
+time="2026-07-08T06:09:06Z" level=debug msg="Starting the REST API server on localhost:6565"
+time="2026-07-08T06:09:06Z" level=debug msg="Starting emission of VUs and VUsMax metrics..."
+time="2026-07-08T06:09:06Z" level=debug msg="Start of initialization" executorsCount=1 neededVUs=1 phase=execution-scheduler-init
+time="2026-07-08T06:09:06Z" level=debug msg="Initialized VU #1" phase=execution-scheduler-init
+time="2026-07-08T06:09:06Z" level=debug msg="Finished initializing needed VUs, start initializing executors..." phase=execution-scheduler-init
+time="2026-07-08T06:09:06Z" level=debug msg="Initialized executor default" phase=execution-scheduler-init
+time="2026-07-08T06:09:06Z" level=debug msg="Initialization completed" phase=execution-scheduler-init
+time="2026-07-08T06:09:06Z" level=debug msg="Start of test run" executorsCount=1 phase=execution-scheduler-run
+time="2026-07-08T06:09:06Z" level=debug msg="setup() is not defined or not exported, skipping!"
+time="2026-07-08T06:09:06Z" level=debug msg="Start all executors..." phase=execution-scheduler-run
+time="2026-07-08T06:09:06Z" level=debug msg="Starting executor" executor=default startTime=0s type=shared-iterations
+time="2026-07-08T06:09:06Z" level=debug msg="Starting executor run..." executor=shared-iterations iterations=2 maxDuration=10m0s scenario=default type=shared-iterations vus=1
+time="2026-07-08T06:09:06Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/2 shared iters
+time="2026-07-08T06:09:07Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:09:07Z" level=info msg="STREAM_ERROR_HANDLER code=2 message=canceled by client (k6)" source=console
+time="2026-07-08T06:09:07Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+
+running (00m02.0s), 1/1 VUs, 1 complete and 0 interrupted iterations
+default   [  50% ] 1 VUs  00m02.0s/10m0s  1/2 shared iters
+time="2026-07-08T06:09:08Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:09:08Z" level=info msg="STREAM_ERROR_HANDLER code=2 message=canceled by client (k6)" source=console
+time="2026-07-08T06:09:08Z" level=debug msg="Regular duration is done, waiting for iterations to gracefully finish" executor=shared-iterations gracefulStop=30s scenario=default
+time="2026-07-08T06:09:08Z" level=debug msg="Executor finished successfully" executor=default startTime=0s type=shared-iterations
+time="2026-07-08T06:09:08Z" level=debug msg="teardown() is not defined or not exported, skipping!"
+time="2026-07-08T06:09:08Z" level=debug msg="Test finished cleanly"
+time="2026-07-08T06:09:08Z" level=debug msg="Stopping vus and vux_max metrics emission..." phase=execution-scheduler-init
+time="2026-07-08T06:09:08Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-08T06:09:08Z" level=debug msg="Releasing signal trap..."
+time="2026-07-08T06:09:08Z" level=debug msg="Sending usage report..."
+time="2026-07-08T06:09:08Z" level=debug msg="Waiting for metrics and traces processing to finish..."
+time="2026-07-08T06:09:08Z" level=debug msg="Metrics and traces processing finished!"
+time="2026-07-08T06:09:08Z" level=debug msg="Stopping outputs..."
+time="2026-07-08T06:09:08Z" level=debug msg="Stopping 2 outputs..." component=output-manager
+time="2026-07-08T06:09:08Z" level=debug msg=Stopping... component=metrics-engine-ingester
+time="2026-07-08T06:09:08Z" level=debug msg="Stopped!" component=metrics-engine-ingester
+time="2026-07-08T06:09:08Z" level=debug msg="Generating the end-of-test summary..."
+
+     data_received................: 866 B 431 B/s
+     data_sent....................: 795 B 396 B/s
+     grpc_req_duration............: avg=501.09ms min=500.9ms med=501.09ms max=501.27ms p(90)=501.24ms p(95)=501.26ms
+     grpc_streams.................: 2     0.99631/s
+     grpc_streams_msgs_received...: 8     3.985238/s
+     grpc_streams_msgs_sent.......: 2     0.99631/s
+     iteration_duration...........: avg=1s       min=1s      med=1s       max=1s       p(90)=1s       p(95)=1s      
+     iterations...................: 2     0.99631/s
+     vus..........................: 1     min=1      max=1
+     vus_max......................: 1     min=1      max=1
+
+
+running (00m02.0s), 0/1 VUs, 2 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m02.0s/10m0s  2/2 shared iters
+time="2026-07-08T06:09:08Z" level=debug msg="Usage report sent successfully"
+time="2026-07-08T06:09:08Z" level=debug msg="Everything has finished, exiting k6 normally!"
 ```
 
-gRPC status **code 2 = CANCELLED**, message `canceled by client (k6)`. For completeness, a
-run that registers an `error` handler but is then hard-interrupted by `SIGINT` logged
-**0** warnings *and* did not print the handler's `console.log` (received = 308 that run):
-the process teardown cancels the streams (so the warning is suppressed by the registered
-handler) but exits before the queued `error` callback is dispatched on the VU event loop
-**(inferred)** - reasoned from the observed absence of both the warning and the handler line.
+gRPC status **code 2 = CANCELLED**, message `canceled by client (k6)`; the handler's
+`console.log` fired **twice** (once per iteration, lines 50 and 56 above) and **0**
+`no handlers for error registered` warnings were logged - the registered handler both
+suppresses the `stream.go:395` warning and, because the VU is still alive, actually
+receives the `error` event.
+
+### (d2) Secondary path - handler registered *and* interrupted by `SIGINT`
+
+To exercise the exact condition the question implies - an `error` handler registered
+**and** a process `SIGINT` - this variant is the primary server-streaming scenario (30 ms
+`gracefulRampDown`/`gracefulStop`) with a `stream.on('error', ...)` handler added, then a
+single `SIGINT` ~7 s in. It isolates the SIGINT path from the `client.close()` control above.
+
+```javascript
+import { Client, Stream } from 'k6/net/grpc';
+import { sleep } from 'k6';
+
+// Q2 secondary path (SIGINT + handler): identical to the primary q2.js server-streaming
+// scenario (30ms gracefulRampDown/gracefulStop) BUT an 'error' handler IS registered, then
+// the process is interrupted by a single SIGINT ~7s in. This isolates the SIGINT path from
+// the client.close() control in q2_close.js.
+const GRPC_ADDR = __ENV.GRPC_ADDR || '127.0.0.1:10000';
+const GRPC_PROTO_PATH = __ENV.GRPC_PROTO_PATH || 'route_guide.proto';
+
+const client = new Client();
+client.load([], GRPC_PROTO_PATH);
+
+export const options = {
+  scenarios: {
+    stream: {
+      executor: 'ramping-vus',
+      startVUs: 4,
+      stages: [{ duration: '60s', target: 4 }],
+      gracefulRampDown: '30ms',
+      gracefulStop: '30ms',
+    },
+  },
+};
+
+export default () => {
+  client.connect(GRPC_ADDR, { plaintext: true });
+
+  const stream = new Stream(client, 'main.FeatureExplorer/ListFeatures', null);
+
+  stream.on('data', function (feature) {});
+
+  // An 'error' handler IS registered in this variant (contrast with primary q2.js).
+  stream.on('error', function (e) {
+    console.log('STREAM_ERROR_HANDLER code=' + e.code + ' message=' + e.message);
+  });
+
+  stream.on('end', function () {
+    client.close();
+  });
+
+  stream.write({
+    lo: { latitude: 400000000, longitude: -750000000 },
+    hi: { latitude: 420000000, longitude: -730000000 },
+  });
+
+  sleep(3);
+};
+```
+
+```text
+$ cd /tmp/k6smoke
+$ ./k6 run --verbose /tmp/k6smoke/q2_handler_sigint.js > /tmp/k6smoke/q2_handler_sigint.log 2>&1 &
+$ K6PID=$!; sleep 7; kill -INT $K6PID; wait $K6PID; echo "exit=$?"
+exit=105
+$ cat /tmp/k6smoke/q2_handler_sigint.log
+time="2026-07-08T06:09:55Z" level=debug msg="Logger format: TEXT"
+time="2026-07-08T06:09:55Z" level=debug msg="k6 version: v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)"
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+time="2026-07-08T06:09:55Z" level=debug msg="Resolving and reading test '/tmp/k6smoke/q2_handler_sigint.js'..."
+time="2026-07-08T06:09:55Z" level=debug msg=Loading... moduleSpecifier="file:///tmp/k6smoke/q2_handler_sigint.js" originalModuleSpecifier=/tmp/k6smoke/q2_handler_sigint.js
+time="2026-07-08T06:09:55Z" level=debug msg="'/tmp/k6smoke/q2_handler_sigint.js' resolved to 'file:///tmp/k6smoke/q2_handler_sigint.js' and successfully loaded 1434 bytes!"
+time="2026-07-08T06:09:55Z" level=debug msg="Gathering k6 runtime options..."
+time="2026-07-08T06:09:55Z" level=debug msg="Initializing k6 runner for '/tmp/k6smoke/q2_handler_sigint.js' (file:///tmp/k6smoke/q2_handler_sigint.js)..."
+time="2026-07-08T06:09:55Z" level=debug msg="Detecting test type for..." test_path="file:///tmp/k6smoke/q2_handler_sigint.js"
+time="2026-07-08T06:09:55Z" level=debug msg="Trying to load as a JS test..." test_path="file:///tmp/k6smoke/q2_handler_sigint.js"
+time="2026-07-08T06:09:55Z" level=debug msg="Runner successfully initialized!"
+time="2026-07-08T06:09:55Z" level=debug msg="Parsing CLI flags..."
+time="2026-07-08T06:09:55Z" level=debug msg="Consolidating config layers..."
+time="2026-07-08T06:09:55Z" level=debug msg="Parsing thresholds and validating config..."
+time="2026-07-08T06:09:55Z" level=debug msg="Initializing the execution scheduler..."
+time="2026-07-08T06:09:55Z" level=debug msg="Starting 2 outputs..." component=output-manager
+time="2026-07-08T06:09:55Z" level=debug msg=Starting... component=metrics-engine-ingester
+time="2026-07-08T06:09:55Z" level=debug msg="Started!" component=metrics-engine-ingester
+     execution: local
+        script: /tmp/k6smoke/q2_handler_sigint.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 4 max VUs, 1m0s max duration (incl. graceful stop):
+              * stream: Up to 4 looping VUs for 1m0s over 1 stages (gracefulRampDown: 30ms, gracefulStop: 30ms)
+
+time="2026-07-08T06:09:55Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
+time="2026-07-08T06:09:55Z" level=debug msg="Starting the REST API server on localhost:6565"
+time="2026-07-08T06:09:55Z" level=debug msg="Starting emission of VUs and VUsMax metrics..."
+time="2026-07-08T06:09:55Z" level=debug msg="Start of initialization" executorsCount=1 neededVUs=4 phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Initialized VU #1" phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Initialized VU #2" phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Initialized VU #4" phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Initialized VU #3" phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Finished initializing needed VUs, start initializing executors..." phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Initialized executor stream" phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Initialization completed" phase=execution-scheduler-init
+time="2026-07-08T06:09:55Z" level=debug msg="Start of test run" executorsCount=1 phase=execution-scheduler-run
+time="2026-07-08T06:09:55Z" level=debug msg="setup() is not defined or not exported, skipping!"
+time="2026-07-08T06:09:55Z" level=debug msg="Start all executors..." phase=execution-scheduler-run
+time="2026-07-08T06:09:55Z" level=debug msg="Starting executor" executor=stream startTime=0s type=ramping-vus
+time="2026-07-08T06:09:55Z" level=debug msg="Starting executor run..." duration=1m0s executor=ramping-vus maxVUs=4 numStages=1 scenario=stream startVUs=4 type=ramping-vus
+time="2026-07-08T06:09:55Z" level=debug msg=Start executor=ramping-vus scenario=stream vuNum=0
+time="2026-07-08T06:09:55Z" level=debug msg=Start executor=ramping-vus scenario=stream vuNum=1
+time="2026-07-08T06:09:55Z" level=debug msg=Start executor=ramping-vus scenario=stream vuNum=2
+time="2026-07-08T06:09:55Z" level=debug msg=Start executor=ramping-vus scenario=stream vuNum=3
+
+running (0m01.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+stream   [   2% ] 4/4 VUs  0m01.0s/1m00.0s
+
+running (0m02.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+stream   [   3% ] 4/4 VUs  0m02.0s/1m00.0s
+
+running (0m03.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+stream   [   5% ] 4/4 VUs  0m03.0s/1m00.0s
+
+running (0m04.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+stream   [   7% ] 4/4 VUs  0m04.0s/1m00.0s
+
+running (0m05.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+stream   [   8% ] 4/4 VUs  0m05.0s/1m00.0s
+
+running (0m06.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+stream   [  10% ] 4/4 VUs  0m06.0s/1m00.0s
+time="2026-07-08T06:10:02Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-08T06:10:02Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-08T06:10:02Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-08T06:10:02Z" level=debug msg="Executor finished successfully" executor=stream startTime=0s type=ramping-vus
+time="2026-07-08T06:10:02Z" level=debug msg="teardown() is not defined or not exported, skipping!"
+time="2026-07-08T06:10:02Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+time="2026-07-08T06:10:02Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-08T06:10:02Z" level=debug msg="Stopping vus and vux_max metrics emission..." phase=execution-scheduler-init
+time="2026-07-08T06:10:02Z" level=debug msg="Releasing signal trap..."
+time="2026-07-08T06:10:02Z" level=debug msg="Sending usage report..."
+time="2026-07-08T06:10:02Z" level=debug msg="Waiting for metrics and traces processing to finish..."
+time="2026-07-08T06:10:02Z" level=debug msg="Metrics and traces processing finished!"
+time="2026-07-08T06:10:02Z" level=debug msg="Stopping outputs..."
+time="2026-07-08T06:10:02Z" level=debug msg="Stopping 2 outputs..." component=output-manager
+time="2026-07-08T06:10:02Z" level=debug msg=Stopping... component=metrics-engine-ingester
+time="2026-07-08T06:10:02Z" level=debug msg="Stopped!" component=metrics-engine-ingester
+time="2026-07-08T06:10:02Z" level=debug msg="Generating the end-of-test summary..."
+
+     data_received................: 25 kB  3.6 kB/s
+     data_sent....................: 9.4 kB 1.4 kB/s
+     grpc_streams.................: 4      0.573531/s
+     grpc_streams_msgs_received...: 276    39.573651/s
+     grpc_streams_msgs_sent.......: 4      0.573531/s
+     vus..........................: 4      min=4       max=4
+     vus_max......................: 4      min=4       max=4
+
+
+running (0m07.0s), 0/4 VUs, 0 complete and 4 interrupted iterations
+stream ✗ [  12% ] 4/4 VUs  0m07.0s/1m00.0s
+time="2026-07-08T06:10:02Z" level=debug msg="Usage report sent successfully"
+time="2026-07-08T06:10:02Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-08T06:10:02Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+```
+
+Runtime proof (grep over the captured log):
+
+```text
+$ grep -c 'no handlers for error registered' /tmp/k6smoke/q2_handler_sigint.log
+0
+$ grep -c 'STREAM_ERROR_HANDLER' /tmp/k6smoke/q2_handler_sigint.log
+0
+```
+
+So with a handler registered **and** a `SIGINT` interrupt, k6 logs **0** interruption
+warnings (the registered handler suppresses the `stream.go:395` warning) **and** the
+handler's `console.log` never fires (**0** `STREAM_ERROR_HANDLER` lines) - the process
+teardown cancels the streams but exits before the queued `error` callback is dispatched on
+the VU event loop. This run received **276** messages (`grpc_streams_msgs_received`, in the
+same 272-276 @ ~7 s band as the primary) and ended `0 complete and 4 interrupted
+iterations` (exit code 105). The three conditions therefore contrast cleanly: **primary
+q2.js** (no handler + SIGINT) -> **4** warnings; **q2_close.js** (handler + `client.close()`,
+VU alive) -> **0** warnings and the handler fires **twice**; **q2_handler_sigint.js**
+(handler + SIGINT) -> **0** warnings and the handler fires **0** times.
 
 ### (e) file:line citations
 
@@ -660,9 +976,12 @@ handler) but exits before the queued `error` callback is dispatched on the VU ev
 - `js/modules/k6/grpc/stream.go:395` emits the interruption warning
   `no handlers for error registered, but an error happened: %s` - reached only when the
   stream errors **and** no `error` listener is registered.
-- Server: `examples/grpc_server/main.go:51` listens on `localhost:10000`;
-  `lib/testutils/grpcservice/service.go:57` implements `ListFeatures`, sending one feature
-  per 100 ms.
+- Server: `examples/grpc_server/main.go:59` (`net.Listen`) binds `localhost:10000`; the
+  `--port` flag defaults to `10000` at `:51` and the startup log
+  `gRPC server starting on localhost:%d` is at `:57`.
+- Service: `lib/testutils/grpcservice/service.go:57` declares `ListFeatures`; for each
+  in-range feature it sleeps 100 ms at `:62` before `stream.Send(feature)` at `:63`
+  (one feature per ~100 ms).
 
 ### (f) Cause -> effect
 
@@ -928,9 +1247,10 @@ q3_klog_run2.log:     dropped_iterations...: 14940 496.945685/s
 ```
 
 The arithmetic is self-consistent: 60 completed + ~14 940 dropped ~= 15 000 = 500 iters/s x
-30 s scheduled. The final **total** is stable (14 941 vs 14 940); the **live API value** is
-whatever the counter has reached at query time (e.g. run 1: 49 -> 274 -> ... -> 14 092 ->
-final 14 941).
+30 s scheduled. The end-of-test summary **total** is stable across runs (14 941 vs 14 940)
+and is shown for corroboration only; the value actually **reported from the API** is the
+live counter at query time (run 1: 49 -> 274 -> ... -> 14 092 at the last mid-run query,
+always read while `running:true`), which in these runs stayed below the summary total.
 
 ### (f) file:line citations
 
@@ -1021,7 +1341,12 @@ running (00m00.0s), 0/8 VUs, 8 complete and 0 interrupted iterations
 default ✓ [ 100% ] 8 VUs  00m00.0s/10m0s  8/8 shared iters
 ```
 
-Marker count at 8 VUs: **1**.
+Raw marker count at 8 VUs (the `grep -c` from the command block above) - **1**:
+
+```text
+$ grep -c 'SHAREDARRAY_INIT_MARKER' /tmp/k6smoke/q4.out
+1
+```
 
 
 ### (c) Secondary evidence - 16 VUs (still one copy)
@@ -1053,7 +1378,12 @@ running (00m00.0s), 00/16 VUs, 16 complete and 0 interrupted iterations
 default ✓ [ 100% ] 16 VUs  00m00.0s/10m0s  16/16 shared iters
 ```
 
-Marker count at 16 VUs: **1** (doubling the VUs did not add a second materialisation).
+Raw marker count at 16 VUs - **1** (doubling the VUs did not add a second materialisation):
+
+```text
+$ grep -c 'SHAREDARRAY_INIT_MARKER' /tmp/k6smoke/q4_16.out
+1
+```
 
 
 ### (d) Contrast - no SharedArray (each VU copies)
@@ -1088,8 +1418,11 @@ versus **1** for `SharedArray` - the qualitative difference that proves sharing.
 
 - `js/modules/k6/data/data.go:32` - `data map[string]sharedArray`: a **single** Go-side map
   keyed by name, shared across all VUs of the instance.
-- `js/modules/k6/data/data.go:152` - `get()` uses double-checked locking and invokes the
-  JS constructor **exactly once per name**; later VUs receive the cached array.
+- `js/modules/k6/data/data.go:152` - `get()` (the function is declared at `:152`) uses
+  double-checked locking (`:153`-`:160`); only on a cache miss does it invoke the JS
+  constructor at `:161` (`array = getShareArrayFromCall(rt, call)`) and store the result at
+  `:162` (`s.data[name] = array`), so the callback runs **exactly once per name** and later
+  VUs receive the cached array.
 - `js/modules/k6/data/share.go:23` - `wrap()` returns `rt.NewDynamicArray(...)` (`:27`), a
   Sobek dynamic-array proxy over the single backing store.
 - `js/modules/k6/data/share.go:36`/`js/modules/k6/data/share.go:41` - `Set`/`SetLen` panic `SharedArray is
@@ -1102,7 +1435,8 @@ The memory footprint for the file data stays **constant** as VUs increase; each 
 **not** create its own copy. Root cause: each k6 VU is an isolated JS VM (which would
 otherwise each parse and hold the whole file), but `SharedArray` stores the parsed data
 **once** in a Go-side map keyed by name (`data.go:32`), materialises it only once per name
-(`data.go:152`), and exposes it to every VU through a Sobek dynamic-array wrapper
+(the double-checked guard in `get()` at `data.go:152`, invoking the constructor at `:161`
+and caching at `:162`), and exposes it to every VU through a Sobek dynamic-array wrapper
 (`share.go:23`) that reads from that single backing store, returning a copy only for the
 specific element accessed (`share.go:44`). **Web/doc cross-check:** Grafana's *SharedArray*
 / *Data parameterization* docs state the constructor runs once, the result is stored once
@@ -1389,14 +1723,14 @@ k6_vus_max  =>  {__name__="k6_vus_max"}
 
 ### (e) file:line citations
 
-- `vendor/.../remotewrite/prometheus.go:11` - `const namelbl = "__name__"`.
-- `vendor/.../remotewrite/prometheus.go:39` - `func MapSeries(series, suffix)`; `:40` -
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:11` - `const namelbl = "__name__"`.
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:39` - `func MapSeries(series, suffix)`; `:40` -
   `v := defaultMetricPrefix + series.Metric.Name`; the suffix (when non-empty) is appended
   as `v += "_" + suffix`; `:45` - the value `v` is stored in the `Name: namelbl`
   (`__name__`) label. Labels are then sorted lexicographically.
-- `vendor/.../remotewrite/config.go:24` - `defaultMetricPrefix = "k6_"`; `vendor/.../remotewrite/config.go:21` -
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/config.go:24` - `defaultMetricPrefix = "k6_"`; `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/config.go:21` -
   `defaultServerURL = "http://localhost:9090/api/v1/write"`.
-- `vendor/.../remotewrite/remotewrite.go:186` -
+- `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:186` -
   `statKey = strings.ReplaceAll(statKey, ".", "")  // remove dots, p(0.95) => p095`
   (with the surrounding lines trimming the `p(` prefix and `)` suffix and re-prepending
   `p`).
@@ -1453,8 +1787,9 @@ decoded `__name__` values.
   `GET /v1/metrics/dropped_iterations` (`api/v1/routes.go:31`/`:37`,
   `api/v1/metric_routes.go`), API bind `localhost:6565` (`api/server.go:70`), the
   `404` path (`metric_routes.go:37`), and `GET /v1/status` `running:true`/`status:7`.
-  `000 -> 404 -> 200` transition captured; live API value grows to a stable final total
-  (**14 941 / 14 940**).
+  `000 -> 404 -> 200` transition captured; the reported value is the live API counter read
+  mid-run (up to ~14 092 at the last query while `running:true`), corroborated by - not
+  taken from - the end-of-test summary total (**14 941 / 14 940**).
 - **Q4** - `SharedArray` marker logged **once** at 8 and 16 VUs (vs **10** without
   sharing); single Go-side map (`data.go:32`), once-per-name `get()` (`data.go:152`),
   dynamic-array proxy + immutability (`share.go:23`/`:36`/`:41`/`:44`).
@@ -1488,4 +1823,300 @@ three self-tests before use, all passing:
 
 The k6 binary and its emitted bytes are fully canonical; the decoder only **reads** those
 bytes, so the decoded `__name__` values are byte-exact evidence.
+
+### Ephemeral helper scripts (created under `/tmp/k6smoke`, deleted after capture)
+
+All three helper scripts below live **entirely outside the repository tree** (under `/tmp/k6smoke`); they were created solely to observe behaviour and were removed after evidence capture, leaving the repository unchanged (`git status --porcelain` empty). They are reproduced here verbatim so the capture-and-decode pipeline for Q5 is fully reproducible.
+
+**`/tmp/k6smoke/rw_receiver.py`** - the minimal remote-write receiver (listens on `:9090`, writes each POST body verbatim to `$RW_OUT_DIR/rw_body_<N>.bin`, replies `204`):
+
+```python
+#!/usr/bin/env python3
+"""Minimal Prometheus remote-write receiver used ONLY to capture k6's raw
+remote-write request bodies byte-for-byte (no re-serialisation).
+
+It listens on :9090, and for every POST to /api/v1/write it writes the exact
+request body to $RW_OUT_DIR/rw_body_<N>.bin (N = 0,1,2,... in arrival order)
+and replies 204 No Content, which is what k6's experimental-prometheus-rw
+output expects. Ephemeral: created under /tmp, deleted after capture.
+"""
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+OUT_DIR = os.environ.get("RW_OUT_DIR", "/tmp/k6smoke/rw_out")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+
+class Handler(BaseHTTPRequestHandler):
+    counter = 0
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)  # the exact on-the-wire bytes
+        path = os.path.join(OUT_DIR, "rw_body_%d.bin" % Handler.counter)
+        with open(path, "wb") as f:
+            f.write(body)
+        Handler.counter += 1
+        self.send_response(204)  # k6 remote-write expects 2xx (204 No Content)
+        self.end_headers()
+
+    def log_message(self, *args):  # silence default request logging
+        pass
+
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", 9090), Handler).serve_forever()
+```
+
+**`/tmp/k6smoke/target.py`** - the trivial local HTTP target (listens on `:8080`, every `GET` returns `200 ok`) that gives the VUs real `http_req_*`/`data_*` built-ins to export:
+
+```python
+#!/usr/bin/env python3
+"""Trivial local HTTP target on :8080 so the k6 VUs make real http_req_* and
+data_* built-in metrics during the Q5 run. Every GET returns 200 with a tiny
+body. Ephemeral: created under /tmp, deleted after capture.
+"""
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+
+    def do_GET(self):
+        body = b"ok\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # silence default request logging
+        pass
+
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+```
+
+**`/tmp/k6smoke/decode_rw.py`** - the self-contained byte-exact decoder (pure-Python snappy-block decompressor + protobuf wire-format parser) that reads the captured bytes and prints every `__name__` label:
+
+```python
+#!/usr/bin/env python3
+"""Byte-exact decoder for k6's Prometheus remote-write bodies.
+
+Because protoc / cramjam / python-snappy are unavailable offline, this tool is
+fully self-contained: a pure-Python *snappy block* decompressor followed by a
+minimal *protobuf wire-format* parser that extracts the `__name__` label (and
+the full label set) from each `prometheus.prompb.WriteRequest`.
+
+It READS the exact captured bytes (it never re-serialises k6's output), so the
+decoded `__name__` values are byte-exact evidence.
+
+Usage:
+    python3 decode_rw.py --selftest        # run the 3 self-tests
+    python3 decode_rw.py <dir-with-rw_body_*.bin>
+"""
+import os
+import sys
+import glob
+
+
+# ---------------------------------------------------------------------------
+# snappy *block* format decompressor (framing is NOT used by remote-write)
+# ---------------------------------------------------------------------------
+def _read_uvarint(buf, i):
+    shift = 0
+    result = 0
+    while True:
+        b = buf[i]
+        i += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            break
+        shift += 7
+    return result, i
+
+
+def snappy_decompress(data):
+    # 1) preamble: uncompressed length as a varint
+    ulen, i = _read_uvarint(data, 0)
+    out = bytearray()
+    n = len(data)
+    while i < n:
+        tag = data[i]
+        i += 1
+        etype = tag & 0x03
+        if etype == 0:  # literal
+            ln = tag >> 2
+            if ln < 60:
+                length = ln + 1
+            else:
+                extra = ln - 59  # number of little-endian length bytes
+                length = 0
+                for k in range(extra):
+                    length |= data[i + k] << (8 * k)
+                i += extra
+                length += 1
+            out += data[i:i + length]
+            i += length
+        else:  # copy (types 1,2,3)
+            if etype == 1:      # 1-byte offset
+                length = 4 + ((tag >> 2) & 0x07)
+                offset = ((tag >> 5) & 0x07) << 8 | data[i]
+                i += 1
+            elif etype == 2:    # 2-byte offset
+                length = 1 + (tag >> 2)
+                offset = data[i] | (data[i + 1] << 8)
+                i += 2
+            else:               # 4-byte offset
+                length = 1 + (tag >> 2)
+                offset = (data[i] | (data[i + 1] << 8)
+                          | (data[i + 2] << 16) | (data[i + 3] << 24))
+                i += 4
+            start = len(out) - offset
+            for k in range(length):      # byte-by-byte to allow overlap
+                out.append(out[start + k])
+    if len(out) != ulen:
+        raise ValueError("snappy: length mismatch %d != %d" % (len(out), ulen))
+    return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# minimal protobuf wire-format parser
+# ---------------------------------------------------------------------------
+def parse_fields(buf):
+    """Return dict: field_number -> list of raw values.
+    wire type 2 -> bytes; wire type 0 -> int; 1/5 -> raw bytes (skipped uses)."""
+    i = 0
+    n = len(buf)
+    fields = {}
+    while i < n:
+        key, i = _read_uvarint(buf, i)
+        fnum = key >> 3
+        wtype = key & 0x07
+        if wtype == 0:      # varint
+            val, i = _read_uvarint(buf, i)
+        elif wtype == 2:    # length-delimited
+            ln, i = _read_uvarint(buf, i)
+            val = buf[i:i + ln]
+            i += ln
+        elif wtype == 1:    # 64-bit
+            val = buf[i:i + 8]
+            i += 8
+        elif wtype == 5:    # 32-bit
+            val = buf[i:i + 4]
+            i += 4
+        else:
+            raise ValueError("unsupported wire type %d" % wtype)
+        fields.setdefault(fnum, []).append(val)
+    return fields
+
+
+def decode_write_request(raw):
+    """Return list of series, each a dict {label_name: label_value}."""
+    wr = parse_fields(raw)
+    series = []
+    for ts_bytes in wr.get(1, []):                 # WriteRequest.timeseries = 1
+        ts = parse_fields(ts_bytes)
+        labels = {}
+        for lb_bytes in ts.get(1, []):              # TimeSeries.labels = 1
+            lb = parse_fields(lb_bytes)
+            name = lb.get(1, [b""])[0].decode("utf-8")   # Label.name = 1
+            value = lb.get(2, [b""])[0].decode("utf-8")  # Label.value = 2
+            labels[name] = value
+        series.append(labels)
+    return series
+
+
+def fmt_labelset(labels):
+    parts = ['%s="%s"' % (k, labels[k]) for k in sorted(labels)]
+    return "{" + ", ".join(parts) + "}"
+
+
+# ---------------------------------------------------------------------------
+# self-tests (run before use)
+# ---------------------------------------------------------------------------
+def _enc_uvarint(x):
+    out = bytearray()
+    while True:
+        b = x & 0x7F
+        x >>= 7
+        if x:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _enc_str_field(fnum, s):
+    b = s.encode("utf-8")
+    return _enc_uvarint((fnum << 3) | 2) + _enc_uvarint(len(b)) + b
+
+
+def _enc_bytes_field(fnum, b):
+    return _enc_uvarint((fnum << 3) | 2) + _enc_uvarint(len(b)) + b
+
+
+def selftest():
+    # 1) snappy literal block: 05 10 "hello" -> "hello"
+    t1 = snappy_decompress(bytes([0x05, 0x10]) + b"hello")
+    assert t1 == b"hello", t1
+    # 2) snappy copy/overlap run-length -> "aaaaaa"
+    #    ulen=6; literal 'a' (tag 0x00); copy len=5 offset=1 (tag 0x05, off 0x01)
+    t2 = snappy_decompress(bytes([0x06, 0x00, 0x61, 0x05, 0x01]))
+    assert t2 == b"aaaaaa", t2
+    # 3) hand-built WriteRequest -> __name__ = [k6_iterations_total, k6_my_custom_counter_total]
+    def label(n, v):
+        return _enc_str_field(1, n) + _enc_str_field(2, v)
+    def ts(name):
+        lbls = label("__name__", name) + label("scenario", "default")
+        return _enc_bytes_field(1, lbls)
+    wr = _enc_bytes_field(1, ts("k6_iterations_total")) + \
+         _enc_bytes_field(1, ts("k6_my_custom_counter_total"))
+    series = decode_write_request(wr)
+    names = sorted(s["__name__"] for s in series)
+    assert names == ["k6_iterations_total", "k6_my_custom_counter_total"], names
+    print("SELFTEST 1 (snappy literal 05 10 'hello' -> 'hello'): PASS")
+    print("SELFTEST 2 (snappy copy/overlap -> 'aaaaaa'): PASS")
+    print("SELFTEST 3 (WriteRequest __name__ = %s): PASS" % names)
+    print("ALL SELF-TESTS PASSED")
+
+
+def main(dirpath):
+    files = sorted(glob.glob(os.path.join(dirpath, "rw_body_*.bin")),
+                   key=lambda p: int(p.rsplit("_", 1)[1].split(".")[0]))
+    all_names = set()
+    example = {}          # __name__ -> full label set (first seen)
+    print("===== PER-FILE SUMMARY (byte-exact decode) =====")
+    for p in files:
+        raw = open(p, "rb").read()
+        dec = snappy_decompress(raw)
+        series = decode_write_request(dec)
+        names = set(s.get("__name__", "") for s in series)
+        for s in series:
+            nm = s.get("__name__", "")
+            all_names.add(nm)
+            if nm not in example:
+                example[nm] = s
+        print("%s: raw=%dB snappy-> %dB, timeseries=%d, distinct __name__=%d"
+              % (os.path.basename(p), len(raw), len(dec), len(series), len(names)))
+    print()
+    print("===== ALL DISTINCT __name__ VALUES (verbatim, sorted) =====")
+    for nm in sorted(all_names):
+        print(nm)
+    print()
+    print("===== FULL LABEL SETS for k6-name-integrity proof (one example series per __name__) =====")
+    for nm in sorted(all_names):
+        print("%s  =>  %s" % (nm, fmt_labelset(example[nm])))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--selftest":
+        selftest()
+    else:
+        selftest()
+        print()
+        main(sys.argv[1] if len(sys.argv) > 1 else "/tmp/k6smoke/rw_run1")
+```
 
