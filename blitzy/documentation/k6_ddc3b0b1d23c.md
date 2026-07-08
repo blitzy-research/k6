@@ -1,6 +1,6 @@
 # k6 HTTP request‑timing metrics: are the `http_req_*` values trustworthy, or is there a measurement bug?
 
-> Investigative Q&A — read‑first‑then‑write. Every runtime claim below is tagged **OBSERVED** and sits next to the exact
+> Investigative Q&A — run‑first‑then‑write. Every runtime claim below is tagged **OBSERVED** and sits next to the exact
 > command that produced it and that command's complete, unedited output. Every claim drawn purely from reading the source
 > is tagged **INFERRED**. All observations come from the canonical path: the compiled default `k6` binary (the `k6/http`
 > JavaScript module) and the production `httpext.Tracer` exercised through `transport.RoundTrip` — no debug shim or
@@ -97,8 +97,10 @@ A normal user's binary is named `k6`, so the canonical banner is the `k6 …` fo
    `connectDone`, `tlsHandshakeStart`, `tlsHandshakeDone`, `gotConn`, `connReused`). It was written to
    `lib/netext/httpext/zz_investig_test.go`, run, then deleted; the repository was left clean.
 
-All temporary artifacts (the binary `/tmp/k6`, the local server, and the JS/Go harnesses) live in `/tmp`, outside the
-repository, and were removed. See the **Methods & reproducibility** appendix for the full, reproducible method.
+Aside from that single temporary in‑package test file, every *other* artifact — the binary `/tmp/k6`, the local
+server, and the JavaScript scripts — lived in `/tmp`, outside the repository. All of them (the in‑package harness
+included) were removed afterward, leaving the working tree clean — `git status --porcelain` reports only
+`blitzy/documentation/k6_ddc3b0b1d23c.md`. See the **Methods & reproducibility** appendix for the full, reproducible method.
 
 ---
 
@@ -179,23 +181,23 @@ the **Observation channels** appendix, which shows the reused request still send
 URL="$TLS_H1_URL" N=4 /tmp/k6 run --quiet --no-summary seq.js
 ```
 
-**Complete captured output — RUN #1** (**OBSERVED**, values in ms; `time=… level=info msg="…" source=console` wrapper
-stripped for readability — this is the `console.log` payload verbatim):
+**Complete captured output — RUN #1** (**OBSERVED**, complete unedited k6 output; each line is the `console.log`
+payload wrapped by k6's structured logger as `time=… level=info msg="…" source=console`; timings in ms):
 
 ```text
-req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=2.442 connecting=0.136 tls=2.231 sending=0.052 waiting=30.400 receiving=0.124 duration=30.576
-req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.003 connecting=0.000 tls=0.000 sending=0.020 waiting=30.467 receiving=0.064 duration=30.550
-req#2 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.003 connecting=0.000 tls=0.000 sending=0.016 waiting=30.475 receiving=0.183 duration=30.674
-req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.004 connecting=0.000 tls=0.000 sending=0.027 waiting=30.351 receiving=0.037 duration=30.415
+time="2026-07-08T05:10:13Z" level=info msg="req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=2.551 connecting=0.134 tls=2.340 sending=0.039 waiting=30.455 receiving=0.097 duration=30.591" source=console
+time="2026-07-08T05:10:13Z" level=info msg="req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.003 connecting=0.000 tls=0.000 sending=0.018 waiting=30.428 receiving=0.071 duration=30.517" source=console
+time="2026-07-08T05:10:14Z" level=info msg="req#2 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.003 connecting=0.000 tls=0.000 sending=0.016 waiting=30.468 receiving=0.097 duration=30.580" source=console
+time="2026-07-08T05:10:14Z" level=info msg="req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.002 connecting=0.000 tls=0.000 sending=0.013 waiting=30.390 receiving=0.043 duration=30.446" source=console
 ```
 
-**Stability — RUN #2** (**OBSERVED**, same unchanged input; identical pattern):
+**Stability — RUN #2** (**OBSERVED**, same unchanged input; identical pattern; complete unedited output):
 
 ```text
-req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=2.428 connecting=0.151 tls=2.197 sending=0.034 waiting=30.437 receiving=0.085 duration=30.555
-req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.003 connecting=0.000 tls=0.000 sending=0.018 waiting=30.355 receiving=0.035 duration=30.407
-req#2 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.002 connecting=0.000 tls=0.000 sending=0.007 waiting=30.452 receiving=0.071 duration=30.530
-req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.003 connecting=0.000 tls=0.000 sending=0.017 waiting=30.398 receiving=0.053 duration=30.468
+time="2026-07-08T05:10:14Z" level=info msg="req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=2.432 connecting=0.135 tls=2.204 sending=0.077 waiting=30.350 receiving=0.108 duration=30.534" source=console
+time="2026-07-08T05:10:14Z" level=info msg="req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.003 connecting=0.000 tls=0.000 sending=0.019 waiting=30.375 receiving=0.041 duration=30.436" source=console
+time="2026-07-08T05:10:14Z" level=info msg="req#2 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.007 connecting=0.000 tls=0.000 sending=0.010 waiting=30.358 receiving=0.066 duration=30.435" source=console
+time="2026-07-08T05:10:14Z" level=info msg="req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.002 connecting=0.000 tls=0.000 sending=0.018 waiting=30.387 receiving=0.094 duration=30.499" source=console
 ```
 
 Across both runs, `connecting` and `tls` are the **first request's** measured values and **exactly `0.000`** on every
@@ -205,19 +207,19 @@ subsequent (reused) request. Stable across ≥2 runs.
 `0.000`:
 
 ```text
-req#0 proto=HTTP/2.0 status=200 remote=127.0.0.1:38613 blocked=2.780 connecting=0.184 tls=2.398 sending=0.232 waiting=30.548 receiving=0.067 duration=30.847
-req#1 proto=HTTP/2.0 status=200 remote=127.0.0.1:38613 blocked=0.000 connecting=0.000 tls=0.000 sending=0.057 waiting=30.395 receiving=0.054 duration=30.506
-req#2 proto=HTTP/2.0 status=200 remote=127.0.0.1:38613 blocked=0.000 connecting=0.000 tls=0.000 sending=0.043 waiting=30.442 receiving=0.073 duration=30.558
-req#3 proto=HTTP/2.0 status=200 remote=127.0.0.1:38613 blocked=0.000 connecting=0.000 tls=0.000 sending=0.047 waiting=30.433 receiving=0.043 duration=30.523
+time="2026-07-08T05:10:24Z" level=info msg="req#0 proto=HTTP/2.0 status=200 remote=127.0.0.1:42919 blocked=2.576 connecting=0.127 tls=2.284 sending=0.168 waiting=30.737 receiving=0.108 duration=31.014" source=console
+time="2026-07-08T05:10:24Z" level=info msg="req#1 proto=HTTP/2.0 status=200 remote=127.0.0.1:42919 blocked=0.000 connecting=0.000 tls=0.000 sending=0.058 waiting=30.506 receiving=0.071 duration=30.635" source=console
+time="2026-07-08T05:10:24Z" level=info msg="req#2 proto=HTTP/2.0 status=200 remote=127.0.0.1:42919 blocked=0.000 connecting=0.000 tls=0.000 sending=0.067 waiting=30.448 receiving=0.075 duration=30.589" source=console
+time="2026-07-08T05:10:25Z" level=info msg="req#3 proto=HTTP/2.0 status=200 remote=127.0.0.1:42919 blocked=0.000 connecting=0.000 tls=0.000 sending=0.061 waiting=30.490 receiving=0.070 duration=30.621" source=console
 ```
 
 **Plaintext HTTP/1.1 variant** (**OBSERVED**, `URL="$PLAIN_URL"`) — note `tls=0.000` even on **req#0**:
 
 ```text
-req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:46837 blocked=0.199 connecting=0.123 tls=0.000 sending=0.093 waiting=30.361 receiving=0.101 duration=30.555
-req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:46837 blocked=0.003 connecting=0.000 tls=0.000 sending=0.013 waiting=30.424 receiving=0.080 duration=30.517
-req#2 proto=HTTP/1.1 status=200 remote=127.0.0.1:46837 blocked=0.004 connecting=0.000 tls=0.000 sending=0.023 waiting=30.372 receiving=0.108 duration=30.503
-req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:46837 blocked=0.004 connecting=0.000 tls=0.000 sending=0.015 waiting=30.460 receiving=0.066 duration=30.540
+time="2026-07-08T05:10:25Z" level=info msg="req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:37481 blocked=0.192 connecting=0.132 tls=0.000 sending=0.073 waiting=30.412 receiving=0.101 duration=30.586" source=console
+time="2026-07-08T05:10:25Z" level=info msg="req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:37481 blocked=0.003 connecting=0.000 tls=0.000 sending=0.016 waiting=30.465 receiving=0.084 duration=30.566" source=console
+time="2026-07-08T05:10:25Z" level=info msg="req#2 proto=HTTP/1.1 status=200 remote=127.0.0.1:37481 blocked=0.003 connecting=0.000 tls=0.000 sending=0.015 waiting=30.383 receiving=0.082 duration=30.480" source=console
+time="2026-07-08T05:10:25Z" level=info msg="req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:37481 blocked=0.003 connecting=0.000 tls=0.000 sending=0.014 waiting=30.379 receiving=0.050 duration=30.443" source=console
 ```
 
 > **Distinct nuance:** `tls_handshaking == 0` has **two** independent causes — (a) a *reused* connection (no handshake
@@ -225,21 +227,31 @@ req#3 proto=HTTP/1.1 status=200 remote=127.0.0.1:46837 blocked=0.004 connecting=
 > are visible above.
 
 **Internal‑timestamp confirmation** (**OBSERVED**, in‑package Go harness reading the unexported `int64` nanosecond fields
-of the production `Tracer`; abbreviated):
+of the production `Tracer`). Command:
+
+```bash
+go test -run 'TestZZInvestigCanonical' -count=1 -v ./lib/netext/httpext/
+```
+
+Complete, unedited output:
 
 ```text
+=== RUN   TestZZInvestigCanonical
 ===== CANONICAL request #0 (expected Reused=false) =====
-[req#0] getConn=1783485079101461997 connectStart=1783485079101521410 connectDone=1783485079101666140 tlsStart=1783485079101691570 tlsDone=1783485079103745043 gotConn=1783485079103753893 connReused=false
+[req#0] getConn=1783487617111983700 connectStart=1783487617112038743 connectDone=1783487617112160203 tlsStart=1783487617112180043 tlsDone=1783487617114302656 gotConn=1783487617114309634 connReused=false
     -> connectStart==connectDone? false ; connectStart==gotConn? false ; connectDone==gotConn? false
-    Trail: ConnReused=false Blocked=2.291896ms Connecting=144.73µs TLSHandshaking=2.053473ms Sending=52.592µs Waiting=259.563µs Receiving=55.683µs ConnDuration=2.198203ms Duration=367.838µs
-    metric http_req_connecting          = 0.14473
-    metric http_req_tls_handshaking     = 2.053473
+    Trail: ConnReused=false Blocked=2.325934ms Connecting=121.46µs TLSHandshaking=2.122613ms Sending=50.627µs Waiting=242.681µs Receiving=55.249µs ConnDuration=2.244073ms Duration=348.557µs
+    metric http_req_connecting          = 0.12146
+    metric http_req_tls_handshaking     = 2.122613
 ===== CANONICAL request #1 (expected Reused=true) =====
-[req#1] getConn=1783485079104146917 connectStart=1783485079104148468 connectDone=1783485079104148468 tlsStart=1783485079104148468 tlsDone=1783485079104148468 gotConn=1783485079104148468 connReused=true
+[req#1] getConn=1783487617114684919 connectStart=1783487617114686599 connectDone=1783487617114686599 tlsStart=1783487617114686599 tlsDone=1783487617114686599 gotConn=1783487617114686599 connReused=true
     -> connectStart==connectDone? true ; connectStart==gotConn? true ; connectDone==gotConn? true
-    Trail: ConnReused=true Blocked=1.551µs Connecting=0s TLSHandshaking=0s Sending=10.089µs Waiting=126.711µs Receiving=53.907µs ConnDuration=0s Duration=190.707µs
+    Trail: ConnReused=true Blocked=1.68µs Connecting=0s TLSHandshaking=0s Sending=13.258µs Waiting=93.581µs Receiving=38.468µs ConnDuration=0s Duration=145.307µs
     metric http_req_connecting          = 0
     metric http_req_tls_handshaking     = 0
+--- PASS: TestZZInvestigCanonical (0.00s)
+PASS
+ok  	go.k6.io/k6/lib/netext/httpext	0.010s
 ```
 
 On the first request the connect/TLS timestamps are all **distinct**; on the reused request they are all **identical**
@@ -285,30 +297,120 @@ repeatedly and reporting the distribution (not by stabilizing it).
 URL="$TLS_H1_URL" /tmp/k6 run --vus 50 --duration 5s scale.js
 ```
 
-**Complete captured metric lines — LOCAL RUN #1** (**OBSERVED**):
+**Complete captured output — LOCAL RUN #1** (**OBSERVED**, complete unedited k6 run output — banner, progress, and full end‑of‑test summary):
 
 ```text
-     http_req_blocked...............: avg=84.43µs min=664ns   med=1.7µs   max=18.38ms p(90)=2.85µs  p(95)=3.75µs
-     http_req_connecting............: avg=2.85µs  min=0s      med=0s      max=3.38ms  p(90)=0s      p(95)=0s
-     http_req_tls_handshaking.......: avg=77.35µs min=0s      med=0s      max=17.99ms p(90)=0s      p(95)=0s
-     http_reqs......................: 8100   1611.140178/s
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: scale.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 50 max VUs, 35s max duration (incl. graceful stop):
+              * default: 50 looping VUs for 5s (gracefulStop: 30s)
+
+
+running (01.0s), 50/50 VUs, 1550 complete and 0 interrupted iterations
+default   [  20% ] 50 VUs  1.0s/5s
+
+running (02.0s), 50/50 VUs, 3200 complete and 0 interrupted iterations
+default   [  40% ] 50 VUs  2.0s/5s
+
+running (03.0s), 50/50 VUs, 4801 complete and 0 interrupted iterations
+default   [  60% ] 50 VUs  3.0s/5s
+
+running (04.0s), 50/50 VUs, 6437 complete and 0 interrupted iterations
+default   [  80% ] 50 VUs  4.0s/5s
+
+running (05.0s), 50/50 VUs, 8050 complete and 0 interrupted iterations
+default   [ 100% ] 50 VUs  5.0s/5s
+
+     data_received..................: 1.4 MB 282 kB/s
+     data_sent......................: 854 kB 170 kB/s
+     http_req_blocked...............: avg=78.95µs min=667ns   med=1.34µs  max=18.29ms p(90)=2.02µs  p(95)=2.48µs 
+     http_req_connecting............: avg=4.78µs  min=0s      med=0s      max=2.69ms  p(90)=0s      p(95)=0s     
+     http_req_duration..............: avg=30.72ms min=30.1ms  med=30.7ms  max=32.59ms p(90)=31.09ms p(95)=31.18ms
+       { expected_response:true }...: avg=30.72ms min=30.1ms  med=30.7ms  max=32.59ms p(90)=31.09ms p(95)=31.18ms
+     http_req_failed................: 0.00%  0 out of 8130
+     http_req_receiving.............: avg=27.11µs min=9.86µs  med=22.18µs max=1.65ms  p(90)=33.19µs p(95)=39.6µs 
+     http_req_sending...............: avg=9.17µs  min=3.44µs  med=6.21µs  max=1.37ms  p(90)=9.19µs  p(95)=11.32µs
+     http_req_tls_handshaking.......: avg=71.16µs min=0s      med=0s      max=17.79ms p(90)=0s      p(95)=0s     
+     http_req_waiting...............: avg=30.68ms min=30.07ms med=30.67ms max=32.45ms p(90)=31.06ms p(95)=31.14ms
+     http_reqs......................: 8130   1616.440751/s
+     iteration_duration.............: avg=30.84ms min=30.13ms med=30.74ms max=48.93ms p(90)=31.15ms p(95)=31.24ms
+     iterations.....................: 8130   1616.440751/s
+     vus............................: 50     min=50        max=50
+     vus_max........................: 50     min=50        max=50
+
+
+running (05.0s), 00/50 VUs, 8130 complete and 0 interrupted iterations
+default ✓ [ 100% ] 50 VUs  5s
 ```
 
-**LOCAL RUN #2** (**OBSERVED**, same unchanged input — stable *shape*):
+**LOCAL RUN #2** (**OBSERVED**, same unchanged input — stable *shape*; complete unedited k6 run output):
 
 ```text
-     http_req_blocked...............: avg=70.96µs min=647ns   med=1.75µs  max=16.54ms p(90)=2.87µs  p(95)=3.66µs
-     http_req_connecting............: avg=4.67µs  min=0s      med=0s      max=3.74ms  p(90)=0s      p(95)=0s
-     http_req_tls_handshaking.......: avg=60.31µs min=0s      med=0s      max=14.45ms p(90)=0s      p(95)=0s
-     http_reqs......................: 8100   1610.140988/s
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: scale.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 50 max VUs, 35s max duration (incl. graceful stop):
+              * default: 50 looping VUs for 5s (gracefulStop: 30s)
+
+
+running (01.0s), 50/50 VUs, 1552 complete and 0 interrupted iterations
+default   [  20% ] 50 VUs  1.0s/5s
+
+running (02.0s), 50/50 VUs, 3200 complete and 0 interrupted iterations
+default   [  40% ] 50 VUs  2.0s/5s
+
+running (03.0s), 50/50 VUs, 4802 complete and 0 interrupted iterations
+default   [  60% ] 50 VUs  3.0s/5s
+
+running (04.0s), 50/50 VUs, 6450 complete and 0 interrupted iterations
+default   [  80% ] 50 VUs  4.0s/5s
+
+running (05.0s), 50/50 VUs, 8051 complete and 0 interrupted iterations
+default   [ 100% ] 50 VUs  5.0s/5s
+
+     data_received..................: 1.4 MB 281 kB/s
+     data_sent......................: 851 kB 169 kB/s
+     http_req_blocked...............: avg=86.92µs min=603ns   med=1.4µs   max=20.75ms p(90)=2.22µs  p(95)=2.88µs 
+     http_req_connecting............: avg=4.82µs  min=0s      med=0s      max=2.13ms  p(90)=0s      p(95)=0s     
+     http_req_duration..............: avg=30.75ms min=30.07ms med=30.7ms  max=37.25ms p(90)=31.21ms p(95)=31.43ms
+       { expected_response:true }...: avg=30.75ms min=30.07ms med=30.7ms  max=37.25ms p(90)=31.21ms p(95)=31.43ms
+     http_req_failed................: 0.00%  0 out of 8102
+     http_req_receiving.............: avg=33.38µs min=9.67µs  med=22.86µs max=1.92ms  p(90)=38.43µs p(95)=49.98µs
+     http_req_sending...............: avg=11.75µs min=3.27µs  med=6.44µs  max=1.87ms  p(90)=9.94µs  p(95)=13.46µs
+     http_req_tls_handshaking.......: avg=78.34µs min=0s      med=0s      max=20.5ms  p(90)=0s      p(95)=0s     
+     http_req_waiting...............: avg=30.7ms  min=30.06ms med=30.66ms max=37.2ms  p(90)=31.16ms p(95)=31.31ms
+     http_reqs......................: 8102   1612.167423/s
+     iteration_duration.............: avg=30.88ms min=30.1ms  med=30.75ms max=51.79ms p(90)=31.27ms p(95)=31.59ms
+     iterations.....................: 8102   1612.167423/s
+     vus............................: 50     min=50        max=50
+     vus_max........................: 50     min=50        max=50
+
+
+running (05.0s), 00/50 VUs, 8102 complete and 0 interrupted iterations
+default ✓ [ 100% ] 50 VUs  5s
 ```
 
-> **Interpretation:** the distribution is **bimodal**. The median is ≈ 1.7 µs — the ~99.4 % of the 8100 requests that reuse
-> a warm connection. The max is in the tens of ms — the ~50 *new* connections (one per VU) that fold their TLS handshake
-> into `blocked`. Note how the `blocked` max (`18.38ms` / `16.54ms`) tracks the `tls_handshaking` max (`17.99ms` /
-> `14.45ms`): the new‑connection TLS handshake is exactly what makes `blocked` large. `connecting`/`tls_handshaking` have a
-> median of `0s` (all the reused requests) with a nonzero max (the new connections) — the same reuse effect as Q1, now at
-> scale.
+> **Interpretation:** the distribution is **bimodal**. The median is ≈ 1.34 µs (RUN #1) / 1.4 µs (RUN #2) — the ~99.4 % of
+> the ~8100 requests per run that reuse a warm connection. The max is in the tens of ms — the ~50 *new* connections (one per
+> VU) that fold their TLS handshake into `blocked`. Note how the `blocked` max (`18.29ms` / `20.75ms`) tracks the
+> `tls_handshaking` max (`17.79ms` / `20.5ms`): the new‑connection TLS handshake is exactly what makes `blocked` large.
+> `connecting`/`tls_handshaking` have a median of `0s` (all the reused requests) with a nonzero max (the new connections) —
+> the same reuse effect as Q1, now at scale.
 
 **Remote WAN magnitude** (**OBSERVED** — substantiates the "hundreds of ms" you saw against a real target). Baseline with
 `curl` first, then k6:
@@ -320,30 +422,119 @@ curl -sS -o /dev/null -w "connect=%{time_connect}s appconnect=%{time_appconnect}
 
 ```text
 # curl baseline (one new connection):
-connect=0.077675s appconnect=0.102732s total=0.124622s
+connect=0.108596s appconnect=0.154064s total=0.196787s
 
-# k6 RUN #1:
-     http_req_blocked...............: avg=390.11µs min=168ns   med=318ns   max=90.95ms  p(90)=472ns   p(95)=517ns
-     http_req_connecting............: avg=92.68µs  min=0s      med=0s      max=21.8ms   p(90)=0s      p(95)=0s
-     http_req_tls_handshaking.......: avg=113.1µs  min=0s      med=0s      max=28.62ms  p(90)=0s      p(95)=0s
-     http_req_duration..............: avg=21.66ms  min=20.84ms med=21.49ms max=237.39ms p(90)=22.17ms p(95)=22.41ms
-     http_reqs......................: 6791   1352.607266/s
-# k6 RUN #2:
-     http_req_blocked...............: avg=266.52µs min=145ns   med=307ns   max=61.78ms  p(90)=481ns   p(95)=527ns
-     http_req_connecting............: avg=95.97µs  min=0s      med=0s      max=22.82ms  p(90)=0s      p(95)=0s
-     http_req_tls_handshaking.......: avg=103.72µs min=0s      med=0s      max=24.26ms  p(90)=0s      p(95)=0s
-     http_req_duration..............: avg=21.87ms  min=21.05ms med=21.7ms  max=240.52ms p(90)=22.36ms p(95)=22.54ms
-     http_reqs......................: 6761   1346.871815/s
+# k6 RUN #1 (complete unedited output):
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: remote.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 30 max VUs, 35s max duration (incl. graceful stop):
+              * default: 30 looping VUs for 5s (gracefulStop: 30s)
+
+
+running (01.0s), 30/30 VUs, 898 complete and 0 interrupted iterations
+default   [  20% ] 30 VUs  1.0s/5s
+
+running (02.0s), 30/30 VUs, 1951 complete and 0 interrupted iterations
+default   [  40% ] 30 VUs  2.0s/5s
+
+running (03.0s), 30/30 VUs, 3021 complete and 0 interrupted iterations
+default   [  60% ] 30 VUs  3.0s/5s
+
+running (04.0s), 30/30 VUs, 4103 complete and 0 interrupted iterations
+default   [  80% ] 30 VUs  4.0s/5s
+
+running (05.0s), 30/30 VUs, 5156 complete and 0 interrupted iterations
+default   [ 100% ] 30 VUs  5.0s/5s
+
+     data_received..................: 18 MB  3.4 MB/s
+     data_sent......................: 293 kB 56 kB/s
+     http_req_blocked...............: avg=758.39µs min=154ns   med=282ns   max=159.24ms p(90)=411ns   p(95)=472ns   
+     http_req_connecting............: avg=173.2µs  min=0s      med=0s      max=43.99ms  p(90)=0s      p(95)=0s      
+     http_req_duration..............: avg=28.25ms  min=20.97ms med=22.64ms max=254.09ms p(90)=34.08ms p(95)=43.4ms  
+       { expected_response:true }...: avg=28.25ms  min=20.97ms med=22.64ms max=254.09ms p(90)=34.08ms p(95)=43.4ms  
+     http_req_failed................: 0.00%  0 out of 5191
+     http_req_receiving.............: avg=81.47µs  min=12.73µs med=49.13µs max=32.33ms  p(90)=86.21µs p(95)=100.87µs
+     http_req_sending...............: avg=28.33µs  min=13.14µs med=21.97µs max=1.43ms   p(90)=36.44µs p(95)=44.29µs 
+     http_req_tls_handshaking.......: avg=183.06µs min=0s      med=0s      max=45.63ms  p(90)=0s      p(95)=0s      
+     http_req_waiting...............: avg=28.14ms  min=20.62ms med=22.43ms max=253.99ms p(90)=33.85ms p(95)=43.32ms 
+     http_reqs......................: 5191   998.58366/s
+     iteration_duration.............: avg=29.06ms  min=21.02ms med=22.96ms max=254.17ms p(90)=35.3ms  p(95)=43.56ms 
+     iterations.....................: 5191   998.58366/s
+     vus............................: 30     min=30        max=30
+     vus_max........................: 30     min=30        max=30
+
+
+running (05.2s), 00/30 VUs, 5191 complete and 0 interrupted iterations
+default ✓ [ 100% ] 30 VUs  5s
+
+# k6 RUN #2 (complete unedited output):
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: remote.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 30 max VUs, 35s max duration (incl. graceful stop):
+              * default: 30 looping VUs for 5s (gracefulStop: 30s)
+
+
+running (01.0s), 30/30 VUs, 883 complete and 0 interrupted iterations
+default   [  20% ] 30 VUs  1.0s/5s
+
+running (02.0s), 30/30 VUs, 1890 complete and 0 interrupted iterations
+default   [  40% ] 30 VUs  2.0s/5s
+
+running (03.0s), 30/30 VUs, 2870 complete and 0 interrupted iterations
+default   [  60% ] 30 VUs  3.0s/5s
+
+running (04.0s), 30/30 VUs, 3815 complete and 0 interrupted iterations
+default   [  80% ] 30 VUs  4.0s/5s
+
+running (05.0s), 30/30 VUs, 4783 complete and 0 interrupted iterations
+default   [ 100% ] 30 VUs  5.0s/5s
+
+     data_received..................: 16 MB  3.2 MB/s
+     data_sent......................: 273 kB 54 kB/s
+     http_req_blocked...............: avg=483.37µs min=147ns   med=272ns   max=103.79ms p(90)=387ns   p(95)=455ns   
+     http_req_connecting............: avg=196.39µs min=0s      med=0s      max=44.81ms  p(90)=0s      p(95)=0s      
+     http_req_duration..............: avg=30.69ms  min=20.83ms med=32.09ms max=308.35ms p(90)=43.96ms p(95)=44.28ms 
+       { expected_response:true }...: avg=30.69ms  min=20.83ms med=32.09ms max=308.35ms p(90)=43.96ms p(95)=44.28ms 
+     http_req_failed................: 0.00%  0 out of 4817
+     http_req_receiving.............: avg=137.6µs  min=13.98µs med=47.74µs max=275.59ms p(90)=84.75µs p(95)=104.78µs
+     http_req_sending...............: avg=26.84µs  min=14.03µs med=21.69µs max=1.22ms   p(90)=34.86µs p(95)=42.17µs 
+     http_req_tls_handshaking.......: avg=205.88µs min=0s      med=0s      max=46.07ms  p(90)=0s      p(95)=0s      
+     http_req_waiting...............: avg=30.53ms  min=20.55ms med=32.02ms max=252.6ms  p(90)=43.87ms p(95)=44.2ms  
+     http_reqs......................: 4817   955.595917/s
+     iteration_duration.............: avg=31.23ms  min=20.89ms med=32.15ms max=308.41ms p(90)=44.04ms p(95)=44.37ms 
+     iterations.....................: 4817   955.595917/s
+     vus............................: 30     min=30        max=30
+     vus_max........................: 30     min=30        max=30
+
+
+running (05.0s), 00/30 VUs, 4817 complete and 0 interrupted iterations
+default ✓ [ 100% ] 30 VUs  5s
 ```
 
-> On the WAN target the `blocked` **max is 61–91 ms on new connections** versus a **median of ~307–318 ns on reuse** — a
-> ~200,000× spread between the two modes, stable across two runs. This host is fast (~20 ms RTT, `duration` median
-> ≈ 21.5 ms); the exact `blocked` magnitude depends on RTT, the number of TLS round‑trips, and pool contention. Your
-> reported ~500 ms simply reflects a higher‑latency target and/or more new‑connection acquisitions (e.g. a larger VU ramp
-> hitting a cold pool, or a target that negotiates TLS more slowly). The mechanism is identical to what is observed here;
-> only the magnitude of the "new connection" mode scales up. *(Honest note: the maximum I could observe on this particular
-> target was ~91 ms, not 500 ms — the 500 ms figure is consistent with the same mechanism against a slower endpoint, but I
-> report the ~91 ms I actually measured rather than forcing a 500 ms result.)*
+> On the WAN target the `blocked` **max is 104–159 ms on new connections** versus a **median of ~272–282 ns on reuse** — a
+> ~380,000–565,000× spread between the two modes, stable across two runs. This host is fast (~20 ms RTT, `duration` median
+> ≈ 22.6 ms / 32.1 ms); the exact `blocked` magnitude depends on RTT, the number of TLS round‑trips, and pool contention.
+> Your reported ~500 ms simply reflects a higher‑latency target and/or more new‑connection acquisitions (e.g. a larger VU
+> ramp hitting a cold pool, or a target that negotiates TLS more slowly). The mechanism is identical to what is observed
+> here; only the magnitude of the "new connection" mode scales up. *(Honest note: the maximum I could observe on this
+> particular target was ~159 ms, not 500 ms — the 500 ms figure is consistent with the same mechanism against a slower
+> endpoint, but I report the ~159 ms I actually measured rather than forcing a 500 ms result.)*
 
 **Responsible code (cause → effect):** `Done()` computes
 
@@ -401,12 +592,35 @@ So `now()` is genuinely cross‑platform — Windows uses the very same `time.No
 package, `lib/netext/httpext/error_codes_syscall_windows.go`, contains **no** clock override (it only maps
 `syscall.WSAECONNRESET` to an error code), corroborating that nothing in k6 special‑cases the Windows clock.
 
-**Not a race (INFERRED from code).** The tracer's shared timestamp fields are accessed exclusively through `sync/atomic` —
-the `grep -c` above counts **21** `atomic.` call sites in `tracer.go`: `CompareAndSwapInt64` in the hooks (`:201`, `:218`,
-`:231`, `:244`, `:287-291`, `:311`), `SwapInt64` in the reuse branch (`:272-276`), and `LoadInt64` in `Done()`
-(`:332-338`). `Done()` itself documents the intent (`:327-331`): *"we have to use atomics here as well (or use global Tracer
-locking) so we can avoid data races."* The zeros are therefore a **value** artifact (two events legitimately share one
-coarse timestamp), not a torn or racy read.
+To confirm the mechanism is race‑free in practice — not merely by reading it — the production package's own test
+suite was run under the Go race detector (**OBSERVED**):
+
+```bash
+go test -race -count=1 ./lib/netext/httpext/
+```
+
+```text
+ok  	go.k6.io/k6/lib/netext/httpext	4.039s
+```
+
+**Not a race (mechanism read from the code; race‑freedom OBSERVED via `-race` above).** The correct statement is *not*
+that every shared field is guarded by `sync/atomic` — it is that the design is deliberately race‑free, and the two fields
+the zero‑duration reasoning depends on are in fact written and read with **plain, non‑atomic assignments** on purpose.
+`GetConn` sets `t.getConn = now()` (`lib/netext/httpext/tracer.go:188`) and `GotConn` sets `t.gotConn = now` and
+`t.connReused = info.Reused` (`:261-262`), directly beneath the comment that explains why (`:259-260`): *"This shouldn't be
+called multiple times so no synchronization here, it's better for the race detector to panic if we're wrong."* `Done()` then
+derives `Blocked` from **direct** (non‑atomic) reads of exactly those two fields —
+`if t.gotConn != 0 && t.getConn != 0 && t.gotConn > t.getConn { trail.Blocked = time.Duration(t.gotConn - t.getConn) }`
+(`:323-324`). What the **21** `atomic.` call sites the `grep -c` above counts actually guard is the *other* group of
+timestamps — `connectStart`, `connectDone`, `tlsHandshakeStart`, `tlsHandshakeDone`, `wroteRequest`, `gotFirstResponseByte` —
+which legitimately can be written more than once (from the parallel dial goroutines during dual‑stack "Happy Eyeballs"
+setup) or *after* `Done()` has already returned (for a cancelled request): `CompareAndSwapInt64` keeps only the first write
+in the hooks (`:201`, `:218`, `:231`, `:244`, `:311`), `atomic.StoreInt64` records `WroteRequest` (`:301`), `SwapInt64`
+forces the reuse values in the `Reused==true` branch (`:272-276`), `CompareAndSwapInt64` fills any never‑fired stamp in
+the `Reused==false` else‑branch (`:287-291`), and `LoadInt64` reads them all back in `Done()` (`:332-338`). `Done()`
+documents that intent (`:327-331`): *"we have to use atomics here as well (or use global Tracer locking) so we can avoid
+data races."* So the zeros are a **value** artifact — two events legitimately share one coarse timestamp — **not** a torn or
+racy read, and the race detector agrees.
 
 **The maintainers' own corroboration.** `lib/netext/httpext/tracer_test.go` defines `const traceDelay = 100 * time.Millisecond`
 (`:28`) and, in `getTestTracer`, when `runtime.GOOS == "windows"` (`:33`) it wraps every hook to `time.Sleep(traceDelay)`
@@ -447,22 +661,30 @@ reported with `Reused == false`, or (b) the stdlib abandons a connection mid‑d
 already‑established connection instead. In both cases there was genuinely no new dial *for this tracer* to time, so `0` is
 the correct connect duration.
 
-**Command + complete output** (**OBSERVED**, in‑package harness: a real `*tls.Conn` is dialed, then `GotConn(Reused=false)`
-is invoked on the production `Tracer` with **no** prior `ConnectStart`/`ConnectDone`):
+**Command and complete, unedited output** (**OBSERVED**, in‑package harness: a real `*tls.Conn` is dialed, then
+`GotConn(Reused=false)` is invoked on the production `Tracer` with **no** prior `ConnectStart`/`ConnectDone`):
+
+```bash
+go test -run 'TestZZInvestigQ4NotReusedZeroConnect' -count=1 -v ./lib/netext/httpext/
+```
 
 ```text
+=== RUN   TestZZInvestigQ4NotReusedZeroConnect
 ===== Q4: Reused==false, connect hooks never fired (conn is *tls.Conn=true) =====
-[after GetConn] getConn=1783485079110054920 connectStart=0 connectDone=0 tlsStart=0 tlsDone=0 gotConn=0 connReused=false
+[after GetConn] getConn=1783487631597816973 connectStart=0 connectDone=0 tlsStart=0 tlsDone=0 gotConn=0 connReused=false
     -> connectStart==connectDone? true ; connectStart==gotConn? true ; connectDone==gotConn? true
-[after GotConn(Reused=false)] getConn=1783485079110054920 connectStart=1783485079112207298 connectDone=1783485079112207298 tlsStart=1783485079112207298 tlsDone=1783485079112207298 gotConn=1783485079112207298 connReused=false
+[after GotConn(Reused=false)] getConn=1783487631597816973 connectStart=1783487631599966403 connectDone=1783487631599966403 tlsStart=1783487631599966403 tlsDone=1783487631599966403 gotConn=1783487631599966403 connReused=false
     -> connectStart==connectDone? true ; connectStart==gotConn? true ; connectDone==gotConn? true
-    Trail: ConnReused=false Connecting=0s TLSHandshaking=0s Blocked=2.152378ms
+    Trail: ConnReused=false Connecting=0s TLSHandshaking=0s Blocked=2.14943ms
+--- PASS: TestZZInvestigQ4NotReusedZeroConnect (0.01s)
+PASS
+ok  	go.k6.io/k6/lib/netext/httpext	0.036s
 ```
 
 Before `GotConn`, the connect stamps are `0`. After `GotConn(Reused=false)` with no prior connect hooks, all of
-`connectStart`, `connectDone`, `tlsStart`, `tlsDone`, `gotConn` equal the *same* value `1783485079112207298` — exactly your
+`connectStart`, `connectDone`, `tlsStart`, `tlsDone`, `gotConn` equal the *same* value `1783487631599966403` — exactly your
 report: `connReused == false`, connect‑start/connect‑done == got‑connection, so `Connecting = 0s` and `TLSHandshaking = 0s`.
-(`Blocked = 2.152378ms` here is just the `getConn → gotConn` gap created by the deliberate 2 ms sleep in the harness.)
+(`Blocked = 2.14943ms` here is just the `getConn → gotConn` gap created by the deliberate 2 ms sleep in the harness.)
 
 > **Evidence labeling:** this is a **hook‑level** reproduction driving the *real* `Tracer.GotConn` / `Tracer.GetConn` /
 > `Tracer.Done` methods (canonical code). The nondeterministic HTTP/2 stdlib race that spontaneously produces a false
@@ -475,7 +697,14 @@ stamps if they are still `0`:
 
 ```go
 } else {
-    // ... HTTP/2 false-Reused explanation ...
+    // There's a bug in the Go stdlib where an HTTP/2 connection can be reused
+    // but the httptrace.GotConnInfo struct will contain a false Reused property...
+    // That's probably from a previously made connection that was abandoned and
+    // directly put in the connection pool in favor of a just-freed already
+    // established connection...
+    //
+    // Using CompareAndSwap here because the HTTP/2 roundtripper has retries and
+    // it's possible this isn't actually the first request attempt...
     atomic.CompareAndSwapInt64(&t.connectStart, 0, now)
     atomic.CompareAndSwapInt64(&t.connectDone, 0, now)
     if isConnTLS {
@@ -506,25 +735,33 @@ an IPv4 attempt), so `ConnectStart`/`ConnectDone` legitimately fire multiple tim
 `ConnectStart` via an atomic compare‑and‑swap, ignores **failed** dials in `ConnectDone`, and records only the first
 **successful** `ConnectDone`. The result is a connect duration that reflects a single dial span, not a sum.
 
-**Command + complete output** (**OBSERVED**, in‑package harness driving the real `Tracer.ConnectStart` /
+**Command and complete, unedited output** (**OBSERVED**, in‑package harness driving the real `Tracer.ConnectStart` /
 `Tracer.ConnectDone` methods with the multi‑dial sequence the stdlib produces — IPv6 attempt fails, IPv4 attempt succeeds,
 plus a spurious extra `ConnectDone`):
 
+```bash
+go test -run 'TestZZInvestigQ5DualStackDedup' -count=1 -v ./lib/netext/httpext/
+```
+
 ```text
+=== RUN   TestZZInvestigQ5DualStackDedup
 ===== Q5: repeated ConnectStart/ConnectDone (dual-stack Happy Eyeballs) =====
 initial: connectStart=0 connectDone=0
-after ConnectStart #1 (IPv6):  connectStart=1783485079112436949
-after ConnectStart #2 (IPv4):  connectStart=1783485079112436949  (unchanged==first? true)
+after ConnectStart #1 (IPv6):  connectStart=1783487632707415843
+after ConnectStart #2 (IPv4):  connectStart=1783487632707415843  (unchanged==first? true)
 after ConnectDone #1 (IPv6,err!=nil): connectDone=0  (still 0? true)
-after ConnectDone #2 (IPv4,err==nil): connectDone=1783485079115645544  (recorded now)
-after ConnectDone #3 (extra):         connectDone=1783485079115645544  (unchanged? true)
-Connecting (connectDone-connectStart) = 3.208595ms  -> single dial only, no double count
+after ConnectDone #2 (IPv4,err==nil): connectDone=1783487632711606025  (recorded now)
+after ConnectDone #3 (extra):         connectDone=1783487632711606025  (unchanged? true)
+Connecting (connectDone-connectStart) = 4.190182ms  -> single dial only, no double count
+--- PASS: TestZZInvestigQ5DualStackDedup (0.00s)
+PASS
+ok  	go.k6.io/k6/lib/netext/httpext	0.010s
 ```
 
 Reading the transitions: the second `ConnectStart` leaves `connectStart` **unchanged** (`unchanged==first? true`); the
 **failed** IPv6 `ConnectDone` records **nothing** (`connectDone` stays `0`); the successful IPv4 `ConnectDone` records once;
 and the third, spurious `ConnectDone` is **ignored** (`unchanged? true`). The final `Connecting` is a single
-`connectDone − connectStart` span (here `3.208595ms`), never a sum of the two dials — so there is no double count.
+`connectDone − connectStart` span (here `4.190182ms`), never a sum of the two dials — so there is no double count.
 
 **Responsible code (cause → effect):**
 
@@ -578,17 +815,18 @@ excludes `ConnDuration`:
 
 ```text
 # req#0 (new connection):
-Connecting=144.73µs  TLSHandshaking=2.053473ms  -> ConnDuration=2.198203ms
-Sending=52.592µs + Waiting=259.563µs + Receiving=55.683µs = Duration=367.838µs     (ConnDuration NOT included)
+Connecting=121.46µs  TLSHandshaking=2.122613ms  -> ConnDuration=2.244073ms
+Sending=50.627µs + Waiting=242.681µs + Receiving=55.249µs = Duration=348.557µs     (ConnDuration NOT included)
 
 # req#1 (reused connection):
 Connecting=0s  TLSHandshaking=0s  -> ConnDuration=0s
-Sending=10.089µs + Waiting=126.711µs + Receiving=53.907µs = Duration=190.707µs
+Sending=13.258µs + Waiting=93.581µs + Receiving=38.468µs = Duration=145.307µs
 ```
 
-For req#0, `ConnDuration` (2.198 ms) is more than 5× `Duration` (368 µs), yet the two are kept separate — so a new
-connection's setup cost does **not** inflate the latency you read from `http_req_duration`. That is precisely why the values
-are trustworthy.
+(These numbers are the derived arithmetic from the complete `TestZZInvestigCanonical` output shown under Q1 above.) For
+req#0, `ConnDuration` (2.244 ms) is more than 6× `Duration` (349 µs), yet the two are kept separate — so a new connection's
+setup cost does **not** inflate the latency you read from `http_req_duration`. That is precisely why the values are
+trustworthy.
 
 **Practical guidance to include in your analysis:**
 
@@ -650,19 +888,19 @@ This channel directly answers *"0 connect but I see network activity."* With `N=
 URL="$TLS_H1_URL" N=2 /tmp/k6 run --http-debug=full --quiet --no-summary seq.js
 ```
 
-Complete captured output (**OBSERVED**; the k6 log fields `group=/iter=/request_id=/scenario=/source=/vu=` are kept so the
-two distinct `request_id`s are visible):
+Complete captured output (**OBSERVED**; the full k6 log line is shown verbatim — `time=…`/`level=`/`msg=` plus the
+`group=/iter=/request_id=/scenario=/source=/vu=` fields — so the two distinct `request_id`s are visible):
 
 ```text
-msg="Request:\nGET / HTTP/1.1\nHost: 127.0.0.1:36567\nUser-Agent: k6/0.55.0 (https://k6.io/)\nAccept-Encoding: gzip\n\n\n" group= iter=0 request_id=04b5e428-5f42-4deb-465e-287bd899f0fe scenario=default source=http-debug vu=1
-msg="Response:\nHTTP/1.1 200 OK\nContent-Length: 42\nContent-Type: text/plain\nDate: Wed, 08 Jul 2026 04:23:08 GMT\n\nhello from investig server proto=HTTP/1.1\n\n" group= iter=0 request_id=04b5e428-5f42-4deb-465e-287bd899f0fe scenario=default source=http-debug vu=1
-msg="req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=2.591 connecting=0.159 tls=2.335 sending=0.051 waiting=30.456 receiving=0.236 duration=30.742"
-msg="Request:\nGET / HTTP/1.1\nHost: 127.0.0.1:36567\nUser-Agent: k6/0.55.0 (https://k6.io/)\nAccept-Encoding: gzip\n\n\n" group= iter=0 request_id=61c71f29-29cf-484f-5dad-1676beb0a0ec scenario=default source=http-debug vu=1
-msg="Response:\nHTTP/1.1 200 OK\nContent-Length: 42\nContent-Type: text/plain\nDate: Wed, 08 Jul 2026 04:23:08 GMT\n\nhello from investig server proto=HTTP/1.1\n\n" group= iter=0 request_id=61c71f29-29cf-484f-5dad-1676beb0a0ec scenario=default source=http-debug vu=1
-msg="req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:36567 blocked=0.005 connecting=0.000 tls=0.000 sending=0.014 waiting=30.471 receiving=0.150 duration=30.635"
+time="2026-07-08T05:15:21Z" level=info msg="Request:\nGET / HTTP/1.1\nHost: 127.0.0.1:42367\nUser-Agent: k6/0.55.0 (https://k6.io/)\nAccept-Encoding: gzip\n\n\n" group= iter=0 request_id=454ba041-6ca6-40e2-58ee-88d9930ed3a0 scenario=default source=http-debug vu=1
+time="2026-07-08T05:15:21Z" level=info msg="Response:\nHTTP/1.1 200 OK\nContent-Length: 42\nContent-Type: text/plain\nDate: Wed, 08 Jul 2026 05:15:21 GMT\n\nhello from investig server proto=HTTP/1.1\n\n" group= iter=0 request_id=454ba041-6ca6-40e2-58ee-88d9930ed3a0 scenario=default source=http-debug vu=1
+time="2026-07-08T05:15:21Z" level=info msg="req#0 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=2.399 connecting=0.145 tls=2.190 sending=0.032 waiting=30.408 receiving=0.153 duration=30.593" source=console
+time="2026-07-08T05:15:21Z" level=info msg="Request:\nGET / HTTP/1.1\nHost: 127.0.0.1:42367\nUser-Agent: k6/0.55.0 (https://k6.io/)\nAccept-Encoding: gzip\n\n\n" group= iter=0 request_id=46e04c83-d387-46da-611d-284e3b27be01 scenario=default source=http-debug vu=1
+time="2026-07-08T05:15:21Z" level=info msg="Response:\nHTTP/1.1 200 OK\nContent-Length: 42\nContent-Type: text/plain\nDate: Wed, 08 Jul 2026 05:15:21 GMT\n\nhello from investig server proto=HTTP/1.1\n\n" group= iter=0 request_id=46e04c83-d387-46da-611d-284e3b27be01 scenario=default source=http-debug vu=1
+time="2026-07-08T05:15:21Z" level=info msg="req#1 proto=HTTP/1.1 status=200 remote=127.0.0.1:42367 blocked=0.004 connecting=0.000 tls=0.000 sending=0.016 waiting=30.358 receiving=0.079 duration=30.453" source=console
 ```
 
-Two full request/response exchanges over the wire (distinct `request_id`s `04b5e428…` and `61c71f29…`), yet req#1 (reused)
+Two full request/response exchanges over the wire (distinct `request_id`s `454ba041…` and `46e04c83…`), yet req#1 (reused)
 reports `connecting=0.000 tls=0.000`. The wire‑dump transport is `lib/netext/httpext/httpdebug_transport.go` (its
 `RoundTrip` dumps request and response via `httputil.DumpRequestOut`).
 
@@ -673,12 +911,28 @@ URL="$TLS_H1_URL" N=3 /tmp/k6 run --out json=/tmp/investig/out.json --quiet --no
 # then extract the per-request Point values for each metric from out.json
 ```
 
-Per‑request values (**OBSERVED**, first value = new connection, rest = reused):
+Raw per‑request `Point` samples for the three metrics (**OBSERVED**, the complete unedited JSON lines filtered from
+`out.json` with `grep '"type":"Point"'`; grouped by request — req#0 new, req#1/req#2 reused):
 
 ```text
-http_req_connecting      = 0.140991, 0, 0
-http_req_tls_handshaking = 3.482249, 0, 0
-http_req_blocked         = 3.686653, 0.003135, 0.00311
+{"metric":"http_req_blocked","type":"Point","data":{"time":"2026-07-08T05:15:32.863235797Z","value":2.324903,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_connecting","type":"Point","data":{"time":"2026-07-08T05:15:32.863235797Z","value":0.134932,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_tls_handshaking","type":"Point","data":{"time":"2026-07-08T05:15:32.863235797Z","value":2.117265,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_blocked","type":"Point","data":{"time":"2026-07-08T05:15:32.893906257Z","value":0.002121,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_connecting","type":"Point","data":{"time":"2026-07-08T05:15:32.893906257Z","value":0,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_tls_handshaking","type":"Point","data":{"time":"2026-07-08T05:15:32.893906257Z","value":0,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_blocked","type":"Point","data":{"time":"2026-07-08T05:15:32.924480055Z","value":0.001842,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_connecting","type":"Point","data":{"time":"2026-07-08T05:15:32.924480055Z","value":0,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+{"metric":"http_req_tls_handshaking","type":"Point","data":{"time":"2026-07-08T05:15:32.924480055Z","value":0,"tags":{"expected_response":"true","group":"","method":"GET","name":"https://127.0.0.1:42367","proto":"HTTP/1.1","scenario":"default","status":"200","tls_version":"tls1.3","url":"https://127.0.0.1:42367"}}}
+```
+
+The per‑request values extracted from the `"value"` field of those `Point` records (first value = new connection, rest =
+reused):
+
+```text
+http_req_connecting      = 0.134932, 0, 0
+http_req_tls_handshaking = 2.117265, 0, 0
+http_req_blocked         = 2.324903, 0.002121, 0.001842
 ```
 
 Exactly the Q1/Q2 pattern in machine‑readable form: the first request carries the connect/TLS cost; the reused requests are
