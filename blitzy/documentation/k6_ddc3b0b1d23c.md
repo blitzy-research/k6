@@ -786,7 +786,7 @@ time="2026-07-08T04:08:54Z" level=error msg="GoError: require() can't be used wi
 
 ## Appendix B — EXP6 complete `concurrent map writes` crash dump (verbatim, one captured occurrence)
 
-This is the **complete, unedited** 179-line Go runtime dump from one captured EXP6 crash (the rare ~4% outcome described in §4.1). Goroutine IDs and hexadecimal addresses vary from run to run; the causally-relevant frame is the map write at `js/modules/resolution.go:154`, reached via the concurrent VU-init path (`execution/scheduler.go:170`). The `grafana/sobek` frames are the JavaScript-engine module-evaluation frames between `RunSourceData` and the `require` call.
+This is the **complete, unedited** 179-line Go runtime dump from one captured EXP6 crash (the rare ~2.6% outcome described in §4.1). Goroutine IDs and hexadecimal addresses vary from run to run; the causally-relevant frame is the map write at `js/modules/resolution.go:154`, reached via the concurrent VU-init path (`execution/scheduler.go:170`). The `grafana/sobek` frames are the JavaScript-engine module-evaluation frames between `RunSourceData` and the `require` call.
 
 ```
 fatal error: concurrent map writes
