@@ -13,7 +13,7 @@ This document answers, for the k6 load-testing tool (`grafana/k6`): **how does `
 
 ### 1.1 Direct answer
 
-k6 consolidates its inputs by **layering them with successive merge (`Apply`) calls**, where each higher tier overrides the lower ones; it then **derives** full scenarios from the merged execution shortcuts, and finally **freezes** the result into the run state before the scheduler reads it. The merge lives in `getConsolidatedConfig` [cmd/config.go:L189-L205], the per-field merge rule in `Options.Apply` [lib/options.go:L357-L399], the shortcut→scenario derivation in `DeriveScenariosFromShortcuts` [lib/executor/execution_config_shortcuts.go:L52-L120], and the freeze in `buildTestRunState` [cmd/test_load.go:L280].
+k6 consolidates its inputs by **layering them with successive merge (`Apply`) calls**, where each higher tier overrides the lower ones; it then **derives** full scenarios from the merged execution shortcuts, and finally **freezes** the result into the run state before the scheduler reads it. The merge lives in `getConsolidatedConfig` [cmd/config.go:L189-L216], the per-field merge rule in `Options.Apply` [lib/options.go:L357-L399], the shortcut→scenario derivation in `DeriveScenariosFromShortcuts` [lib/executor/execution_config_shortcuts.go:L52-L128], and the freeze in `buildTestRunState` [cmd/test_load.go:L280].
 
 **Effective precedence, highest → lowest:**
 
@@ -26,6 +26,8 @@ k6 consolidates its inputs by **layering them with successive merge (`Apply`) ca
 | 5 (lowest) | **Built-in defaults** | seeded shadow defaults from the CLI layer + `applyDefault(conf)` [cmd/config.go:L204] |
 
 Each named item the question asks about resolves through this **same** ladder: **VUs**, **duration**, **scenario settings**, the script's **`export const options`**, **CLI flags**, and the **config file** are all merged into fields of a single `lib.Options` value, and the winner for each field is chosen by tier. (The five sources are *input tiers*; **VUs / duration / scenario settings are fields** of `lib.Options` that those tiers populate — they are not themselves tiers.) This ladder is proven end-to-end by the conflicting runs in §4.
+
+**Corroboration — official docs (precedence order).** The Grafana k6 "How to use options" guide documents this same ordering: from lowest to highest precedence it lists the built-in default value, then the `--config` file, then the script value, then the environment variable, and finally the CLI flag, stating that command-line flags have the highest order of precedence. That is the identical **CLI > env > script > config file > defaults** ladder observed here — including the non-obvious **script > config file** relationship, which is proven directly by EXP2 in §4. See "How to use options" (<https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/>). As stated in "How to read this document", the docs are corroboration only; the code and the captured runs are authoritative.
 
 ### 1.2 Two subtleties that shape every result
 
@@ -44,7 +46,7 @@ All `-e`/`K6_*`/CLI examples in this document use **non-sensitive numeric config
 
 ## 2. The consolidation mechanism (documented behavior, with citations)
 
-### 2.1 The merge pipeline — `getConsolidatedConfig` [cmd/config.go:L189-L205]
+### 2.1 The merge pipeline — `getConsolidatedConfig` [cmd/config.go:L189-L216]
 
 The order is documented verbatim in the comment block immediately above the function [cmd/config.go:L180-L186] and implemented by the `Apply` chain. The following is a faithful **excerpt** (Go source with error-handling and trailing validation elided as Go comments, so the block remains valid Go rather than containing bare `...` placeholders):
 
@@ -158,7 +160,7 @@ Built-in defaults enter along **two** paths, not one:
 
 (Terminology note: "CLI flags", "the config file", and "`export const options`" are configuration **input sources/tiers**; `vus`, `duration`, and the scenario settings are **fields** of the resulting `lib.Options`. The tiers populate the fields.)
 
-### 2.4 Shortcut → scenario derivation — `DeriveScenariosFromShortcuts` [lib/executor/execution_config_shortcuts.go:L52-L120]
+### 2.4 Shortcut → scenario derivation — `DeriveScenariosFromShortcuts` [lib/executor/execution_config_shortcuts.go:L52-L128]
 
 Faithful **excerpt** (conflict-check and warning bodies elided as Go comments to keep the block valid Go):
 
