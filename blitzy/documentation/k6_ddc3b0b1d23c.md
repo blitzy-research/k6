@@ -12,7 +12,7 @@ You are new to `grafana/k6`. You put an `export const options` object in your te
 
 Whatever the highest-priority source sets for a given option is the value the test runs with; anything a source leaves unset falls through to the next source down.
 
-**When the decision becomes final (the freeze point).** The sources are merged by `getConsolidatedConfig` (`cmd/config.go:189-216`); then the execution shortcuts (`vus`/`duration`/`stages`/`iterations`) are *derived* into a concrete scenario (`deriveAndValidateConfig` → `DeriveScenariosFromShortcuts`); then the derived options are *written onto the run state* — `SetOptions` reinjects them into the runner (`cmd/test_load.go:269`) and `TestRunState.Options` is set to `derivedConfig.Options` with the code's own comment `// we will always run with the derived options` (`cmd/test_load.go:280`). The `k6 run` command reads that derived config (`cmd/run.go:127`) and constructs the execution scheduler with `execution.NewScheduler(...)` (`cmd/run.go:135`). **That scheduler construction — which happens before any VU is initialized — is the point at which the effective execution plan is final for the run:** nothing after it re-consolidates the options. Every VU is then initialized from these same derived options, and at runtime each VU exposes its *own* deep-frozen copy of them through `exec.test.options` (mechanism traced in Section 3; shown live in Section 5, Run 7).
+**When the decision becomes final (the freeze point).** The sources are merged by `getConsolidatedConfig` (`cmd/config.go:189-216`); then the execution shortcuts (`vus`/`duration`/`stages`/`iterations`) are *derived* into a concrete scenario (`deriveAndValidateConfig` → `DeriveScenariosFromShortcuts`); then the derived options are *written onto the run state* — `SetOptions` reinjects them into the runner (`cmd/test_load.go:269`) and `TestRunState.Options` is set to `derivedConfig.Options` with the code's own comment `// we will always run with the derived options` (`cmd/test_load.go:280`). The `k6 run` command reads that derived config (`cmd/run.go:127`) and constructs the execution scheduler with `execution.NewScheduler(...)` (`cmd/run.go:135`). **That scheduler construction — which happens before any VU is initialized — is the point at which the effective execution plan is final for the run:** nothing after it re-consolidates the options. Every VU is then initialized from these same derived options, and at runtime each VU reads those same values through `exec.test.options`, exposed as a deep-frozen (read-only) object (mechanism traced in Section 3; per-VU values shown live in Section 5, Run 7; object identity shown in Section 7.9).
 
 **Why a value can seem to come from "an unexpected place."** Two facts combine:
 
@@ -35,7 +35,7 @@ The table below summarizes the seven runs that prove the ordering; their full, u
 
 ## 2. How the options are consolidated: `getConsolidatedConfig` and the `Apply` chain
 
-The single effective configuration is assembled by **`getConsolidatedConfig`** in `cmd/config.go` (`cmd/config.go:189-216`). It composes several `Config` values with **`Config.Apply`** (`cmd/config.go:71-92`), and `Config.Apply` in turn calls **`Options.Apply`** (`lib/options.go:357-437`) for the option fields.
+The single effective configuration is assembled by **`getConsolidatedConfig`** in `cmd/config.go` (`cmd/config.go:189-216`). It composes several `Config` values with **`Config.Apply`** (`cmd/config.go:71-92`), and `Config.Apply` in turn calls **`Options.Apply`** (`lib/options.go:357-517`) for the option fields.
 
 **The override rule is field-by-field, and “set” is defined per field type.** A field in the argument overrides the same field in the receiver **only when that field is set** — but the test for “set” depends on the field's type:
 
@@ -199,7 +199,7 @@ Note line 280: `Options: lct.derivedConfig.Options, // we will always run with t
 
 `execution.NewScheduler(testRunState, controller)` (`cmd/run.go:135`) — which runs **before any VU is initialized** — is the instant at which the effective **execution plan** is final for the run. Everything after this point (spawning VUs, iterating) uses the derived options that were written onto the `TestRunState`; nothing re-consolidates them.
 
-**(d) Each VU is initialized from those same derived options, and gets its *own* frozen copy.** `SetOptions` sets the runner's bundle to the derived options (`js/runner.go:434-436`):
+**(d) Each VU is initialized from those same derived options, and reads them at runtime through a deep-frozen `exec.test.options` object.** `SetOptions` sets the runner's bundle to the derived options (`js/runner.go:434-436`):
 
 ```go
 // SetOptions sets the test Options to the provided data and makes necessary changes to the Runner.
@@ -215,7 +215,7 @@ When a VU is created, its `lib.State` receives that same bundle's options (`js/r
 		Options:        vu.Runner.Bundle.Options,
 ```
 
-At runtime, the first time a VU reads `exec.test.options`, that VU **lazily materializes its own object** from **its own** `vuState.Options` and caches it in a per-VU closure variable (`js/modules/k6/execution/execution.go:184-197`):
+At runtime, `exec.test` is itself an **accessor property** on the execution module (`js/modules/k6/execution/execution.go:47-61` — defined via `o.DefineAccessorProperty("test", …)` at `:48` and registered at `:61`), so **every** read of `exec.test` calls `newTestInfo()` and returns a *fresh* test-info object. Each of those test-info objects lazily builds and caches its **own** deep-frozen options object in a closure variable (`optionsObject`) that is local to that single `newTestInfo()` call (`js/modules/k6/execution/execution.go:168-200` — the cache variable is declared at `:171`, and it is populated on the first read of `.options`, `:184-197`):
 
 ```go
 		"options": func() interface{} {
@@ -267,11 +267,11 @@ At runtime, the first time a VU reads `exec.test.options`, that VU **lazily mate
 	return obj, nil
 ```
 
-**Conclusion.** The **execution plan** is final at `execution.NewScheduler` (`cmd/run.go:135`), before any VU is initialized. Every VU is then initialized from the *same* derived options, and each VU exposes its **own deep-frozen copy** of them via `exec.test.options` — the objects are separate per VU, but their content is identical. That is why the per-VU logs in Section 5, Run 7 report identical *values* (identical content), not because the VUs share one object.
+**Conclusion.** The **execution plan** is final at `execution.NewScheduler` (`cmd/run.go:135`), before any VU is initialized. Every VU is then initialized from the *same* derived options. Two consequences follow from the accessor mechanism above, and both are observed live in Section 7.9: (1) the option **values** every VU reads through `exec.test.options` are identical and deep-frozen (read-only); and (2) object *identity* is **per-access, not per-VU** — a *retained* handle (`const h = exec.test`) returns one cached options object on repeated `h.options` reads, whereas two *separate* `exec.test.options` reads return **different** frozen objects with identical content. The probe in Section 7.9 reports, for every VU, `retainedSame=true directSame=false retainedVsDirect=false frozen=true`. That is why the per-VU logs in Section 5, Run 7 report identical *values* (identical content) — not because the VUs, or repeated accesses, share one object.
 
 ## 4. The "unexpected place" symptom, explained mechanically
 
-The surprise lives inside **`Options.Apply`** (`lib/options.go:357-437`), where two adjacent pieces behave asymmetrically.
+The surprise lives inside **`Options.Apply`** (`lib/options.go:357-517`), where two adjacent pieces behave asymmetrically.
 
 **`vus` is applied on its own** (`lib/options.go:361-363`): if the higher tier sets `vus`, it overrides; otherwise the lower tier's `vus` survives untouched. **But `duration`/`iterations`/`stages`/`scenarios` move as one mutually-exclusive group** — when the higher tier sets **any one** of them, the guard clears **all four** inherited from lower tiers (`lib/options.go:365-377`):
 
@@ -692,7 +692,7 @@ default ✓ [ 100% ] 3 VUs  2s
 The script exports `vus: 1`, but the CLI passes `--vus 3 --duration 2s`. The banner shows `3 max VUs … 3 looping VUs for 2s`, and each VU logs the runtime-effective executor read from `exec.test.options.scenarios.default`. This proves three things:
 
 - **(a) Concurrency follows the consolidated VU count.** Three VUs run (`VU#1`, `VU#2`, `VU#3`) — the CLI's `3`, not the script's `vus: 1`.
-- **(b) Every VU sees options with identical *content*.** All three log `executor=constant-vus vus=3 duration=2s`; the script's `vus: 1` is nowhere at runtime. Each VU reads this from **its own** deep-frozen `exec.test.options` object (the per-VU materialization of Section 3(d), `js/modules/k6/execution/execution.go:184-197,283-338`); the objects are separate per VU but their content is identical, which is why the logged values match exactly. Note the script reads `exec.test.options.scenarios.default.vus`, **not** `exec.test.options.vus`: the top-level `vus`/`duration`/`iterations`/`stages` keys are deleted when the object is built (`js/modules/k6/execution/execution.go:312-315`), because those shortcuts have been folded into the derived scenario.
+- **(b) Every VU sees options with identical *content*.** All three log `executor=constant-vus vus=3 duration=2s`; the script's `vus: 1` is nowhere at runtime. Each VU reads these values from a deep-frozen `exec.test.options` object (mechanism in Section 3(d): the accessor `js/modules/k6/execution/execution.go:47-61`, the per-access cache `:168-200`, and the freeze `:283-338`); the content every VU sees is identical, which is why the logged values match exactly. (The object-*identity* nuance — repeated `exec.test.options` accesses return distinct but value-identical frozen objects — is demonstrated in Section 7.9.) Note the script reads `exec.test.options.scenarios.default.vus`, **not** `exec.test.options.vus`: the top-level `vus`/`duration`/`iterations`/`stages` keys are deleted when the object is built (`js/modules/k6/execution/execution.go:312-315`), because those shortcuts have been folded into the derived scenario.
 - **(c) The `constant-vus` executor was derived from the `duration` shortcut.** `DeriveScenariosFromShortcuts` maps a `duration`-based shortcut to `constant-vus` (`lib/executor/execution_config_shortcuts.go:69` → `:86`; the executor type string `constantVUsType = "constant-vus"` is at `lib/executor/constant_vus.go:18`).
 
 *(The three per-VU log lines may appear in any order between runs — that is normal concurrency — but the values `executor=constant-vus vus=3 duration=2s` are identical every time; see the repetition matrix below.)*
@@ -1036,8 +1036,8 @@ default ✓ [ 100% ] 3 VUs  2s
 | `K6_*` environment variables | Runs 3, 6 | `readEnvConfig` `cmd/config.go:170-178`; env tags `lib/options.go:234-237` |
 | VUs | Runs 1–7 (banner "N max VUs" / "N looping VUs") | applied independently `lib/options.go:361-363` |
 | duration | Runs 1–6 (banner "for Ys") | mutual-exclusion group `lib/options.go:365-377` |
-| scenario settings | Run 7 (`executor=constant-vus`, derived from the `--duration` shortcut) | hand-written long-form scenarios only via script/`--config` (`scenarios` `ignored:"true"` `lib/options.go:245`); shortcut-derived scenarios via CLI/env through `DeriveScenariosFromShortcuts` `lib/executor/execution_config_shortcuts.go:52-120` |
-| multiple-VU behavior | Run 7 (per-VU identical logs) | each VU initialized from the same derived options (`js/runner.go:232`) and reads its **own** deep-frozen `exec.test.options` (`js/modules/k6/execution/execution.go:184-197,283-338`); plan fixed at `cmd/run.go:135` |
+| scenario settings | Run 7 (`executor=constant-vus`, derived from the `--duration` shortcut) **and Section 7.8** (explicit long-form `scenarios` object conflict — script `scenarios` beat `--config` `scenarios`) | hand-written long-form scenarios only via script/`--config` (`scenarios` `ignored:"true"` `lib/options.go:245`); shortcut-derived scenarios via CLI/env through `DeriveScenariosFromShortcuts` `lib/executor/execution_config_shortcuts.go:52-120` |
+| multiple-VU behavior | Run 7 (per-VU identical logs); object identity in Section 7.9 | each VU initialized from the same derived options (`js/runner.go:232`) and reads identical, deep-frozen option **values** through `exec.test.options` (accessor `js/modules/k6/execution/execution.go:47-61`; per-access cache `:168-200`; freeze `:283-338`); plan fixed at `cmd/run.go:135` |
 | finalization / freeze point | (mechanism, Section 3) | `cmd/test_load.go:280`; `cmd/run.go:127`; `cmd/run.go:135` |
 
 ## 7. Build/run reproducibility and corroboration
@@ -1054,8 +1054,9 @@ set -euo pipefail
 
 # --- Inputs -----------------------------------------------------------------
 # K6_REPO : a k6 repository that contains commit $BASE_COMMIT.
-#           (On this delivered branch, $BASE_COMMIT is the parent of the
-#            doc-adding HEAD, i.e. the last k6 *source* commit.)
+#           (On this delivered branch, $BASE_COMMIT is an ancestor of HEAD:
+#            it is the last k6 *source* commit; the answer document is added
+#            in later commit(s) on top of it.)
 K6_REPO="${K6_REPO:?set K6_REPO to a k6 checkout}"
 BASE_COMMIT=ddc3b0b1d23c128e34e2792fc9075f9126e32375
 
@@ -1102,11 +1103,68 @@ export default function () {
 }
 JS
 printf '{"vus":2,"duration":"9s"}' > "$LAB/fx/cfg.json"
+# extra fixtures for the supplementary demonstrations (Sections 7.7 and 7.8)
+cat > "$LAB/fx/envprobe.js" <<'JS'
+import exec from 'k6/execution';
+import { sleep } from 'k6';
+export const options = {};
+export default function () {
+  if (exec.vu.idInTest === 1 && exec.vu.iterationInScenario === 0) {
+    const sc = exec.test.options.scenarios.default;
+    console.log(`EFFECTIVE executor=${sc.executor} vus=${sc.vus} duration=${sc.duration} iterations=${sc.iterations}`);
+    console.log(`__ENV.K6_VUS=${__ENV.K6_VUS} __ENV.K6_DURATION=${__ENV.K6_DURATION} __ENV.K6_ITERATIONS=${__ENV.K6_ITERATIONS}`);
+  }
+  sleep(1);
+}
+JS
+cat > "$LAB/fx/scn_script.js" <<'JS'
+import exec from 'k6/execution';
+import { sleep } from 'k6';
+export const options = {
+  scenarios: {
+    script_only: { executor: 'shared-iterations', vus: 4, iterations: 8, maxDuration: '10s' },
+  },
+};
+export default function () {
+  if (exec.vu.iterationInScenario === 0) {
+    console.log(`VU#${exec.vu.idInTest} scenario=${exec.scenario.name} names=${JSON.stringify(Object.keys(exec.test.options.scenarios))}`);
+  }
+  sleep(1);
+}
+JS
+printf '{"scenarios":{"cfg_only":{"executor":"constant-vus","vus":2,"duration":"5s"}}}' > "$LAB/fx/cfg_scn.json"
+cat > "$LAB/fx/identity_probe.js" <<'JS'
+import exec from 'k6/execution';
+// Three VUs, one iteration each, so every VU logs its identity comparison exactly once.
+export const options = {
+  scenarios: {
+    probe: { executor: 'per-vu-iterations', vus: 3, iterations: 1 },
+  },
+};
+export default function () {
+  const h = exec.test;                                   // retain ONE exec.test handle
+  const retainedSame      = (h.options === h.options);            // same object cached within one handle?
+  const directSame        = (exec.test.options === exec.test.options); // two fresh exec.test accesses?
+  const retainedVsDirect  = (h.options === exec.test.options);         // retained vs a fresh access?
+  const frozen            = Object.isFrozen(exec.test.options);        // deep-frozen / read-only?
+  console.log(`VU#${exec.vu.idInTest} retainedSame=${retainedSame} directSame=${directSame} retainedVsDirect=${retainedVsDirect} frozen=${frozen}`);
+}
+JS
 
 # --- 6. Clean, non-interfering environment for every run --------------------
-export HOME="$LAB/home"                 # no ~/.config/loadimpact/k6/config.json
-unset XDG_CONFIG_HOME K6_CONFIG 2>/dev/null || true
-cd "$LAB/fx"                            # run from the fixtures dir
+# Start every run from a known-clean baseline: a private HOME (so no user
+# ~/.config/loadimpact/k6/config.json is auto-loaded) AND no inherited k6
+# option variables. An exported K6_VUS/K6_DURATION/K6_ITERATIONS/... in the
+# caller's shell would otherwise land in the environment tier and silently
+# override the script, defeating the demonstration.
+export HOME="$LAB/home"                    # no ~/.config/loadimpact/k6/config.json
+for _kv in $(compgen -v K6_ 2>/dev/null || true); do   # clear inherited K6_* option vars,
+  [ "$_kv" = K6_REPO ] && continue                     # but preserve K6_REPO (our own input:
+  unset "$_kv"                                          # a repo path, not a k6 option)
+done
+unset XDG_CONFIG_HOME 2>/dev/null || true  # ignore an alternate XDG config dir
+export K6_NO_USAGE_REPORT=true             # hermetic, fully-offline runs (no telemetry call)
+cd "$LAB/fx"                               # run from the fixtures dir
 
 # --- 7. The seven conditions, each repeated 3x (combined stdout+stderr) -----
 for rep in 1 2 3; do
@@ -1119,11 +1177,24 @@ for rep in 1 2 3; do
                               "$BIN" run --vus 3 --duration 2s multivu.js                                 > "$LAB/out/run7_rep$rep.txt" 2>&1
 done
 
+# --- 7b. Supplementary demonstrations --------------------------------------
+# Section 7.8 — explicit long-form `scenarios` object precedence:
+"$BIN" run --config cfg_scn.json scn_script.js   > "$LAB/out/scn_script_vs_cfg.txt"   2>&1   # script scenarios win
+"$BIN" run --config cfg_scn.json noopts.js       > "$LAB/out/scn_cfg_vs_default.txt"  2>&1   # config scenarios win over defaults
+# Section 7.7 — the -e/--env flag vs a real process K6_* variable:
+"$BIN" run envprobe.js                                                                > "$LAB/out/env_a_baseline.txt"  2>&1
+"$BIN" run -e K6_VUS=9 -e K6_DURATION=5s envprobe.js                                  > "$LAB/out/env_b_eflag.txt"     2>&1
+"$BIN" run --include-system-env-vars=false -e K6_VUS=9 -e K6_DURATION=5s envprobe.js  > "$LAB/out/env_c_flagoff.txt"    2>&1
+# Section 7.9 — per-VU exec.test.options object identity:
+"$BIN" run identity_probe.js                                                          > "$LAB/out/identity_probe.txt"  2>&1
+
 # --- 8. Repository integrity (delivered repo must be unchanged) -------------
 echo "### git status --short (worktree) ###"
 git -C "$K6_REPO" status --short
 echo "### git diff --name-status $BASE_COMMIT..HEAD ###"
 git -C "$K6_REPO" diff --name-status "$BASE_COMMIT"..HEAD
+echo "### non-doc paths changed since baseline (must be empty) ###"
+git -C "$K6_REPO" diff --name-only "$BASE_COMMIT"..HEAD | grep -v '^blitzy/documentation/' || echo '(none)'
 
 # scratch removed automatically by the trap on exit
 ```
@@ -1166,7 +1237,7 @@ k6 derives its commit string **at build time** from the Git revision recorded by
 	return fmt.Sprintf("%s (commit/%s, %s)", Version, commit, goVersionArch)
 ```
 
-The canonical software under investigation is k6 at **source commit `ddc3b0b1d2`**. On this delivered branch that commit is the **parent of `HEAD`**; `HEAD` itself (`5bb1613468…`) is the single commit that adds *this document*. Consequently, building a clean checkout of `ddc3b0b1d2` (as the transcript does) stamps `commit/ddc3b0b1d2`, whereas building the delivered branch **tip** stamps the doc commit instead — `commit/5bb1613468` (the first ten hex digits of `HEAD`, per the mechanism above). Both are the same k6 source as far as option consolidation is concerned; only the recorded revision differs. This is why the transcript checks out `ddc3b0b1d2` explicitly rather than building the tip.
+The canonical software under investigation is k6 at **source commit `ddc3b0b1d2`**. On this delivered branch that commit is an **ancestor of `HEAD`**: the documentation commit(s) that add and refine *this document* sit on top of it, and `git diff --name-status ddc3b0b1d2..HEAD` shows exactly one added file — the document itself (Section 7.4). Consequently, building a clean checkout of `ddc3b0b1d2` (as the transcript does) stamps `commit/ddc3b0b1d2`, whereas building the delivered branch **tip** would stamp the documentation commit instead — `commit/<first ten hex digits of HEAD>`, per the mechanism above. Both are the same k6 source as far as option consolidation is concerned; only the recorded revision differs. This is why the transcript checks out `ddc3b0b1d2` explicitly rather than building the tip.
 
 ### 7.3 Fixtures
 
@@ -1212,27 +1283,40 @@ export default function () {
 {"vus":2,"duration":"9s"}
 ```
 
-### 7.4 Repository integrity (two independent checks)
+### 7.4 Repository integrity (delivered repo is unchanged k6 source)
 
-The source repository is left byte-for-byte unchanged; **this document is the only file added**. Two *independent* checks confirm it, and both are printed by the transcript above:
+The source repository is left byte-for-byte unchanged as far as k6 itself is concerned: **the only file this work adds is this document**, and **no k6 source, test, configuration, vendored-dependency, or build file is created, modified, or deleted**. Step 8 of the transcript above emits the confirming checks, run against the delivered repository (`$K6_REPO`). One check is *durable* (independent of when it is run); the other reports the *worktree* and therefore depends only on whether the documentation commit has been made yet.
 
-1. **The working tree is clean.** `git status --short` prints nothing (no modified, staged, or untracked files):
-
-```text
-$ git status --short
-
-```
-
-   *(no output — the working tree is clean)*
-
-2. **The only difference from the pre-existing baseline is this one added file.** Comparing the baseline source commit `ddc3b0b1d2` to `HEAD` with `git diff --name-status` shows a single addition (`A`):
+1. **Durable proof — the whole history since the baseline adds exactly one file.** The baseline source commit `ddc3b0b1d2` is an ancestor of `HEAD` (Section 7.2), so `git diff --name-status ddc3b0b1d2..HEAD` compares the last k6 *source* commit against the delivered tip. It reports a single addition (`A`) and nothing else, regardless of when it is run:
 
 ```text
 $ git diff --name-status ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD
 A	blitzy/documentation/k6_ddc3b0b1d23c.md
 ```
 
-These are two different questions — *“is the working tree dirty right now?”* (answer: no) and *“what changed between the baseline and HEAD?”* (answer: exactly one added file) — and both outputs are the real ones captured by the transcript.
+   Filtering that same comparison for any path *outside* `blitzy/documentation/` makes the exclusivity explicit — nothing remains, so no k6 source, test, config, vendor, or build file changed between the baseline and `HEAD`:
+
+```text
+$ git diff --name-only ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD | grep -v '^blitzy/documentation/' || echo '(none)'
+(none)
+```
+
+2. **Worktree state — at most this one file, and never any k6 file.** `git status --short` reports only *uncommitted* changes, so its output legitimately differs depending on whether the documentation commit is already in place. Both of the following are real captures from the delivered repository, and in **either** state the sole path that can appear is `blitzy/documentation/k6_ddc3b0b1d23c.md`:
+
+   - **Delivered state — the documentation commit is in place.** The worktree is clean and the command prints nothing:
+
+```text
+$ git status --short
+```
+
+   - **In-flight state — the document is not yet committed.** The command lists exactly this one file (here as a tracked-but-modified entry) and no other:
+
+```text
+$ git status --short
+ M blitzy/documentation/k6_ddc3b0b1d23c.md
+```
+
+Together these answer two distinct questions — *"what has the branch changed since the baseline k6 source?"* (exactly one added file, always) and *"is anything uncommitted in the worktree right now?"* (nothing once the document is committed; at most the document itself beforehand). The durable check is authoritative for *"is the k6 source unchanged?"*; the worktree check confirms that whatever is pending is only ever this document. Every output above is the real one captured from the delivered repository.
 
 ### 7.5 In-repo corroboration
 
@@ -1240,5 +1324,330 @@ k6 ships unit tests that assert this precedence directly: `cmd/config_consolidat
 
 ### 7.6 Official documentation corroboration
 
-Grafana's k6 documentation states the same order of precedence. **“How to use options”** lists, from lowest to highest: the option's default value, then a `--config` file, then the script value, then the environment variable, then the CLI flag (highest) — <https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/>. The **“Options reference”** and **“Environment variables”** pages document the nuance this report relies on in Runs 3 and 6: the `-e/--env` flag only injects variables into the script's `__ENV` object and does **not** set options, whereas a real process environment variable such as `K6_ITERATIONS=120` *does* set the option — <https://grafana.com/docs/k6/latest/using-k6/k6-options/reference/> and <https://grafana.com/docs/k6/latest/using-k6/environment-variables/>. It is the latter (real `K6_*` process variables) that Runs 3 and 6 exercise.
+Grafana's k6 documentation states the same order of precedence. **“How to use options”** lists, from lowest to highest: the option's default value, then a `--config` file, then the script value, then the environment variable, then the CLI flag (highest) — <https://grafana.com/docs/k6/latest/using-k6/k6-options/how-to/>. This matches the observed order in Runs 1–6 exactly. The **“Options reference”** and **“Environment variables”** pages give the full option catalog and the `-e/--env` semantics — <https://grafana.com/docs/k6/latest/using-k6/k6-options/reference/> and <https://grafana.com/docs/k6/latest/using-k6/environment-variables/>. One caveat, resolved by observation rather than by reading: the “Environment variables” page states that the `-e/--env` flag does *not* configure options, but for the canonical `k6 run` invocation the observed behavior is the **opposite** — a `-e K6_*` variable *does* set the option, because `k6 run` enables `--include-system-env-vars` by default (demonstrated in Section 7.7). Runs 3 and 6 sidestep this subtlety entirely by using **real process environment variables** (`K6_VUS=…`, `K6_DURATION=…`), which set options directly and unambiguously regardless of that flag.
 
+
+### 7.7 The `-e/--env` flag *does* configure options under `k6 run` (observed)
+
+Grafana's “Environment variables” page says the `-e/--env` flag only populates the script's `__ENV` object and does not configure options. **Running the canonical binary shows the opposite for `k6 run`:** a `-e K6_*` variable also *sets the corresponding option*. The reason is that `k6 run` enables `--include-system-env-vars` **by default** — `k6 run --help` prints `--include-system-env-vars   pass the real system environment variables to the runtime (default true)`, and the run command requests that default via `runtimeOptionFlagSet(true)` (`cmd/run.go:441`). With the flag on, `cmd/runtime_options.go:116-117` aliases the runtime environment onto the process environment map (`opts.Env = environment`, i.e. `gs.Env`), each `-e VAR=value` is written into that same map (`cmd/runtime_options.go:131`), and consolidation then reads it back through `readEnvConfig(gs.Env)` (`cmd/config.go:194`). So a `-e K6_VUS=…` lands in the **environment tier** of the `Apply` chain — just like a real process `K6_VUS`.
+
+The three conditions below share one probe that prints, exactly once (first iteration of `VU#1`), both the effective executor read from the frozen `exec.test.options` and the `__ENV` values:
+
+`envprobe.js`
+
+```javascript
+import exec from 'k6/execution';
+import { sleep } from 'k6';
+export const options = {};
+export default function () {
+  if (exec.vu.idInTest === 1 && exec.vu.iterationInScenario === 0) {
+    const sc = exec.test.options.scenarios.default;
+    console.log(`EFFECTIVE executor=${sc.executor} vus=${sc.vus} duration=${sc.duration} iterations=${sc.iterations}`);
+    console.log(`__ENV.K6_VUS=${__ENV.K6_VUS} __ENV.K6_DURATION=${__ENV.K6_DURATION} __ENV.K6_ITERATIONS=${__ENV.K6_ITERATIONS}`);
+  }
+  sleep(1);
+}
+```
+
+**(a) Baseline — no environment, no `-e`.** The default per-VU-iterations executor; `__ENV` empty.
+
+Command: `"$BIN" run envprobe.js`
+
+```text
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: envprobe.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+time="2026-07-13T19:17:11Z" level=info msg="EFFECTIVE executor=per-vu-iterations vus=null duration=undefined iterations=null" source=console
+time="2026-07-13T19:17:11Z" level=info msg="__ENV.K6_VUS=undefined __ENV.K6_DURATION=undefined __ENV.K6_ITERATIONS=undefined" source=console
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/1 iters, 1 per VU
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 1   0.999028/s
+     vus..................: 1   min=1      max=1
+     vus_max..............: 1   min=1      max=1
+
+
+running (00m01.0s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m01.0s/10m0s  1/1 iters, 1 per VU
+```
+
+**(b) `-e K6_VUS=9 -e K6_DURATION=5s` — the flag *sets* the options.** The banner is `9 looping VUs for 5s` and the effective executor is `constant-vus vus=9 duration=5s`; `__ENV` is populated too.
+
+Command: `"$BIN" run -e K6_VUS=9 -e K6_DURATION=5s envprobe.js`
+
+```text
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: envprobe.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 9 max VUs, 35s max duration (incl. graceful stop):
+              * default: 9 looping VUs for 5s (gracefulStop: 30s)
+
+time="2026-07-13T19:16:35Z" level=info msg="EFFECTIVE executor=constant-vus vus=9 duration=5s iterations=undefined" source=console
+time="2026-07-13T19:16:35Z" level=info msg="__ENV.K6_VUS=9 __ENV.K6_DURATION=5s __ENV.K6_ITERATIONS=undefined" source=console
+
+running (01.0s), 9/9 VUs, 0 complete and 0 interrupted iterations
+default   [  20% ] 9 VUs  1.0s/5s
+
+running (02.0s), 9/9 VUs, 9 complete and 0 interrupted iterations
+default   [  40% ] 9 VUs  2.0s/5s
+
+running (03.0s), 9/9 VUs, 18 complete and 0 interrupted iterations
+default   [  60% ] 9 VUs  3.0s/5s
+
+running (04.0s), 9/9 VUs, 27 complete and 0 interrupted iterations
+default   [  80% ] 9 VUs  4.0s/5s
+
+running (05.0s), 9/9 VUs, 36 complete and 0 interrupted iterations
+default   [ 100% ] 9 VUs  5.0s/5s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 45  8.993789/s
+     vus..................: 9   min=9      max=9
+     vus_max..............: 9   min=9      max=9
+
+
+running (05.0s), 0/9 VUs, 45 complete and 0 interrupted iterations
+default ✓ [ 100% ] 9 VUs  5s
+```
+
+**(c) Same `-e` flags, but `--include-system-env-vars=false` — options revert to default.** The banner is back to the default `1 VU` per-VU-iterations plan, yet `__ENV.K6_VUS=9`/`K6_DURATION=5s` are still populated — isolating the default-on `--include-system-env-vars` as the exact reason `-e` reaches the option tier.
+
+Command: `"$BIN" run --include-system-env-vars=false -e K6_VUS=9 -e K6_DURATION=5s envprobe.js`
+
+```text
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: envprobe.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+time="2026-07-13T19:17:12Z" level=info msg="EFFECTIVE executor=per-vu-iterations vus=null duration=undefined iterations=null" source=console
+time="2026-07-13T19:17:12Z" level=info msg="__ENV.K6_VUS=9 __ENV.K6_DURATION=5s __ENV.K6_ITERATIONS=undefined" source=console
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/1 iters, 1 per VU
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 1   0.9988/s
+     vus..................: 1   min=1    max=1
+     vus_max..............: 1   min=1    max=1
+
+
+running (00m01.0s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m01.0s/10m0s  1/1 iters, 1 per VU
+```
+
+This is why **Runs 3 and 6 use real process `K6_*` variables** rather than `-e`: process variables set options directly and unambiguously, independent of `--include-system-env-vars`. It is also a case where writing from observation (this report's method) corrected a claim that the official page would otherwise suggest.
+
+### 7.8 Explicit `scenarios` object precedence (direct evidence)
+
+Runs 1–6 use the `vus`/`duration` execution *shortcuts*. This section proves the same precedence for a **hand-written long-form `scenarios` object**, directly answering the "explicit scenario settings" part of the question. The `--config` file and the script each define a *different* explicit `scenarios` map; the script is the higher-precedence tier, so its `scenarios` must win — and because `duration`/`iterations`/`stages`/`scenarios` move as one mutually-exclusive group (Section 4), the config file's scenario must be **replaced**, not merged.
+
+`cfg_scn.json`
+
+```json
+{"scenarios":{"cfg_only":{"executor":"constant-vus","vus":2,"duration":"5s"}}}
+```
+
+`scn_script.js`
+
+```javascript
+import exec from 'k6/execution';
+import { sleep } from 'k6';
+export const options = {
+  scenarios: {
+    script_only: { executor: 'shared-iterations', vus: 4, iterations: 8, maxDuration: '10s' },
+  },
+};
+export default function () {
+  if (exec.vu.iterationInScenario === 0) {
+    console.log(`VU#${exec.vu.idInTest} scenario=${exec.scenario.name} names=${JSON.stringify(Object.keys(exec.test.options.scenarios))}`);
+  }
+  sleep(1);
+}
+```
+
+**Script `scenarios` vs `--config` `scenarios` → script wins.** The banner is `script_only: 8 iterations shared among 4 VUs`, and every VU logs `names=["script_only"]` — the config file's `cfg_only` scenario is **absent** from the effective `exec.test.options.scenarios`, confirming whole-group replacement rather than a merge.
+
+Command: `"$BIN" run --config cfg_scn.json scn_script.js`
+
+```text
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: scn_script.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 4 max VUs, 40s max duration (incl. graceful stop):
+              * script_only: 8 iterations shared among 4 VUs (maxDuration: 10s, gracefulStop: 30s)
+
+time="2026-07-13T18:57:28Z" level=info msg="VU#4 scenario=script_only names=[\"script_only\"]" source=console
+time="2026-07-13T18:57:28Z" level=info msg="VU#1 scenario=script_only names=[\"script_only\"]" source=console
+time="2026-07-13T18:57:28Z" level=info msg="VU#3 scenario=script_only names=[\"script_only\"]" source=console
+time="2026-07-13T18:57:28Z" level=info msg="VU#2 scenario=script_only names=[\"script_only\"]" source=console
+
+running (01.0s), 4/4 VUs, 0 complete and 0 interrupted iterations
+script_only   [   0% ] 4 VUs  01.0s/10s  0/8 shared iters
+
+running (02.0s), 4/4 VUs, 4 complete and 0 interrupted iterations
+script_only   [  50% ] 4 VUs  02.0s/10s  4/8 shared iters
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 8   3.996125/s
+     vus..................: 4   min=4      max=4
+     vus_max..............: 4   min=4      max=4
+
+
+running (02.0s), 0/4 VUs, 8 complete and 0 interrupted iterations
+script_only ✓ [ 100% ] 4 VUs  02.0s/10s  8/8 shared iters
+```
+
+**Reverse: `--config` `scenarios` vs a no-options script → config wins over defaults.** With the script supplying no options, the config file's explicit `scenarios` object is the highest tier present, so `cfg_only: 2 looping VUs for 5s` is used.
+
+Command: `"$BIN" run --config cfg_scn.json noopts.js`
+
+```text
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: noopts.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 2 max VUs, 35s max duration (incl. graceful stop):
+              * cfg_only: 2 looping VUs for 5s (gracefulStop: 30s)
+
+
+running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+cfg_only   [  20% ] 2 VUs  1.0s/5s
+
+running (02.0s), 2/2 VUs, 2 complete and 0 interrupted iterations
+cfg_only   [  40% ] 2 VUs  2.0s/5s
+
+running (03.0s), 2/2 VUs, 4 complete and 0 interrupted iterations
+cfg_only   [  60% ] 2 VUs  3.0s/5s
+
+running (04.0s), 2/2 VUs, 6 complete and 0 interrupted iterations
+cfg_only   [  80% ] 2 VUs  4.0s/5s
+
+running (05.0s), 2/2 VUs, 8 complete and 0 interrupted iterations
+cfg_only   [ 100% ] 2 VUs  5.0s/5s
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=1s min=1s med=1s max=1s p(90)=1s p(95)=1s
+     iterations...........: 10  1.998874/s
+     vus..................: 2   min=2      max=2
+     vus_max..............: 2   min=2      max=2
+
+
+running (05.0s), 0/2 VUs, 10 complete and 0 interrupted iterations
+cfg_only ✓ [ 100% ] 2 VUs  5s
+```
+
+Together these confirm the precedence order for an explicit `scenarios` object exactly as for the shortcuts: the script's `scenarios` beats the `--config` file's, and the `--config` file's `scenarios` beats the built-in defaults.
+
+### 7.9 Per-VU `exec.test.options` object identity (observed)
+
+Section 3(d) explains that `exec.test` is an accessor property (`js/modules/k6/execution/execution.go:47-61`) that returns a **fresh** test-info object on every access, and that each test-info object caches its **own** deep-frozen options object in a closure variable local to a single `newTestInfo()` call (`:168-200`). The consequence this probe demonstrates directly is that **object identity is per-access, not per-VU**, while the option **values** every VU reads are identical and read-only. Each VU runs one iteration and compares: a retained handle against itself (`retainedSame`), two fresh `exec.test.options` accesses (`directSame`), the retained object against a fresh access (`retainedVsDirect`), and whether the object is frozen (`frozen`).
+
+`identity_probe.js`
+
+```javascript
+import exec from 'k6/execution';
+// Three VUs, one iteration each, so every VU logs its identity comparison exactly once.
+export const options = {
+  scenarios: {
+    probe: { executor: 'per-vu-iterations', vus: 3, iterations: 1 },
+  },
+};
+export default function () {
+  const h = exec.test;                                   // retain ONE exec.test handle
+  const retainedSame      = (h.options === h.options);            // same object cached within one handle?
+  const directSame        = (exec.test.options === exec.test.options); // two fresh exec.test accesses?
+  const retainedVsDirect  = (h.options === exec.test.options);         // retained vs a fresh access?
+  const frozen            = Object.isFrozen(exec.test.options);        // deep-frozen / read-only?
+  console.log(`VU#${exec.vu.idInTest} retainedSame=${retainedSame} directSame=${directSame} retainedVsDirect=${retainedVsDirect} frozen=${frozen}`);
+}
+```
+
+**Every VU reports `retainedSame=true directSame=false retainedVsDirect=false frozen=true`.** The retained handle returns one cached options object on repeated reads (`retainedSame=true`); two separate `exec.test.options` accesses return **different** frozen objects (`directSame=false`), and the retained object differs from a fresh access (`retainedVsDirect=false`); every options object is deep-frozen (`frozen=true`). All three VUs report the same booleans because the derived option **content** is identical for every VU — the objects differ only in identity, never in value.
+
+Command: `"$BIN" run identity_probe.js`
+
+```text
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: identity_probe.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 3 max VUs, 10m30s max duration (incl. graceful stop):
+              * probe: 1 iterations for each of 3 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+time="2026-07-13T22:45:09Z" level=info msg="VU#1 retainedSame=true directSame=false retainedVsDirect=false frozen=true" source=console
+time="2026-07-13T22:45:09Z" level=info msg="VU#2 retainedSame=true directSame=false retainedVsDirect=false frozen=true" source=console
+time="2026-07-13T22:45:09Z" level=info msg="VU#3 retainedSame=true directSame=false retainedVsDirect=false frozen=true" source=console
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=2.65ms min=2.59ms med=2.66ms max=2.71ms p(90)=2.7ms p(95)=2.7ms
+     iterations...........: 3   1036.260481/s
+
+
+running (00m00.0s), 0/3 VUs, 3 complete and 0 interrupted iterations
+probe ✓ [ 100% ] 3 VUs  00m00.0s/10m0s  3/3 iters, 1 per VU
+```
+
+Re-running the same command produced identical booleans for all three VUs (only the concurrent VU log order differed), confirming the behavior is stable.
