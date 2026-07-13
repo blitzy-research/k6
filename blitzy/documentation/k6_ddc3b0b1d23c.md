@@ -92,7 +92,7 @@ Every timing value in `res.timings` and every `http_req_*` metric originates fro
 	reqWithTracer := req.WithContext(httptrace.WithClientTrace(ctx, tracer.Trace()))
 	resp, err := t.state.Transport.RoundTrip(reqWithTracer)
 ```
-(`lib/netext/httpext/transport.go:L203-L207`; the fresh instance is at `L205`.) The tracer's own doc comment states the rule: `// It's NOT safe to reuse Tracers between requests.` (`lib/netext/httpext/tracer.go:L145`).
+(`lib/netext/httpext/transport.go:L204-L207`; the fresh instance is at `L205`.) The tracer's own doc comment states the rule: `// It's NOT safe to reuse Tracers between requests.` (`lib/netext/httpext/tracer.go:L145`).
 
 **Step 2 — `Tracer.Trace()` wires all eight `httptrace` hooks** (`lib/netext/httpext/tracer.go:L162-L173`). Each hook records a Unix-nanosecond timestamp into an `int64` field of the `Tracer` struct (`lib/netext/httpext/tracer.go:L147-L159`) using `sync/atomic`.
 
@@ -106,7 +106,7 @@ func (t *transport) measureAndEmitMetrics(unfReq *unfinishedRequest) *finishedRe
 
 **Step 4 — the *same* `Trail` feeds two sinks, which is why script-visible `res.timings` and aggregated `http_req_*` metrics always agree.**
 
-- **Sink A — `http_req_*` samples:** `trail.SaveSamples(t.state.BuiltinMetrics, &tagsAndMeta)` (`lib/netext/httpext/transport.go:L146`). `Trail.SaveSamples` builds one sample **per metric for all seven timings plus `http_reqs`** (`lib/netext/httpext/tracer.go:L43-L122`): it appends `HTTPReqs`, then `HTTPReqDuration`, `HTTPReqBlocked`, `HTTPReqConnecting`, `HTTPReqTLSHandshaking`, `HTTPReqSending`, `HTTPReqWaiting`, `HTTPReqReceiving`, each with `Value: metrics.D(tr.<Field>)`. The eight metric names are declared at `metrics/builtin.go:L16-L23` and all seven timing metrics are registered as `Trend`/`Time` metrics at `metrics/builtin.go:L91-L97`.
+- **Sink A — `http_req_*` samples:** `trail.SaveSamples(t.state.BuiltinMetrics, &tagsAndMeta)` (`lib/netext/httpext/transport.go:L146`). `Trail.SaveSamples` builds one sample **per metric for all seven timings plus `http_reqs`** (`lib/netext/httpext/tracer.go:L43-L122`): it appends `HTTPReqs`, then `HTTPReqDuration`, `HTTPReqBlocked`, `HTTPReqConnecting`, `HTTPReqTLSHandshaking`, `HTTPReqSending`, `HTTPReqWaiting`, `HTTPReqReceiving`, each with `Value: metrics.D(tr.<Field>)`. The eight metric names are declared at `metrics/builtin.go:L15,L17-L23` and all seven timing metrics are registered as `Trend`/`Time` metrics at `metrics/builtin.go:L91-L97`.
 - **Sink B — `res.timings`:** copied field-by-field into the JS-facing struct:
 
 ```go
@@ -178,7 +178,7 @@ This distinction matters for Anomalies 1 and 2, so it is worth being precise —
 		_ = respBody.Close()
 	}(resp.Body)
 ```
-(`lib/netext/httpext/compression.go:L134-L139`, inside `readResponseBody` at `L118`; the `ResponseTypeNone` branch does the same `io.Copy(io.Discard, …)`+`Close()` at `L129-L130`.) **(inferred — Go `net/http` docs:** a keep-alive connection is only reusable after its response body is drained to EOF and closed.)
+(`lib/netext/httpext/compression.go:L135-L140`, inside `readResponseBody` at `L118`; the `ResponseTypeNone` branch does the same `io.Copy(io.Discard, …)`+`Close()` at `L129-L130`.) **(inferred — Go `net/http` docs:** a keep-alive connection is only reusable after its response body is drained to EOF and closed.)
 
 The end-to-end flow, and where each anomaly is produced:
 
@@ -247,7 +247,7 @@ The `httptrace` contract that a reused connection does not fire these hooks is d
 					}
 					fallthrough
 ```
-(`lib/netext/httpext/tracer_test.go:L161-L165`.)
+(`lib/netext/httpext/tracer_test.go:L161-L166`.)
 
 **(c) Demonstration.** Local HTTP/1.1 keep-alive HTTPS server (`(*httptest.Server).StartTLS()`, self-signed, bound to `127.0.0.1:18443`; full source + SHA-256 in §7), single VU, 4 sequential iterations to the same host. Scale: `vus:1, iterations:4`; the reuse pattern was stable across 8 repeats (§3.2). The console line reports `res.proto`, confirming the protocol was HTTP/1.1 — so this is a direct observation of HTTP/1.1 keep-alive reuse. Complete, unedited output of the run:
 
@@ -427,7 +427,7 @@ func getOSSyscallErrorCode(e *net.OpError, se *os.SyscallError) (errCode, string
 			t.Errorf("Expected either a RoundTrip response or error but got %#v and %#v", resp, err)
 		}
 ```
-(`lib/netext/httpext/tracer_test.go:L275-L279`; the 200-way parallel loop is at `L284-L291`.) Its value here is therefore as a **race-detector stress harness** (does the concurrent tracer trip `-race`?), not as a timing-correctness oracle.
+(`lib/netext/httpext/tracer_test.go:L274-L278`; the 200-way parallel loop is at `L284-L291`.) Its value here is therefore as a **race-detector stress harness** (does the concurrent tracer trip `-race`?), not as a timing-correctness oracle.
 
 Both runs were executed through a wrapper (`/tmp/obs/run_tests.sh`, full source + SHA-256 in §7) that prints the **real** `$?` of each `go test` and the **real** `grep -c "WARNING: DATA RACE"` count. The wrapper output below is an **excerpt**, not the full listing: the 200 identical `TestCancelledRequest/group/*` `--- PASS` lines (and the `TestTracer/Test_#0..#2` subtests) are collapsed to a single clearly-marked `...` line, while every non-repetitive line — the `=== RUN`/`=== PAUSE` headers, all four top-level `--- PASS` lines, `PASS`, the `ok` banner, and the wrapper's genuine `*_EXIT`/`DATA_RACE_WARNINGS` lines — is quoted verbatim. The complete listings (829 lines for the normal run, 905 for the race run) are saved at `/tmp/obs/test_normal.raw.log` and `/tmp/obs/test_race.raw.log`:
 
@@ -887,19 +887,19 @@ Confirming every named item, hook, condition, flag, and user example is addresse
 | `Trail` → `http_req_*` (`SaveSamples` call) | `transport.go:L146` | §2, §4 |
 | `Trail` → `res.timings` (`metrics.D()` ns→ms) | `request.go:L98-L106`, `units.go:L11-L13` | §2, §4 |
 | `ResponseTimings` struct | `response.go:L34-L44`; `Timings` field `L65` | §2, §4 |
-| Metric names + `Trend`/`Time` registration (all seven) | `builtin.go:L16-L23`, `builtin.go:L91-L97` | §2 |
+| Metric names + `Trend`/`Time` registration (all seven) | `builtin.go:L15,L17-L23`, `builtin.go:L91-L97` | §2 |
 | `SwapInt64` (overwrite on reuse) vs `CompareAndSwapInt64` (keep first) | `tracer.go:L271-L277` vs `L201,L218,L287-L288` | §3.1, §3.4, §3.5 |
 | Zero-guards (`gotConn>getConn`; both endpoints non-zero) | `tracer.go:L323,L340,L343` | §3.1, §3.2, §4 |
 | Single-IP dialer (`findRemote`/`LookupIP`/`NewHost`) | `dialer.go:L59,L116,L140-L149` | §3.5 |
 | TCP keep-alive (`net.Dialer.KeepAlive`) vs HTTP reuse (`http.Transport`) | `runner.go:L90-L93` vs `runner.go:L193-L201` | §2.1 |
-| Body read-to-EOF+close enabling reuse | `compression.go:L118,L129-L130,L134-L139` | §2.1 |
+| Body read-to-EOF+close enabling reuse | `compression.go:L118,L129-L130,L135-L140` | §2.1 |
 | Late-callback atomics comment + `atomic.LoadInt64` reads | `tracer.go:L327-L331,L332-L338` | §3.3 |
 | `-race` result (exit 0, 0 data races, 200 parallel cancelled reqs) | `tracer_test.go:L257-L292` | §3.3 |
-| `TestCancelledRequest` asserts only `!(resp==nil && err==nil)` | `tracer_test.go:L275-L279` | §3.3 |
+| `TestCancelledRequest` asserts only `!(resp==nil && err==nil)` | `tracer_test.go:L274-L278` | §3.3 |
 | Windows reset path (`WSAECONNRESET`→`tcpResetByPeerErrorCode` 1220), maps code only | `error_codes_syscall_windows.go:L10-L16`, `error_codes.go:L44` | §3.3 |
 | Dial-refused (1212), request-timeout (1050) codes | `error_codes.go:L42,L30` | §3.3 |
 | Windows timer-resolution hack (golang/go#8687, #41087) | `tracer_test.go:L33-L40` | §3.3 |
-| Reuse zero-asserts driven by `iterations []bool{false,true,true}` | `tracer_test.go:L115,L161-L165` | §3.1 |
+| Reuse zero-asserts driven by `iterations []bool{false,true,true}` | `tracer_test.go:L115,L161-L166` | §3.1 |
 | `sending` three-way switch (incl. HTTP/2 default arm) | `tracer.go:L346-L359` | §3.6 |
 | `looking_up` declared but never populated (always 0) | `response.go:L38` vs `request.go:L98-L106` | §2, §4 |
 | Version banner (`Version`, `FullVersion`) | `consts.go:L12,L52` | §1.1 |
