@@ -12,8 +12,8 @@ The k6 **source under investigation is commit `ddc3b0b1d23c`**. Temporary observ
 
 - **Build command [Observed]:** `GOFLAGS=-mod=vendor go build -o /tmp/k6bin/k6 .` — run from the repository root; equivalent to the `Makefile` `build:` target (`go build`). Dependencies are fully vendored, so the build is offline-reproducible.
 - **Toolchain [Observed]:** `go version go1.23.12 linux/amd64`. Go 1.23.x is the highest explicitly documented supported line (`Dockerfile:L1` → `golang:1.23-alpine3.20`; `.github/workflows/build.yml:L27` → `DEFAULT_GO_VERSION: "1.23.x"`); k6's own module baseline is `go 1.21` / `toolchain go1.21.13` (`go.mod:L3,L5`). **[Inferred for the source-file citations.]**
-- **Version banner [Observed]:** `k6 v0.55.0 (commit/936031aa5e, go1.23.12, linux/amd64)` — from `/tmp/k6bin/k6 version`. The version string `0.55.0` is fixed in source at `lib/consts/consts.go:L12`; the Go version and OS/arch (`go1.23.12, linux/amd64`) are environment-dependent and assembled by `FullVersion()` at `lib/consts/consts.go:L17`. **[Inferred]**
-- **On the `commit/…` field.** It is the git HEAD at build time, read from `vcs.revision` via `runtime/debug.ReadBuildInfo()` and truncated to 10 characters (`lib/consts/consts.go:L19,L28-L35`, truncation at `L31-L35`). The k6 source under investigation is commit `ddc3b0b1d23c`; the only change layered on top of it is *this Markdown document*, which touches no Go source. Consequently, building from either commit yields the identical v0.55.0 binary behavior — only the embedded `commit/…` string differs. Built after this document is committed, the banner shows this deliverable's own commit prefix, `936031aa5e` (whose parent is the source commit `ddc3b0b1d23c`). **[Observed + Inferred]**
+- **Version banner [Observed]:** `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)` — from `/tmp/k6bin/k6 version` (binary built from the canonical source commit `ddc3b0b1d23c`). The version string `0.55.0` is fixed in source at `lib/consts/consts.go:L12`; the Go version and OS/arch (`go1.23.12, linux/amd64`) are environment-dependent and assembled by `FullVersion()` at `lib/consts/consts.go:L17`. **[Inferred]**
+- **On the `commit/…` field.** It is the git HEAD at build time, read from `vcs.revision` via `runtime/debug.ReadBuildInfo()` and truncated to 10 characters (`lib/consts/consts.go:L19,L28-L35`, truncation at `L31-L35`). The k6 source under investigation is commit `ddc3b0b1d23c`; the only change layered on top of it is *this Markdown document*, which touches no Go source. Consequently, building from either commit yields the identical v0.55.0 binary behavior — only the embedded `commit/…` string differs. Built from the canonical source commit `ddc3b0b1d23c` (the commit under investigation), the banner shows that commit's first-10-character prefix, `ddc3b0b1d2`; a build made from the deliverable branch differs only in that embedded string, which reflects whatever HEAD it was built at. **[Observed + Inferred]**
 
 ---
 
@@ -399,9 +399,9 @@ time="2026-07-13T17:09:52Z" level=error msg="GoError: the module \"./never_seen.
 exit=107
 ```
 
-**Invariant vs varying across the two runs [Observed].** *Invariant:* the full error text `GoError: the module \"./never_seen.js\" was not previously resolved during initialization (__VU==0)`, the native frame `go.k6.io/k6/js.(*requireImpl).require-fm (native)`, and the exit code **`107`**. At this 2-VU scale both runs reported `VU #1` in the `hint`. *Varying:* only the RFC3339 timestamp. (Which VU number appears in the `hint` can vary at larger scale — see §8.7.)
+**Invariant vs varying across the two runs [Observed].** *Invariant:* the full error text `GoError: the module \"./never_seen.js\" was not previously resolved during initialization (__VU==0)`, the native frame `go.k6.io/k6/js.(*requireImpl).require-fm (native)`, and the exit code **`107`**. In these two particular 2-VU runs both reported `VU #1` in the `hint`. *Varying:* the RFC3339 timestamp and — as a concurrent-initialization scheduling artifact — *which* VU number the `hint` reports, which can differ from run to run at any scale beyond a single VU (see §8.7).
 
-**Interpretation.** The specifier `./never_seen.js` is first reached only when `__VU>0` re-runs the module body — after `Lock()`. It is a **cache miss while locked**, so `resolve()` returns the rejection (`js/modules/resolution.go:L166-L167`) built from the constant at `js/modules/resolution.go:L17`. The native frame `go.k6.io/k6/js.(*requireImpl).require-fm` is the `require()` entry (`js/modules/require_impl.go:L15`). The exit code `107` is `ScriptException` (`errext/exitcodes/codes.go:L48`), and the failure occurs during VU initialization (`hint="error while initializing VU #… (script exception)"`). Because `never_seen.js` exists on disk, this proves the failure is the lock, not a missing file. **[Observed + Inferred]**
+**Interpretation.** The specifier `./never_seen.js` is first reached only when `__VU>0` re-runs the module body — after `Lock()`. It is a **cache miss while locked**, so `resolve()` returns the rejection (`js/modules/resolution.go:L166-L167`) built from the constant at `js/modules/resolution.go:L17`. The native frame `go.k6.io/k6/js.(*requireImpl).require-fm` is the global `require()` entry — the `(*requireImpl).require` method in package `js` (`js/bundle.go:L424`; the `requireImpl` type is at `L419` and is bound to the JS global at `L443`) — which then delegates to `(*ModuleSystem).Require` (`js/modules/require_impl.go:L15`). The exit code `107` is `ScriptException` (`errext/exitcodes/codes.go:L48`), and the failure occurs during VU initialization (`hint="error while initializing VU #… (script exception)"`). Because `never_seen.js` exists on disk, this proves the failure is the lock, not a missing file. **[Observed + Inferred]**
 
 ### 8.3 B3 — Guard 1: `require()` / `open()` called inside `default()` (init-only guard)
 
@@ -1247,7 +1247,7 @@ Every named item from the question is mapped below to its concrete value, the ex
 | 14 | Already-resolved succeeds at scale | Exit **0** at **5** VUs and **50** VUs; every VU is a cache hit | `js/modules/resolution.go:L162-L164` | §8.1 (5 VUs) & §8.7 (50 VUs, 50 re-required lines/run) | Cache hit returns even when locked → success independent of VU count |
 | 15 | Never-seen fails at scale | Exit **107** at **2** VUs and **50** VUs; only the reported hint VU id varies | `js/modules/resolution.go:L166-L167` | §8.2 (2 VUs) & §8.7 (50 VUs); hint-id set `{1, 11}` | Cache miss while locked → invariant reject; scheduling picks which VU trips first |
 | 16 | In-repo confirmation | Tests encode the `(__VU==0)` trigger and the exact reject substring | `js/runner_test.go:L1385-L1407,L1409-L1432` (assert `L1431`) | §8.8 (test names + asserted substring) | k6's own suite exercises Guard 2 in the module body |
-| 17 | Version banner / toolchain | `k6 v0.55.0 (commit/936031aa5e, go1.23.12, linux/amd64)` | `lib/consts/consts.go:L12,L17,L52` | §2 (banner) & Appendix A.1 | `0.55.0` fixed in source; Go/OS-arch assembled by `FullVersion()`; commit from build info |
+| 17 | Version banner / toolchain | `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)` | `lib/consts/consts.go:L12,L17,L52` | §2 (banner) & Appendix A.1 | `0.55.0` fixed in source; Go/OS-arch assembled by `FullVersion()`; commit from build info |
 | 18 | Repository integrity | Sole repo delta is **this** `.md`; no pre-existing file changed | — | Appendix A.2/A.6/A.7 (`git status`/`git diff` = single `A` line) | Scripts kept under `/tmp/k6test` (outside checkout) and removed afterward |
 
 Every row resolves to a value, a source `file:line` (or "—" where the item is process/integrity rather than a code location), an observed §8 run, and a causal reason — satisfying the coverage requirement. **[Observed + Inferred, with External corroboration in §9]**
@@ -1261,13 +1261,13 @@ This appendix makes every observation in §8 independently reproducible: the exa
 ### A.1 Build the canonical binary
 
 ```bash
-# from the repository root; dependencies are fully vendored (offline-reproducible)
+# from the repository root at the canonical source commit ddc3b0b1d23c; dependencies are fully vendored (offline-reproducible)
 GOFLAGS=-mod=vendor go build -o /tmp/k6bin/k6 .
 /tmp/k6bin/k6 version
-# -> k6 v0.55.0 (commit/936031aa5e, go1.23.12, linux/amd64)
+# -> k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
 
-The `0.55.0` string is fixed in source (`lib/consts/consts.go:L12`); the `commit/…` prefix is this deliverable's own commit (`936031aa5e`, whose parent is the source commit `ddc3b0b1d23c`), read from build info and truncated to 10 chars (`lib/consts/consts.go:L19,L28-L35`). Building from the source commit yields identical binary behavior — only the embedded commit string differs — because this document adds no Go source. **[Observed + Inferred]**
+The `0.55.0` string is fixed in source (`lib/consts/consts.go:L12`); the `commit/…` prefix is the canonical source commit under investigation, `ddc3b0b1d2` (the first 10 characters of `ddc3b0b1d23c`), read from build info and truncated to 10 chars (`lib/consts/consts.go:L19,L28-L35`). A build made from the deliverable branch yields identical binary behavior — only the embedded commit string differs, reflecting build-time HEAD — because this document adds no Go source. **[Observed + Inferred]**
 
 ### A.2 Source baseline (before the deliverable)
 
