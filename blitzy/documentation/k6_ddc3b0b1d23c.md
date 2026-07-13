@@ -1274,14 +1274,14 @@ The `0.55.0` string is fixed in source (`lib/consts/consts.go:L12`); the `commit
 The k6 source under investigation is commit `ddc3b0b1d23c`. Before this document existed, the working tree was clean and the `blitzy/documentation/` path did not exist: **[Observed]**
 
 ```text
-$ git rev-parse HEAD~1          # k6 source baseline
+$ git rev-parse ddc3b0b1d23c    # k6 source baseline (commit under investigation)
 ddc3b0b1d23c128e34e2792fc9075f9126e32375
 $ git status --porcelain        # (empty output = clean working tree)
 $ git diff ddc3b0b1d23c --name-status
 A	blitzy/documentation/k6_ddc3b0b1d23c.md
 ```
 
-The single `A` (added) line is the integrity invariant: the *only* path that differs between the source baseline and the delivered tree is this one Markdown file. No pre-existing file is modified, added, or deleted. **[Observed]**
+The single `A` (added) line is the integrity invariant: the *only* path that differs between the source baseline and the delivered tree is this one Markdown file. No pre-existing file is modified, added, or deleted. The baseline is referenced by its immutable commit hash `ddc3b0b1d23c` rather than a relative `HEAD~n` ref, so this proof is invariant no matter how many documentation commits are layered on top. **[Observed]**
 
 ### A.3 Fixture setup (byte-exact)
 
