@@ -798,7 +798,7 @@ With execution segments, three instances split work "evenly," yet one instance c
 _[INFERRED, code-grounded]_ — the scaling contract; runtime confirmation under **Observed output**.
 
 - Per-segment VU counts are produced by deterministic integer scaling: `getRawExecutionSteps` [lib/executor/ramping_vus.go:171] builds an `index = lib.NewSegmentedIndex(et)` [ramping_vus.go:176] and walks it with `index.GoTo(...)` [ramping_vus.go:180], `.Prev()` [ramping_vus.go:209], `.Next()` [ramping_vus.go:219].
-- `SegmentedIndex` [lib/execution_segment.go:768] is explicitly *"not thread-safe and should be used only synchronously"* [execution_segment.go:762-764]; `NewSegmentedIndex` [execution_segment.go:776], `Next` [execution_segment.go:782], `Prev` [execution_segment.go:795], `GoTo` [execution_segment.go:808] implement the deterministic rounding.
+- `SegmentedIndex` [lib/execution_segment.go:768] is explicitly *"not thread-safe, concurrent access has to be externally synchronized"* [execution_segment.go:762-764]; `NewSegmentedIndex` [execution_segment.go:776], `Next` [execution_segment.go:782], `Prev` [execution_segment.go:795], `GoTo` [execution_segment.go:808] implement the deterministic rounding.
 - The invariant is that a per-instant single-instance skew of ±1 VU is legitimate rounding, while the *sum* across a full segment sequence must equal the unsegmented plan and never exceed the configured maximum. The project encodes this as `TestSumRandomSegmentSequenceMatchesNoSegment` [lib/executor/ramping_vus_test.go:1112].
 
 ### How it was exercised (command)
