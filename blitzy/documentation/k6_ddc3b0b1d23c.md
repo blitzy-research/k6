@@ -1,76 +1,96 @@
 # k6 Runtime Investigation — Q&A Answer Document
 
-This document answers five questions about the runtime behavior of the Grafana **k6**
-load-testing tool. Every answer is grounded in **actual observed runtime evidence**
-(build → run → capture) produced against the repository at its checked-out `HEAD`, not
-from reading source alone. Each question section contains, in order: the **exact
-command(s)** run, the **complete unedited observed output**, the **direct answer**, the
-**root-cause explanation** with `file:line` citations naming the function/struct that
-performs the work, and an explicit **observed-vs-inferred** labeling. A final **coverage
-pass** confirms every named item is addressed.
+_Target revision: `go.k6.io/k6` at base commit `ddc3b0b1d23c128e34e2792fc9075f9126e32375` (k6 **v0.55.0**). Every value below was produced by **building and running** k6 and capturing the real output first; prose was written afterward. Each block is preceded by the exact command that produced it. Claims are labeled **Observed** (produced at runtime) or **Source-inferred** (read from code, not run)._
+
+This document answers five questions (Q1–Q5). For each: the harness, the exact command, the complete captured output, the direct answer, the root cause with **full-literal `path:line` citations**, official Grafana documentation corroboration where applicable, and an Observed-vs-inferred split. A truthful coverage pass and a cleanup/final-state proof close the document.
 
 ## Preamble — build, environment, and methodology
 
-**System under test.** `go.k6.io/k6`, checked out at commit
-`ddc3b0b1d23c128e34e2792fc9075f9126e32375` (source branch `k6_ddc3b0b1d23c`).
+### Build and environment (foundation transcript)
 
-**Canonical build command** (from the repository root; the binary is emitted to `/tmp`
-so the repository stays pristine):
+Two binaries were built with the pinned toolchain, both **outside** the checkout so the repository stays pristine. `/tmp/k6bin/k6_canonical` is built from the base commit `ddc3b0b1d23c…` and carries the canonical banner `commit/ddc3b0b1d2` cited by the AAP; it is the binary used for **every** experiment below. `/tmp/k6bin/k6` is built from the working-tree `HEAD` (`ec4344835…` = base + this markdown-only doc commit) and differs only by the embedded VCS stamp — the doc commit adds no Go code, so runtime behavior is identical. The complete transcript (working directory, branch, full HEAD, `git log`, pre-build clean status, real `go version`, both builds with exit codes and banners, binary identities, post-build clean status) is:
 
-```bash
-export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
-export GOTOOLCHAIN=local
-go version
-# => go version go1.21.13 linux/amd64
-mkdir -p /tmp/k6bin
-go build -o /tmp/k6bin/k6 .
-/tmp/k6bin/k6 version
-```
-
-**Observed version banner** (this is the build every experiment below uses):
+_Command: the transcript below records each command with its `$` prompt and `[exit=N]` status; it was run from the repository root before any answer prose was written._
 
 ```
-k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
+###### FOUNDATION TRANSCRIPT ######
+$ pwd
+/tmp/blitzy/k6/blitzy-2ee44ea5-9c3d-489f-9a4d-c0ce8e36a5ce_a34a64
+[exit=0]
+
+$ git rev-parse --abbrev-ref HEAD
+blitzy-2ee44ea5-9c3d-489f-9a4d-c0ce8e36a5ce
+[exit=0]
+
+$ git rev-parse HEAD
+ec43448353679322f6b301cea85ce832842b9b52
+[exit=0]
+
+$ git log --oneline -2
+ec4344835 docs: add k6 runtime-investigation Q&A answer document
+ddc3b0b1d Update comment
+[exit=0]
+
+$ git status --porcelain
+[exit=0]
+
+$ go version
+go version go1.21.13 linux/amd64
+[exit=0]
+
+(1) Canonical build from base source commit ddc3b0b1d23c via local clone
+$ git -C /tmp/k6canon rev-parse HEAD
+ddc3b0b1d23c128e34e2792fc9075f9126e32375
+[exit=0]
+
+$ cd /tmp/k6canon && go build -o /tmp/k6bin/k6_canonical . ; cd - >/dev/null
+[exit=0]
+
+$ /tmp/k6bin/k6_canonical version
+k6_canonical v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)
+[exit=0]
+
+(2) Build from working-tree HEAD (ec4344835 = base + this markdown-only doc commit)
+$ go build -o /tmp/k6bin/k6 .
+[exit=0]
+
+$ /tmp/k6bin/k6 version
+k6 v0.55.0 (commit/ec43448353, go1.21.13, linux/amd64)
+[exit=0]
+
+$ sha256sum /tmp/k6bin/k6_canonical /tmp/k6bin/k6
+b7b8df372796dd5e1731c5758060022a66d8e8ca9e91aae3699675f98262c27f  /tmp/k6bin/k6_canonical
+cca211924dcd6cd3d18a2bdcfb6b6c54a67ee11a55999045a00b0826cdd8471b  /tmp/k6bin/k6
+[exit=0]
+
+$ ls -l /tmp/k6bin/k6_canonical /tmp/k6bin/k6
+-rwxr-xr-x 1 root root 64173872 Jul 13 19:13 /tmp/k6bin/k6
+-rwxr-xr-x 1 root root 64076536 Jul 13 19:13 /tmp/k6bin/k6_canonical
+[exit=0]
+
+$ git status --porcelain
+[exit=0]
+
+###### END ######
 ```
 
-- **Toolchain:** `go1.21.13` (pinned via `GOTOOLCHAIN=local`; matches `go.mod`'s
-  `toolchain go1.21.13`). Build used Go **vendor mode** (the repository ships a complete
-  `vendor/` tree), no network required.
-- **OS/arch:** `linux/amd64`.
-- **Repository cleanliness:** `git status --porcelain` was empty before and after the
-  build (the binary lives at `/tmp/k6bin/k6`, outside the checkout), and `go.mod`/`go.sum`
-  were left untouched.
+The banner is emitted by `debug.ReadBuildInfo()` reading `vcs.revision` (first 10 hex chars) at `lib/consts/consts.go:19-52`. **Observed:** `k6_canonical version` prints `k6_canonical v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)`; `go version` prints `go version go1.21.13 linux/amd64`; `git status --porcelain` is empty before and after building. The `git log` shows `HEAD` is `ec4344835 docs: add k6 runtime-investigation Q&A answer document` on top of base `ddc3b0b1d Update comment`.
 
-**Methodology (applied to every question):**
+### Methodology and safety
 
-- **Run-first.** k6 was built and the relevant code paths were executed; the answer prose
-  was written from the captured output.
-- **Canonical entry points only.** Values were obtained through the real CLI (`k6 run`,
-  `k6 stats`) and the REST control API (`GET /v1/metrics…`, default bind `localhost:6565`).
-  No debug hooks, mocks, or synthetic bypasses were used to obtain any reported value.
-- **Two-run stability.** Every magnitude/frequency/timing value was confirmed across ≥2
-  runs; the run scale/duration is stated. Values that are inherently a runtime measurement
-  are reported as observed (and their stability across runs is noted).
-- **Every condition exercised.** Each question's primary path *and* its
-  secondary/edge/transitional states were exercised (e.g., first vs. second `SIGINT` for
-  Q1; before/during/after and two executor drop-sites for Q3).
-- **Observed vs. inferred.** Statements demonstrated by captured output are labeled
-  **Observed**; statements derived only from reading source are labeled **_inferred_**.
-- **Read-only repository.** No existing repository file was modified. All harness scripts,
-  data files, helper servers, and binaries were created under `/tmp` (or a git-ignored
-  path) and removed afterward; this answer document is the only committed change.
-
----
+- **Run-first.** Each answer was produced by building/running the relevant path and capturing the real stdout/stderr, REST JSON, peak-RSS numbers, or decoded payload bytes; prose came afterward.
+- **Two-run stability.** Every magnitude/timing value (Q1 interrupted count, Q2 message count, Q3 drop counts, Q4 RSS curves, Q5 name set) was confirmed across at least two runs; Q2’s timing-dependent count was run three times and the distribution reported.
+- **Canonical entry points only.** Values come from `k6 run`, `k6 stats`, and the real REST API (`GET /v1/metrics…`) — never a debug hook, mock, or synthetic bypass. The Q2 gRPC server and Q5 remote-write receiver are standard harnesses (a faithful build of the shipped `grpcservice` server, and a minimal capture endpoint), not behavioral substitutes for k6.
+- **Safety (finding #12 / S1–S3).** Every harness used `set -euo pipefail`; evidence directories were mode-`0700`; listeners bound to loopback only (`127.0.0.1`); **unique** ports were chosen per run via `shuf -i 20000-39999 -n1` (the concrete port appears in each log, e.g. `39652`, `27640`, `38022`); helper processes were tracked by owned PID with `kill -0` verification and shut down via `trap … EXIT`; readiness was established by bounded TCP-connect polling (not fixed sleeps); the Q5 receiver bounded each request body with `io.LimitReader(r.Body, 10<<20)`.
+- **Observed vs inferred.** Runtime-produced facts are labeled **Observed**; anything read from source and not executed is labeled **Source-inferred**.
 
 ## Q1 — Virtual User (VU) lifecycle on `SIGINT` (`ramping-vus`)
 
-**Question.** When a scenario using the `ramping-vus` executor with at least five VUs
-receives a `SIGINT`, what are the exact log messages emitted during shutdown, and does
-that evidence show that currently-active VUs are permitted to **finish their in-progress
-iteration** or are they **terminated mid-execution**?
+**Question.** For a `ramping-vus` scenario holding ≥5 VUs that receives a `SIGINT`, capture the exact shutdown log messages and determine from that evidence whether active VUs finish their in-progress iteration or are terminated mid-execution.
 
-**Harness** (`/tmp/q1_ramping_vus.js`) — five VUs, each iteration a 30-second `sleep` so
-that a `SIGINT` a few seconds in reliably lands while every VU is mid-iteration:
+### Harness
+
+`/tmp/k6_evidence/q1/q1_ramping_vus.js` — 5 VUs held for 2m2s, each iteration `sleep(30)` so a `SIGINT` a few seconds in lands while all 5 VUs are mid-iteration:
 
 ```javascript
 import { sleep } from 'k6';
@@ -91,172 +111,478 @@ export const options = {
 };
 
 export default function () {
-  sleep(30); // each iteration is long; a SIGINT a few seconds in lands mid-iteration for all VUs
+  sleep(30); // long iteration: a SIGINT a few seconds in lands mid-iteration for all 5 VUs
 }
 ```
 
 ### Primary path — a single `SIGINT`
 
-**Command** (run twice for stability):
+_Command (safe harness; unique REST port via `shuf`, owned PID, single `SIGINT` after 8 s, exit code captured and appended as the final `exit=` line):_
 
 ```bash
-/tmp/k6bin/k6 run --verbose /tmp/q1_ramping_vus.js > /tmp/q1.log 2>&1 &
-K6PID=$!
-sleep 8            # all 5 VUs are now mid-iteration (each sleeping 30s)
-kill -INT "$K6PID" # canonical SIGINT to the k6 process
+PORT=$(shuf -i 20000-39999 -n1)
+/tmp/k6bin/k6_canonical run --verbose --address 127.0.0.1:$PORT \
+    /tmp/k6_evidence/q1/q1_ramping_vus.js & K6PID=$!
+sleep 8; kill -INT "$K6PID"        # one SIGINT while all 5 VUs are inside sleep(30)
 wait "$K6PID"; echo "exit=$?"
 ```
 
-**Observed output** (identical key lines across both runs; `exit=105`):
+**Complete output — run 1** (`/tmp/k6_evidence/q1/single_run1.log`, REST port `39652`):
 
 ```
-time="2026-07-13T17:51:00Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-13T19:14:23Z" level=debug msg="Logger format: TEXT"
+time="2026-07-13T19:14:23Z" level=debug msg="k6 version: v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)"
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+time="2026-07-13T19:14:23Z" level=debug msg="Resolving and reading test '/tmp/k6_evidence/q1/q1_ramping_vus.js'..."
+time="2026-07-13T19:14:23Z" level=debug msg=Loading... moduleSpecifier="file:///tmp/k6_evidence/q1/q1_ramping_vus.js" originalModuleSpecifier=/tmp/k6_evidence/q1/q1_ramping_vus.js
+time="2026-07-13T19:14:23Z" level=debug msg="'/tmp/k6_evidence/q1/q1_ramping_vus.js' resolved to 'file:///tmp/k6_evidence/q1/q1_ramping_vus.js' and successfully loaded 433 bytes!"
+time="2026-07-13T19:14:23Z" level=debug msg="Gathering k6 runtime options..."
+time="2026-07-13T19:14:23Z" level=debug msg="Initializing k6 runner for '/tmp/k6_evidence/q1/q1_ramping_vus.js' (file:///tmp/k6_evidence/q1/q1_ramping_vus.js)..."
+time="2026-07-13T19:14:23Z" level=debug msg="Detecting test type for..." test_path="file:///tmp/k6_evidence/q1/q1_ramping_vus.js"
+time="2026-07-13T19:14:23Z" level=debug msg="Trying to load as a JS test..." test_path="file:///tmp/k6_evidence/q1/q1_ramping_vus.js"
+time="2026-07-13T19:14:23Z" level=debug msg="Runner successfully initialized!"
+time="2026-07-13T19:14:23Z" level=debug msg="Parsing CLI flags..."
+time="2026-07-13T19:14:23Z" level=debug msg="Consolidating config layers..."
+time="2026-07-13T19:14:23Z" level=debug msg="Parsing thresholds and validating config..."
+time="2026-07-13T19:14:23Z" level=debug msg="Initializing the execution scheduler..."
+time="2026-07-13T19:14:23Z" level=debug msg="Starting 2 outputs..." component=output-manager
+time="2026-07-13T19:14:23Z" level=debug msg=Starting... component=metrics-engine-ingester
+time="2026-07-13T19:14:23Z" level=debug msg="Started!" component=metrics-engine-ingester
+     execution: local
+        script: /tmp/k6_evidence/q1/q1_ramping_vus.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 5 max VUs, 2m32s max duration (incl. graceful stop):
+              * ramp: Up to 5 looping VUs for 2m2s over 2 stages (gracefulRampDown: 30s, gracefulStop: 30s)
+
+time="2026-07-13T19:14:23Z" level=debug msg="Starting the REST API server on 127.0.0.1:39652"
+time="2026-07-13T19:14:23Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
+time="2026-07-13T19:14:23Z" level=debug msg="Starting emission of VUs and VUsMax metrics..."
+time="2026-07-13T19:14:23Z" level=debug msg="Start of initialization" executorsCount=1 neededVUs=5 phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialized VU #4" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialized VU #5" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialized VU #3" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialized VU #1" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialized VU #2" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Finished initializing needed VUs, start initializing executors..." phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialized executor ramp" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Initialization completed" phase=execution-scheduler-init
+time="2026-07-13T19:14:23Z" level=debug msg="Start of test run" executorsCount=1 phase=execution-scheduler-run
+time="2026-07-13T19:14:23Z" level=debug msg="setup() is not defined or not exported, skipping!"
+time="2026-07-13T19:14:23Z" level=debug msg="Start all executors..." phase=execution-scheduler-run
+time="2026-07-13T19:14:23Z" level=debug msg="Starting executor" executor=ramp startTime=0s type=ramping-vus
+time="2026-07-13T19:14:23Z" level=debug msg="Starting executor run..." duration=2m2s executor=ramping-vus maxVUs=5 numStages=2 scenario=ramp startVUs=5 type=ramping-vus
+time="2026-07-13T19:14:23Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=0
+time="2026-07-13T19:14:23Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=1
+time="2026-07-13T19:14:23Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=2
+time="2026-07-13T19:14:23Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=3
+time="2026-07-13T19:14:23Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=4
+
+running (0m01.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   1% ] 5/5 VUs  0m01.0s/2m02.0s
+
+running (0m02.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   2% ] 5/5 VUs  0m02.0s/2m02.0s
+
+running (0m03.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   2% ] 5/5 VUs  0m03.0s/2m02.0s
+
+running (0m04.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   3% ] 5/5 VUs  0m04.0s/2m02.0s
+
+running (0m05.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   4% ] 5/5 VUs  0m05.0s/2m02.0s
+
+running (0m06.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   5% ] 5/5 VUs  0m06.0s/2m02.0s
+
+running (0m07.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   6% ] 5/5 VUs  0m07.0s/2m02.0s
+time="2026-07-13T19:14:31Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-13T19:14:31Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-13T19:14:31Z" level=debug msg="Executor finished successfully" executor=ramp startTime=0s type=ramping-vus
+time="2026-07-13T19:14:31Z" level=debug msg="teardown() is not defined or not exported, skipping!"
+time="2026-07-13T19:14:31Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+time="2026-07-13T19:14:31Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-13T19:14:31Z" level=debug msg="Stopping vus and vux_max metrics emission..." phase=execution-scheduler-init
+time="2026-07-13T19:14:31Z" level=debug msg="Releasing signal trap..."
+time="2026-07-13T19:14:31Z" level=debug msg="Sending usage report..."
+time="2026-07-13T19:14:31Z" level=debug msg="Waiting for metrics and traces processing to finish..."
+time="2026-07-13T19:14:31Z" level=debug msg="Metrics and traces processing finished!"
+time="2026-07-13T19:14:31Z" level=debug msg="Stopping outputs..."
+time="2026-07-13T19:14:31Z" level=debug msg="Stopping 2 outputs..." component=output-manager
+time="2026-07-13T19:14:31Z" level=debug msg=Stopping... component=metrics-engine-ingester
+time="2026-07-13T19:14:31Z" level=debug msg="Stopped!" component=metrics-engine-ingester
+time="2026-07-13T19:14:31Z" level=debug msg="Generating the end-of-test summary..."
 
      data_received...: 0 B 0 B/s
      data_sent.......: 0 B 0 B/s
      vus.............: 5   min=5 max=5
      vus_max.........: 5   min=5 max=5
 
+
 running (0m08.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
-time="2026-07-13T17:51:00Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+ramp ✗ [   7% ] 5/5 VUs  0m08.0s/2m02.0s
+time="2026-07-13T19:14:31Z" level=debug msg="Usage report sent successfully"
+time="2026-07-13T19:14:31Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-13T19:14:31Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+exit=105
 ```
 
-The scenario description printed at start confirms the executor and graceful windows:
+**Complete output — run 2** (`/tmp/k6_evidence/q1/single_run2.log`, REST port `33785`) — same result, confirming stability:
 
 ```
+time="2026-07-13T19:14:32Z" level=debug msg="Logger format: TEXT"
+time="2026-07-13T19:14:32Z" level=debug msg="k6 version: v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)"
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+time="2026-07-13T19:14:32Z" level=debug msg="Resolving and reading test '/tmp/k6_evidence/q1/q1_ramping_vus.js'..."
+time="2026-07-13T19:14:32Z" level=debug msg=Loading... moduleSpecifier="file:///tmp/k6_evidence/q1/q1_ramping_vus.js" originalModuleSpecifier=/tmp/k6_evidence/q1/q1_ramping_vus.js
+time="2026-07-13T19:14:32Z" level=debug msg="'/tmp/k6_evidence/q1/q1_ramping_vus.js' resolved to 'file:///tmp/k6_evidence/q1/q1_ramping_vus.js' and successfully loaded 433 bytes!"
+time="2026-07-13T19:14:32Z" level=debug msg="Gathering k6 runtime options..."
+time="2026-07-13T19:14:32Z" level=debug msg="Initializing k6 runner for '/tmp/k6_evidence/q1/q1_ramping_vus.js' (file:///tmp/k6_evidence/q1/q1_ramping_vus.js)..."
+time="2026-07-13T19:14:32Z" level=debug msg="Detecting test type for..." test_path="file:///tmp/k6_evidence/q1/q1_ramping_vus.js"
+time="2026-07-13T19:14:32Z" level=debug msg="Trying to load as a JS test..." test_path="file:///tmp/k6_evidence/q1/q1_ramping_vus.js"
+time="2026-07-13T19:14:32Z" level=debug msg="Runner successfully initialized!"
+time="2026-07-13T19:14:32Z" level=debug msg="Parsing CLI flags..."
+time="2026-07-13T19:14:32Z" level=debug msg="Consolidating config layers..."
+time="2026-07-13T19:14:32Z" level=debug msg="Parsing thresholds and validating config..."
+time="2026-07-13T19:14:32Z" level=debug msg="Initializing the execution scheduler..."
+time="2026-07-13T19:14:32Z" level=debug msg="Starting 2 outputs..." component=output-manager
+time="2026-07-13T19:14:32Z" level=debug msg=Starting... component=metrics-engine-ingester
+time="2026-07-13T19:14:32Z" level=debug msg="Started!" component=metrics-engine-ingester
+     execution: local
+        script: /tmp/k6_evidence/q1/q1_ramping_vus.js
+        output: -
+
      scenarios: (100.00%) 1 scenario, 5 max VUs, 2m32s max duration (incl. graceful stop):
               * ramp: Up to 5 looping VUs for 2m2s over 2 stages (gracefulRampDown: 30s, gracefulStop: 30s)
+
+time="2026-07-13T19:14:32Z" level=debug msg="Trapping interrupt signals so k6 can handle them gracefully..."
+time="2026-07-13T19:14:32Z" level=debug msg="Starting the REST API server on 127.0.0.1:33785"
+time="2026-07-13T19:14:32Z" level=debug msg="Starting emission of VUs and VUsMax metrics..."
+time="2026-07-13T19:14:32Z" level=debug msg="Start of initialization" executorsCount=1 neededVUs=5 phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialized VU #1" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialized VU #5" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialized VU #4" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialized VU #2" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialized VU #3" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Finished initializing needed VUs, start initializing executors..." phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialized executor ramp" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Initialization completed" phase=execution-scheduler-init
+time="2026-07-13T19:14:32Z" level=debug msg="Start of test run" executorsCount=1 phase=execution-scheduler-run
+time="2026-07-13T19:14:32Z" level=debug msg="setup() is not defined or not exported, skipping!"
+time="2026-07-13T19:14:32Z" level=debug msg="Start all executors..." phase=execution-scheduler-run
+time="2026-07-13T19:14:32Z" level=debug msg="Starting executor" executor=ramp startTime=0s type=ramping-vus
+time="2026-07-13T19:14:32Z" level=debug msg="Starting executor run..." duration=2m2s executor=ramping-vus maxVUs=5 numStages=2 scenario=ramp startVUs=5 type=ramping-vus
+time="2026-07-13T19:14:32Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=0
+time="2026-07-13T19:14:32Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=1
+time="2026-07-13T19:14:32Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=2
+time="2026-07-13T19:14:32Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=3
+time="2026-07-13T19:14:32Z" level=debug msg=Start executor=ramping-vus scenario=ramp vuNum=4
+
+running (0m01.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   1% ] 5/5 VUs  0m01.0s/2m02.0s
+
+running (0m02.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   2% ] 5/5 VUs  0m02.0s/2m02.0s
+
+running (0m03.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   2% ] 5/5 VUs  0m03.0s/2m02.0s
+
+running (0m04.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   3% ] 5/5 VUs  0m04.0s/2m02.0s
+
+running (0m05.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   4% ] 5/5 VUs  0m05.0s/2m02.0s
+
+running (0m06.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   5% ] 5/5 VUs  0m06.0s/2m02.0s
+
+running (0m07.0s), 5/5 VUs, 0 complete and 0 interrupted iterations
+ramp   [   6% ] 5/5 VUs  0m07.0s/2m02.0s
+time="2026-07-13T19:14:39Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-13T19:14:39Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-13T19:14:39Z" level=debug msg="Executor finished successfully" executor=ramp startTime=0s type=ramping-vus
+time="2026-07-13T19:14:39Z" level=debug msg="teardown() is not defined or not exported, skipping!"
+time="2026-07-13T19:14:39Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+time="2026-07-13T19:14:39Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-13T19:14:39Z" level=debug msg="Stopping vus and vux_max metrics emission..." phase=execution-scheduler-init
+time="2026-07-13T19:14:39Z" level=debug msg="Releasing signal trap..."
+time="2026-07-13T19:14:39Z" level=debug msg="Sending usage report..."
+time="2026-07-13T19:14:39Z" level=debug msg="Waiting for metrics and traces processing to finish..."
+time="2026-07-13T19:14:39Z" level=debug msg="Metrics and traces processing finished!"
+time="2026-07-13T19:14:39Z" level=debug msg="Stopping outputs..."
+time="2026-07-13T19:14:39Z" level=debug msg="Stopping 2 outputs..." component=output-manager
+time="2026-07-13T19:14:39Z" level=debug msg=Stopping... component=metrics-engine-ingester
+time="2026-07-13T19:14:39Z" level=debug msg="Stopped!" component=metrics-engine-ingester
+time="2026-07-13T19:14:39Z" level=debug msg="Generating the end-of-test summary..."
+
+     data_received...: 0 B 0 B/s
+     data_sent.......: 0 B 0 B/s
+     vus.............: 5   min=5 max=5
+     vus_max.........: 5   min=5 max=5
+
+
+running (0m08.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+ramp ✗ [   7% ] 5/5 VUs  0m08.0s/2m02.0s
+time="2026-07-13T19:14:40Z" level=debug msg="Usage report sent successfully"
+time="2026-07-13T19:14:40Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-13T19:14:40Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+exit=105
 ```
+
+**Observed (both runs, stable).** The shutdown emits `level=debug msg="Stopping k6 in response to signal…" sig=interrupt`; the final progress line is `running (0m08.0s), 0/5 VUs, 0 complete and 5 interrupted iterations` with `ramp ✗`; k6 then prints `level=error msg="test run was aborted because k6 received a 'interrupt' signal"` and the process exits `exit=105`. The interrupted count is **5** (one per active VU).
 
 ### Secondary path — a second `SIGINT` (hard stop)
 
-A real, manual `SIGINT` makes k6 shut down in well under a second, and the kernel
-coalesces a second *pending* `SIGINT`, so to deliver a **distinct** second signal to the
-hard-stop path the shutdown window was widened with a normal script-defined `teardown()`
-that sleeps (this changes nothing about signal handling — it is still the real `k6 run`
-receiving real `kill -INT` signals). The second signal was sent while `teardown()` ran:
+`/tmp/k6_evidence/q1/q1_double_sigint.js` — the same `ramping-vus` scenario plus a `teardown()` that ticks for 10 s, so the process is still alive when the second `SIGINT` arrives:
 
-**Command:**
+```javascript
+import { sleep } from 'k6';
+
+export const options = {
+  scenarios: {
+    ramp: {
+      executor: 'ramping-vus',
+      startVUs: 5,
+      stages: [
+        { duration: '2s', target: 5 },
+        { duration: '120s', target: 5 },
+      ],
+      gracefulRampDown: '30s',
+      gracefulStop: '30s',
+    },
+  },
+};
+
+export function teardown() {
+  console.log('TEARDOWN_STARTED');
+  for (let i = 0; i < 10; i++) {
+    console.log('TEARDOWN_TICK_' + i);
+    sleep(1);
+  }
+  console.log('TEARDOWN_FINISHED');
+}
+
+export default function () {
+  sleep(30);
+}
+```
+
+_Command (first `SIGINT` → graceful stop begins teardown; second `SIGINT` ~0.3 s later → hard abort):_
 
 ```bash
-# /tmp/q1_teardown_probe.js == the harness above plus:
-#   export function teardown() { console.log('TEARDOWN_STARTED');
-#     for (let i=0;i<10;i++){ console.log('TEARDOWN_TICK_'+i); sleep(1);} console.log('TEARDOWN_FINISHED'); }
-/tmp/k6bin/k6 run --verbose /tmp/q1_teardown_probe.js > /tmp/q1_double.log 2>&1 &
-K6PID=$!
-sleep 8
-kill -INT "$K6PID"   # first signal  -> graceful
-sleep 2              # now inside the teardown window; first signal fully consumed
-kill -INT "$K6PID"   # second signal -> hard stop
+PORT=$(shuf -i 20000-39999 -n1)
+/tmp/k6bin/k6_canonical run --verbose --address 127.0.0.1:$PORT \
+    /tmp/k6_evidence/q1/q1_double_sigint.js & K6PID=$!
+sleep 8; kill -INT "$K6PID"        # 1st SIGINT -> "Stopping…", teardown starts
+sleep 0.3; kill -INT "$K6PID"      # 2nd SIGINT -> "Aborting…"
 wait "$K6PID"; echo "exit=$?"
 ```
 
-**Observed output** (reproduced across two runs; `exit=105`):
+**Complete output — run 1** (`/tmp/k6_evidence/q1/double_run1.log`, tail from the interrupt onward; the initialization preamble is byte-identical to the primary run above):
 
 ```
-time="2026-07-13T17:55:23Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-13T17:55:23Z" level=info msg=TEARDOWN_STARTED source=console
-time="2026-07-13T17:55:23Z" level=info msg=TEARDOWN_TICK_0 source=console
-time="2026-07-13T17:55:24Z" level=info msg=TEARDOWN_TICK_1 source=console
-time="2026-07-13T17:55:25Z" level=info msg=TEARDOWN_TICK_2 source=console
-time="2026-07-13T17:55:25Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+ramp   [   6% ] 5/5 VUs  0m07.0s/2m02.0s
+time="2026-07-13T19:15:15Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-13T19:15:15Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-13T19:15:15Z" level=debug msg="Executor finished successfully" executor=ramp startTime=0s type=ramping-vus
+time="2026-07-13T19:15:15Z" level=debug msg="Running teardown()..."
+time="2026-07-13T19:15:15Z" level=info msg=TEARDOWN_STARTED source=console
+time="2026-07-13T19:15:15Z" level=info msg=TEARDOWN_TICK_0 source=console
+time="2026-07-13T19:15:15Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+exit=105
 ```
 
-The process exits (`OSExit`) mid-teardown — it never reaches `TEARDOWN_FINISHED`.
+**Complete output — run 2** (`/tmp/k6_evidence/q1/double_run2.log`) — same sequence, confirming stability:
+
+```
+ramp   [   6% ] 5/5 VUs  0m07.0s/2m02.0s
+time="2026-07-13T19:15:23Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-13T19:15:23Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-13T19:15:23Z" level=debug msg="Executor finished successfully" executor=ramp startTime=0s type=ramping-vus
+time="2026-07-13T19:15:23Z" level=debug msg="Running teardown()..."
+time="2026-07-13T19:15:23Z" level=info msg=TEARDOWN_STARTED source=console
+time="2026-07-13T19:15:23Z" level=info msg=TEARDOWN_TICK_0 source=console
+time="2026-07-13T19:15:23Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+exit=105
+```
+
+**Observed (both runs, stable).** First `SIGINT` → `Stopping k6 in response to signal… sig=interrupt`, then `teardown()` begins (`TEARDOWN_STARTED`, `TEARDOWN_TICK_0`, `source=console`). Second `SIGINT` → `level=error msg="Aborting k6 in response to signal" sig=interrupt`, and k6 exits mid-teardown (`TEARDOWN_FINISHED` is never printed), `exit=105`.
 
 ### Direct answer
 
-**Currently-active VUs are terminated mid-execution; the in-progress iteration is NOT
-allowed to finish.** The decisive evidence is the end-of-test summary line
-`0 complete and 5 interrupted iterations` — **Observed**. All five VUs were mid-iteration
-(each in a `sleep(30)`) when the single `SIGINT` arrived; none of those iterations was
-allowed to complete (0 complete), and all five were counted as **interrupted** (partial),
-which is precisely a mid-execution termination. Although the shutdown handler is *named*
-"graceful", a manual interrupt does **not** grant the `gracefulStop` window to in-flight
-iterations. The secondary path shows the first `SIGINT` logs
-`Stopping k6 in response to signal... sig=interrupt` and a second `SIGINT` logs
-`Aborting k6 in response to signal` and forces an immediate exit. Both paths exit with code
-**105** (`ExternalAbort`).
+**Observed:** currently-active VUs are **terminated mid-execution** — their in-progress iteration is **not** allowed to finish. The decisive evidence is the summary line `0 complete and 5 interrupted iterations`: five iterations were in flight and all five were counted as **interrupted** (partial), none completed. A second `SIGINT` escalates to an immediate hard abort (`Aborting k6 in response to signal`).
 
-### Root cause (`file:line`)
+### Root cause (`path:line`)
 
-- **Signal trap and the two-signal state machine.** `handleTestAbortSignals()` installs
-  the trap and runs a goroutine whose first `select` calls the graceful handler and whose
-  second `select` calls the hard-stop handler and then exits the process:
-  `gs.SignalNotify(sigC, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)`
-  [`cmd/common.go:101`]; the buffered channel `sigC := make(chan os.Signal, 2)`
-  [`cmd/common.go:99`]; second signal → `gs.OSExit(int(exitcodes.ExternalAbort))`
-  [`cmd/common.go:118`]. `ExternalAbort` is `105` [`errext/exitcodes/codes.go:41`].
-- **The two handlers and their log lines.** `gracefulStop` logs
-  `"Stopping k6 in response to signal..."` and calls `runAbort(...)` with
-  `exitcodes.ExternalAbort` and `errext.AbortedByUser`, which cancels the run context
-  [`cmd/run.go:350,352`]; `onHardStop` logs `"Aborting k6 in response to signal"`
-  [`cmd/run.go:360`]. The abort message `"test run was aborted because k6 received a '%s'
-  signal"` is built at [`cmd/run.go:352`].
-- **Why the graceful window does not apply to a manual interrupt.** `GetGracefulStop()`'s
-  documentation states the graceful window is for the *end of the normal executor
-  duration*, and "Of course, that doesn't count when the user manually interrupts the
-  test, then iterations are immediately stopped" [`lib/executor/base_config.go:91-96`];
-  `DefaultGracefulStopValue = 30 * time.Second` [`lib/executor/base_config.go:20`].
-- **The VU contract this manifests.** "gracefulStop must let an iteration which has started
-  to finish" vs. "hardStop must stop an iteration in process"
-  [`lib/executor/vu_handle.go:63-67`].
-- **The summary line that encodes the result.** The format
-  `"%s, "+vusFmt+"/"+vusFmt+" VUs, %d complete and %d interrupted iterations"` is built from
-  `GetFullIterationCount()` (complete) and `GetPartialIterationCount()` (interrupted)
-  [`execution/scheduler.go:155-159`]; a non-zero *interrupted* count = mid-execution
-  terminations.
-- **The executor under test.** `rampingVUsType = "ramping-vus"`
-  [`lib/executor/ramping_vus.go:19`].
-- **Corroboration in the test suite.** The exact debug line is asserted verbatim:
-  `level=debug msg="Stopping k6 in response to signal..." sig=interrupt`
-  [`cmd/tests/cmd_run_test.go:1225,1246`].
+- `cmd/common.go:97` `handleTestAbortSignals()` traps signals: `cmd/common.go:99` allocates `sigC := make(chan os.Signal, 2)`; `cmd/common.go:101` `gs.SignalNotify(sigC, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)`. The **first** signal runs the graceful handler; the **second** calls `cmd/common.go:118` `gs.OSExit(int(exitcodes.ExternalAbort))`.
+- `cmd/run.go:350` logs `Debug "Stopping k6 in response to signal…"`; `cmd/run.go:352` calls `runAbort(...)`; `cmd/run.go:354` builds `fmt.Errorf("test run was aborted because k6 received a '%s' signal", sig)` with `exitcodes.ExternalAbort`; `cmd/run.go:360` logs `Error "Aborting k6 in response to signal"` on the second signal. _(Corrects the prior draft, which cited `:352` for the abort string — the `fmt.Errorf` is at `:354`.)_
+- `errext/exitcodes/codes.go:41` defines `ExternalAbort ExitCode = 105` — the observed exit code.
+- **Why the graceful window does not apply to a manual interrupt:** `lib/executor/base_config.go:20` sets `DefaultGracefulStopValue = 30 * time.Second`, but the `GetGracefulStop()` doc comment at `lib/executor/base_config.go:95-96` states the window "doesn't count when the user manually interrupts the test, then iterations are immediately stopped." A user `SIGINT` invokes `runAbort`, cancelling the run context (hence `maxDurationCtx`), so in-flight iterations are interrupted rather than allowed to drain.
+- `lib/executor/vu_handle.go:63` documents that `gracefulStop` "must let an iteration which has started to finish," while `lib/executor/vu_handle.go:67` documents that `hardStop` "must stop an iteration in process" — the manual-interrupt path takes the hard-stop semantics.
+- `lib/executor/ramping_vus.go:19` `const rampingVUsType = "ramping-vus"` is the executor under test.
+- `execution/scheduler.go:156` is the summary format string `"%s, "+vusFmt+"/"+vusFmt+" VUs, %d complete and %d interrupted iterations"`; `execution/scheduler.go:158` fills it from `e.state.GetFullIterationCount()` and `e.state.GetPartialIterationCount()` — the **partial** count is the 5 interrupted iterations.
+- `cmd/tests/cmd_run_test.go:1225,1246` assert the exact `Stopping k6 in response to signal…` `sig=interrupt` line, corroborating the observed message.
+
+**Official corroboration (documentation-of-intent, not a substitute for the runtime evidence).** Grafana’s graceful-stop documentation (https://grafana.com/docs/k6/latest/using-k6/scenarios/concepts/graceful-stop/) describes `gracefulStop` as the duration k6 waits "before forcefully interrupting an iteration" (default 30 s) at end-of-duration/ramp, and `gracefulRampDown` as the `ramping-vus` analogue that lets VUs finish as their number ramps down. That window is an end-of-schedule concept; the in-repo comment above is explicit that a **manual** interrupt bypasses it — matching the observed 5 interrupted iterations.
 
 ### Observed vs. inferred
 
-- **Observed:** the `Stopping k6…`/`Aborting k6…` log lines; the
-  `0 complete and 5 interrupted iterations` summary; exit code `105`; the printed graceful
-  windows.
-- **_inferred_:** that each individual interrupted iteration was terminated *at the exact
-  moment* of its `sleep(30)` — this follows from the design (context cancellation) and the
-  aggregate count; the runtime signal we produced is the non-zero interrupted-iteration
-  count, which is sufficient to answer the question. The mapping of the observed exit code
-  to the symbol `ExternalAbort` is grounded in `errext/exitcodes` (read), consistent with
-  the observed `105`.
-
----
+- **Observed:** the `Stopping…`/`Aborting…` log lines, the `0 complete and 5 interrupted iterations` summary, `exit=105`, and the first-vs-second-signal escalation — all captured across two runs each.
+- **Source-inferred:** the causal chain (manual `SIGINT` → `runAbort` → run-context cancel → `maxDurationCtx` cancel → mid-iteration interruption) is read from `cmd/run.go` and `lib/executor/base_config.go`; the runtime *effect* (non-zero interrupted count) is Observed.
 
 ## Q2 — gRPC server-streaming interruption; `grpc_streams_msgs_received`
 
-**Question.** For a gRPC **server-streaming** test configured with a 30 ms graceful
-ramp-down (`gracefulRampDown`/`gracefulStop = '30ms'`) that is interrupted, what are the
-exact log entries produced at runtime, and what is the value of the
-**`grpc_streams_msgs_received`** metric shown in the final end-of-test metrics summary?
+**Question.** For a gRPC **server-streaming** test with a 30 ms graceful window that is interrupted, capture the exact runtime log entries and report the `grpc_streams_msgs_received` value in the end-of-test summary.
 
-**Harness — the gRPC server.** k6 ships a server-streaming gRPC server at
-`examples/grpc_server/main.go` that registers the `main.FeatureExplorer` service (whose
-`ListFeatures` RPC is server-streaming). That directory is a *nested* Go module requiring
-`grpc v1.64.1`, which is unavailable offline here; and its `main.go` imports
-`google.golang.org/grpc/testdata` (used only by the unused TLS branch), which is not
-vendored. A minimal, faithful harness that registers the **same** `grpcservice`
-`FeatureExplorer`/`ListFeatures` server-streaming RPC (plaintext only, dropping the unused
-TLS/testdata path) was compiled inside the root module (so it resolves the internal
-`grpcservice` package and the root-vendored `grpc v1.67.1`) and run on `localhost:10000`.
-The server is only a harness; **k6 (the system under test) is driven canonically** via
-`k6 run`. The server logged `gRPC server starting on localhost:10000`.
+### gRPC server harness (built, started, PID-owned, shut down)
 
-**Harness — the k6 client** (`/tmp/q2_grpc_stream.js`) wraps the shipped
-`examples/grpc_server_streaming.js` request in a `ramping-vus` scenario with the exact
-`30ms` graceful windows. (k6's `client.load()` resolves the proto path relative to the
-script directory, so the self-contained proto was copied to `/tmp/route_guide.proto` and
-loaded by relative name.)
+A faithful plaintext server registering the **shipped** `go.k6.io/k6/lib/testutils/grpcservice` `FeatureExplorer` service (the same server-streaming `ListFeatures` RPC used by `examples/grpc_server`), dropping only the unused TLS/testdata branch so it builds against the vendored `google.golang.org/grpc v1.67.1`. Source `/tmp/k6_evidence/q2/q2server_main.go`:
+
+```go
+// Command q2harness is a minimal, faithful plaintext gRPC server that registers the
+// same go.k6.io/k6/lib/testutils/grpcservice FeatureExplorer service (server-streaming
+// ListFeatures RPC) used by examples/grpc_server. It drops only the unused TLS/testdata
+// branch so it builds inside the root module against the vendored grpc v1.67.1.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"net"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+
+	"go.k6.io/k6/lib/testutils/grpcservice"
+)
+
+func main() {
+	port := flag.Int("port", 10000, "The server port")
+	flag.Parse()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", *port)
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+	features := grpcservice.LoadFeatures("") // "" => embedded exampleData feature DB
+	grpcServer := grpc.NewServer()
+	grpcservice.RegisterFeatureExplorerServer(grpcServer, grpcservice.NewFeatureExplorerServer(features...))
+	reflection.Register(grpcServer)
+	log.Printf("gRPC server starting on %s (features=%d)", addr, len(features))
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("serve error: %v", err)
+	}
+}
+```
+
+_Build (inside the base-commit clone so it links the vendored gRPC), start on a unique loopback port, record the PID, and poll readiness by TCP connect:_
+
+```bash
+cp /tmp/k6_evidence/q2/q2server_main.go /tmp/k6canon/q2harness/main.go
+(cd /tmp/k6canon && go build -o /tmp/q2bin/q2server ./q2harness)
+PORT=$(shuf -i 20000-39999 -n1)
+/tmp/q2bin/q2server -port "$PORT" > /tmp/k6_evidence/q2/server.log 2>&1 & echo $! > server.pid
+for i in $(seq 1 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
+```
+
+**Complete server log** (`/tmp/k6_evidence/q2/server.log`) — note `features=100` loaded from the embedded `exampleData` DB, and one `ListFeatures called with:` line per stream (the full-stream probe, then the 5 interrupted streams):
+
+```
+2026/07/13 19:17:13 gRPC server starting on 127.0.0.1:27640 (features=100)
+2026/07/13 19:17:22 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:21 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:21 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:21 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:21 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:21 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:23 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:23 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:23 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:23 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:23 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:25 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:25 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:25 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:25 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+2026/07/13 19:18:25 ListFeatures called with: lo:{latitude:400000000 longitude:-750000000} hi:{latitude:420000000 longitude:-730000000}
+```
+
+**Observed:** the server bound `127.0.0.1:27640` with `features=100`; its owned PID was `136685` (`/tmp/k6_evidence/q2/server.pid`), and it was shut down at the end of the experiment (see the Cleanup section).
+
+### Baseline — the full (uninterrupted) stream length
+
+To interpret the interrupted value we first measure a complete stream. `/tmp/k6_evidence/q2/q2_count.js` runs one VU / one iteration and counts every received `Feature`:
+
+```javascript
+import { Client, Stream } from 'k6/net/grpc';
+
+const GRPC_ADDR = __ENV.GRPC_ADDR;
+const client = new Client();
+client.load([], 'route_guide.proto');
+
+export const options = { scenarios: { c: { executor: 'shared-iterations', vus: 1, iterations: 1, maxDuration: '60s' } } };
+
+export default () => {
+  client.connect(GRPC_ADDR, { plaintext: true });
+  const stream = new Stream(client, 'main.FeatureExplorer/ListFeatures', null);
+  let n = 0;
+  stream.on('data', () => { n++; console.log('DATA ' + n); });
+  stream.on('end', () => { console.log('STREAM_END total=' + n); client.close(); });
+  stream.on('error', (e) => { console.log('Error: ' + JSON.stringify(e)); });
+  stream.write({ lo: { latitude: 400000000, longitude: -750000000 },
+                 hi: { latitude: 420000000, longitude: -730000000 } });
+};
+```
+
+_Command:_
+
+```bash
+GRPC_ADDR=127.0.0.1:$PORT /tmp/k6bin/k6_canonical run \
+    /tmp/k6_evidence/q2/q2_count.js   # cwd = /tmp/k6_evidence/q2 so route_guide.proto resolves
+```
+
+**Complete output — tail** (`/tmp/k6_evidence/q2/count.log`; the 100 `DATA n` console lines run 1→100 above the tail, confirmed by `grep -c "msg=DATA" count.log` = 100):
+
+```
+time="2026-07-13T19:17:32Z" level=info msg="DATA 99" source=console
+time="2026-07-13T19:17:32Z" level=info msg="DATA 100" source=console
+time="2026-07-13T19:17:32Z" level=info msg="STREAM_END total=100" source=console
+
+     data_received................: 8.2 kB 817 B/s
+     data_sent....................: 3.3 kB 326 B/s
+     grpc_req_duration............: avg=10.04s min=10.04s med=10.04s max=10.04s p(90)=10.04s p(95)=10.04s
+     grpc_streams.................: 1      0.099549/s
+     grpc_streams_msgs_received...: 100    9.954902/s
+     grpc_streams_msgs_sent.......: 1      0.099549/s
+```
+
+**Observed:** a full server-streaming response delivers **100** messages (`STREAM_END total=100`; `grpc_streams_msgs_received……: 100`). All 100 embedded `exampleData` features lie inside the requested rectangle. _(This corrects the prior draft’s unfounded "39 features / 195".)_
+
+### Interrupt while the stream is active
+
+`/tmp/k6_evidence/q2/q2_grpc_stream.js` — `ramping-vus`, 5 VUs, `gracefulRampDown` **and** `gracefulStop` both `'30ms'`, logging `DATA` per received message, `STREAM_END` on close:
 
 ```javascript
 import { Client, Stream } from 'k6/net/grpc';
 import { sleep } from 'k6';
 
-const GRPC_ADDR = __ENV.GRPC_ADDR || '127.0.0.1:10000';
-const GRPC_PROTO_PATH = __ENV.GRPC_PROTO_PATH; // 'route_guide.proto' (relative to /tmp)
+const GRPC_ADDR = __ENV.GRPC_ADDR;
 
 export const options = {
   scenarios: {
@@ -274,124 +600,141 @@ export const options = {
 };
 
 const client = new Client();
-client.load([], GRPC_PROTO_PATH);
+client.load([], 'route_guide.proto');
 
 export default () => {
   client.connect(GRPC_ADDR, { plaintext: true });
   const stream = new Stream(client, 'main.FeatureExplorer/ListFeatures', null);
-  stream.on('data', () => { /* each received Feature is counted in grpc_streams_msgs_received */ });
-  stream.on('end', () => { client.close(); });
+  stream.on('data', () => { console.log('DATA'); });          // one line per received Feature
+  stream.on('end', () => { console.log('STREAM_END'); client.close(); });
   stream.on('error', (e) => { console.log('Error: ' + JSON.stringify(e)); });
-  stream.write({
-    lo: { latitude: 400000000, longitude: -750000000 },
-    hi: { latitude: 420000000, longitude: -730000000 },
-  });
+  stream.write({ lo: { latitude: 400000000, longitude: -750000000 },
+                 hi: { latitude: 420000000, longitude: -730000000 } });
   sleep(0.5);
 };
 ```
 
-**Command** (run three times; SIGINT sent mid-stream at 4 s):
+_Command (interrupt after 2 s, while messages are still arriving at the 100 ms server cadence):_
 
 ```bash
-PROTO="$(git rev-parse --show-toplevel)/lib/testutils/grpcservice/route_guide.proto"
-cp "$PROTO" /tmp/route_guide.proto
-GRPC_PROTO_PATH="route_guide.proto" GRPC_ADDR=127.0.0.1:10000 \
-  /tmp/k6bin/k6 run --verbose /tmp/q2_grpc_stream.js > /tmp/q2.log 2>&1 &
-K6PID=$!
-sleep 4
-kill -INT "$K6PID"
-wait "$K6PID"; echo "exit=$?"
+GRPC_ADDR=127.0.0.1:$PORT /tmp/k6bin/k6_canonical run --verbose \
+    /tmp/k6_evidence/q2/q2_grpc_stream.js & K6PID=$!
+sleep 2; kill -INT "$K6PID"; wait "$K6PID"
 ```
 
-**Observed output** (interrupt log line + the complete `grpc_streams*` summary block;
-`exit=105`, zero stream `Error:` lines):
+**Complete output — run 1, contiguous interrupt-to-end sequence** (`/tmp/k6_evidence/q2/interrupt_run1.log` lines 145–197; the 95 `DATA` lines span file lines 54–151, confirmed by `grep -c "msg=DATA" interrupt_run1.log` = 95; the scenario banner at line 30 is `* streaming: Up to 5 looping VUs for 2m2s over 2 stages (gracefulRampDown: 30ms, gracefulStop: 30ms)`):
 
 ```
-time="2026-07-13T18:01:29Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-     grpc_streams.................: 5      1.258061/s
-     grpc_streams_msgs_received...: 195    49.064363/s
-     grpc_streams_msgs_sent.......: 5      1.258061/s
-running (0m04.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+time="2026-07-13T19:18:22Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:22Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:23Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:23Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:23Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:23Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:23Z" level=info msg=DATA source=console
+time="2026-07-13T19:18:23Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+time="2026-07-13T19:18:23Z" level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"
+time="2026-07-13T19:18:23Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=info msg=STREAM_END source=console
+time="2026-07-13T19:18:23Z" level=debug msg="stream is cancelled/finished" error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=debug msg="stream /main.FeatureExplorer/ListFeatures is closing" streamMethod=/main.FeatureExplorer/ListFeatures
+time="2026-07-13T19:18:23Z" level=info msg=STREAM_END source=console
+time="2026-07-13T19:18:23Z" level=info msg=STREAM_END source=console
+time="2026-07-13T19:18:23Z" level=info msg=STREAM_END source=console
+time="2026-07-13T19:18:23Z" level=info msg=STREAM_END source=console
+time="2026-07-13T19:18:23Z" level=debug msg="Executor finished successfully" executor=streaming startTime=0s type=ramping-vus
+time="2026-07-13T19:18:23Z" level=debug msg="teardown() is not defined or not exported, skipping!"
+time="2026-07-13T19:18:23Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+time="2026-07-13T19:18:23Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-13T19:18:23Z" level=debug msg="Stopping vus and vux_max metrics emission..." phase=execution-scheduler-init
+time="2026-07-13T19:18:23Z" level=debug msg="Releasing signal trap..."
+time="2026-07-13T19:18:23Z" level=debug msg="Sending usage report..."
+time="2026-07-13T19:18:23Z" level=debug msg="Waiting for metrics and traces processing to finish..."
+time="2026-07-13T19:18:23Z" level=debug msg="Metrics and traces processing finished!"
+time="2026-07-13T19:18:23Z" level=debug msg="Stopping outputs..."
+time="2026-07-13T19:18:23Z" level=debug msg="Stopping 2 outputs..." component=output-manager
+time="2026-07-13T19:18:23Z" level=debug msg=Stopping... component=metrics-engine-ingester
+time="2026-07-13T19:18:23Z" level=debug msg="Stopped!" component=metrics-engine-ingester
+time="2026-07-13T19:18:23Z" level=debug msg="Generating the end-of-test summary..."
+
+     data_received................: 9.5 kB 4.8 kB/s
+     data_sent....................: 4.3 kB 2.2 kB/s
+     grpc_streams.................: 5      2.531572/s
+     grpc_streams_msgs_received...: 95     48.099874/s
+     grpc_streams_msgs_sent.......: 5      2.531572/s
+     vus..........................: 5      min=5       max=5
+     vus_max......................: 5      min=5       max=5
+
+
+running (0m02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+streaming ✗ [   2% ] 5/5 VUs  0m02.0s/2m02.0s
+time="2026-07-13T19:18:23Z" level=debug msg="Usage report sent successfully"
+time="2026-07-13T19:18:23Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+time="2026-07-13T19:18:23Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
 ```
 
-**Stability across the three runs** (same unchanged input):
+**Active-interruption proof (Observed).** The `DATA` messages are still arriving (file lines 54–151) when `Stopping k6 in response to signal… sig=interrupt` fires (line 152). k6 then logs, per stream, `stream is cancelled/finished error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures` and `stream /main.FeatureExplorer/ListFeatures is closing`, and the five `STREAM_END` console lines appear **after** the `Stopping` line — i.e. the streams closed because the VU context was cancelled (`ctx.Done()` path), not because the server finished sending. The summary then shows `grpc_streams: 5`, `grpc_streams_msgs_sent: 5`, `grpc_streams_msgs_received: 95`, and `0 complete and 5 interrupted iterations`; k6 ends with `test run was aborted because k6 received a 'interrupt' signal`.
 
-| run | `grpc_streams` | `grpc_streams_msgs_sent` | `grpc_streams_msgs_received` |
-|-----|----------------|--------------------------|------------------------------|
-| 1   | 5              | 5                        | **195**                      |
-| 2   | 5              | 5                        | **195**                      |
-| 3   | 5              | 5                        | **195**                      |
+**Distribution across three unchanged runs (Observed, timing-dependent value confirmed stable):**
+
+```bash
+$ for f in interrupt_run1.log interrupt_run2.log interrupt_run3.log; do \
+      printf "%s  " "$f"; grep -E "grpc_streams_msgs_received" "$f"; done
+interrupt_run1.log  grpc_streams_msgs_received...: 95     48.099874/s
+interrupt_run2.log  grpc_streams_msgs_received...: 95     ...
+interrupt_run3.log  grpc_streams_msgs_received...: 95     ...
+
+$ for f in interrupt_run1.log interrupt_run2.log interrupt_run3.log; do \
+      printf "%s DATA=" "$f"; grep -c "msg=DATA" "$f"; done
+interrupt_run1.log DATA=95
+interrupt_run2.log DATA=95
+interrupt_run3.log DATA=95
+```
+
+The client-side `DATA` line count (95) equals `grpc_streams_msgs_received` (95) in every run — the counter reflects exactly the messages received before shutdown (95 of the 500 possible for 5 × 100).
+
+### Negative assertion (finding #18)
+
+_Command and result — no stream `Error:` line was emitted in any run:_
+
+```bash
+$ grep -c "Error:" interrupt_run1.log interrupt_run2.log interrupt_run3.log
+interrupt_run1.log:0
+interrupt_run2.log:0
+interrupt_run3.log:0
+```
 
 ### Direct answer
 
-The interrupt log entry is
-`level=debug msg="Stopping k6 in response to signal..." sig=interrupt`, and the final
-end-of-test summary reports **`grpc_streams_msgs_received: 195`** — **Observed**, and
-perfectly stable across all three runs. (Also `grpc_streams: 5`, `grpc_streams_msgs_sent:
-5`, `0 complete and 5 interrupted iterations`, exit code `105`.) After the interrupt, the
-VU context is cancelled and the stream is closed, so no further received messages are
-counted — the reported `195` reflects only the messages counted before shutdown.
+**Observed:** `grpc_streams_msgs_received = 95` (stable across three runs) for a 30 ms-graceful server-streaming scenario interrupted mid-stream at t≈2 s; a full uninterrupted stream is 100. The interruption is genuine and active (streams closed via context cancellation while data was arriving), so the counter stops at the number of messages received before shutdown.
 
-**Why 195, and why it is stable:** the harness server sends each matching feature only
-after `time.Sleep(100 * time.Millisecond)` [`lib/testutils/grpcservice/service.go:62`], so
-features stream at a fixed 100 ms cadence. Thirty-nine features fall inside the requested
-rectangle, so a full stream takes ≈3.9 s; interrupting at a fixed 4 s reliably captures all
-39 per stream across the 5 VUs → 39 × 5 = **195**. The `0 complete` iterations follow
-because the interrupt at 4 s lands during the post-stream `sleep(0.5)` that runs after the
-stream's `end` (~3.9 s). `grpc_streams_msgs_sent: 5` is the single `Rectangle` request each
-of the 5 VUs sent.
+### Root cause (`path:line`)
 
-### Root cause (`file:line`)
-
-- **Counter definitions.** The three counters are registered in
-  `js/modules/k6/grpc/metrics.go`: fields `Streams`/`StreamsMessagesSent`/
-  `StreamsMessagesReceived` [`:7-9`]; names `registry.NewMetric("grpc_streams",
-  metrics.Counter)` [`:17`], `"grpc_streams_msgs_sent"` [`:21`], and
-  `"grpc_streams_msgs_received"` [`:25`].
-- **Per-message increment of the received counter.** `queueMessage()` pushes a sample of
-  `StreamsMessagesReceived` with `Value: 1` for every received message
-  [`js/modules/k6/grpc/stream.go:149,153,158`]; the sent counter is incremented separately
-  [`js/modules/k6/grpc/stream.go:257,262`].
-- **Interrupt path that stops counting.** `stream.loop()` selects `case <-ctxDone:` when
-  the VU context is cancelled and closes the stream — the comment reads "VU is shutting
-  down during an interrupt / stream events will not be forwarded to the VU" — via
-  `closeWithError(nil)` [`js/modules/k6/grpc/stream.go:119,133,136-140`].
-- **The server-streaming RPC and its 100 ms cadence.**
-  `rpc ListFeatures(Rectangle) returns (stream Feature)`
-  [`lib/testutils/grpcservice/route_guide.proto:38`]; the server implementation loops over
-  in-range features, sleeping `time.Sleep(100 * time.Millisecond)` before each
-  `stream.Send(feature)` [`lib/testutils/grpcservice/service.go:57,61-63`].
-- **The shipped client this harness mirrors.** `examples/grpc_server_streaming.js` defaults
-  `GRPC_ADDR=127.0.0.1:10000` and uses `new Stream(client,
-  'main.FeatureExplorer/ListFeatures', null)`; it has no `options` block (hence the `/tmp`
-  wrapper supplying the `30ms` scenario).
+- `js/modules/k6/grpc/metrics.go:7-9` declare the three stream counters; `js/modules/k6/grpc/metrics.go:17` names `"grpc_streams"`, `:21` `"grpc_streams_msgs_sent"`, `:25` `"grpc_streams_msgs_received"`.
+- `js/modules/k6/grpc/stream.go:149` `queueMessage()` increments the received counter — `js/modules/k6/grpc/stream.go:153-159` emit `StreamsMessagesReceived` with `Value: 1` per message.
+- Interrupt path: `js/modules/k6/grpc/stream.go:119` `loop()`; `:133` `ctxDone := ctx.Done()`; `:136` `case <-ctxDone`; `:137-138` comment "VU is shutting down during an interrupt"; `:140` `return s.closeWithError(nil)`. On cancel k6 logs `js/modules/k6/grpc/stream.go:201` `"stream is cancelled/finished"` and `js/modules/k6/grpc/stream.go:371` `"…is closing"` — both Observed.
+- The shipped contract: `lib/testutils/grpcservice/route_guide.proto:38` `rpc ListFeatures(Rectangle) returns (stream Feature)`; the server impl `lib/testutils/grpcservice/service.go:57` `ListFeatures`, `:62` `time.Sleep(100 * time.Millisecond)` (the fixed per-message cadence), `:63` `stream.Send(feature)`; `:170` `LoadFeatures` returns the `:234` `exampleData` (100 features when the path is empty).
+- **Event-loop correction (finding #4).** `js/runner.go:837-839` create the event loop; `:840` `eventLoop.Start(fn)` runs the default function; `:847-852` `select { case <-ctx.Done(): … isFullIteration = false … }`; `:854-855` `cancel()` then `eventLoop.WaitOnRegistered()` keeps the iteration alive until async stream callbacks finish. The script’s `sleep(0.5)` runs **immediately after** `stream.write()`, not after the `end` event, and a full stream takes ~10 s at the 100 ms cadence — so the prior draft’s claim that "the interrupt lands during a post-stream `sleep(0.5)`" is **false**; the interrupt lands while the stream is actively delivering.
 
 ### Observed vs. inferred
 
-- **Observed:** the `Stopping k6…` interrupt line; the full `grpc_streams*` summary block
-  with `grpc_streams_msgs_received: 195` (stable ×3); `0 complete and 5 interrupted
-  iterations`; exit `105`.
-- **_inferred_:** the exact per-stream arithmetic (39 in-range features × 5 VUs) is a
-  reading of the server source explaining *why* the observed `195` is what it is; the
-  observed value itself (195) is the reported runtime measurement.
-
----
+- **Observed:** the 95 message count (×3), the 100-message full stream, the interrupt/cancel/close log lines and their ordering (STREAM_END after Stopping), the zero-error negative assertion, and the `0 complete / 5 interrupted` summary.
+- **Source-inferred:** that the counter increments in `queueMessage()` and that the `ctx.Done()` branch is what closes the streams — read from `stream.go`; the runtime *effect* (count freezes at 95; STREAM_END after Stopping) is Observed.
 
 ## Q3 — `dropped_iterations` via the REST control API
 
-**Question.** What is the exact value of **`dropped_iterations`** when a test exceeds its
-maximum duration capacity, obtained specifically by **querying the k6 REST control API**
-(e.g., `GET /v1/metrics`), with runtime evidence proving the value came from the API rather
-than the console summary?
-
-Two canonical query paths exist and both are used below: the raw HTTP API
-(`curl http://localhost:6565/v1/metrics/...`) and the `k6 stats` CLI (which reads the same
-API). The `--linger/-l` flag ("keep the API server alive past test end"
-[`cmd/config.go:32`]) keeps the REST server reachable after the run ends.
+**Question.** Report the exact `dropped_iterations` value when a test exceeds its maximum duration capacity, obtained specifically by querying the k6 REST control API (e.g. `GET /v1/metrics`), with runtime evidence proving the value came from the API rather than the console summary.
 
 ### Primary case — `shared-iterations` over `maxDuration` (drop emitted at test end)
 
-**Harness** (`/tmp/q3_shared_iters.js`):
+`/tmp/k6_evidence/q3/q3_shared_iters.js` — 5 VUs, 1000 iterations, `maxDuration: '3s'`, each iteration `sleep(1)`, so only ~15 can finish and the remainder are dropped. The `shared-iterations` drop is emitted as a single sample **at test end**, so k6 is run with `--linger` to keep the REST server alive for the query:
 
 ```javascript
 import { sleep } from 'k6';
@@ -412,45 +755,69 @@ export default function () {
 }
 ```
 
-**Command** (run twice for stability):
+_Command (run with `--linger`; after the run finishes, query the single-metric route, then the list route, then `k6 stats`):_
 
 ```bash
-/tmp/k6bin/k6 run -l /tmp/q3_shared_iters.js > /tmp/q3.log 2>&1 &
-K6PID=$!
-sleep 6   # test (maxDuration 3s) has ended; --linger keeps localhost:6565 alive
-curl -s http://localhost:6565/v1/metrics/dropped_iterations | tee /tmp/q3_api.json; echo
-python3 -c "import json;d=json.load(open('/tmp/q3_api.json'));print(d['data']['attributes']['sample']['count'])"
-/tmp/k6bin/k6 stats dropped_iterations
-kill -INT "$K6PID"; wait "$K6PID"
+PORT=$(shuf -i 20000-39999 -n1)
+/tmp/k6bin/k6_canonical run --linger --address 127.0.0.1:$PORT \
+    /tmp/k6_evidence/q3/q3_shared_iters.js & K6PID=$!
+# (wait for the run to finish; --linger holds the REST API open)
+curl -si  http://127.0.0.1:$PORT/v1/metrics/dropped_iterations   # single-metric route
+curl -s   http://127.0.0.1:$PORT/v1/metrics                      # full JSON:API list
+/tmp/k6bin/k6_canonical stats --address 127.0.0.1:$PORT          # corroborating CLI read
 ```
 
-**Observed output — raw JSON straight from `GET /v1/metrics/dropped_iterations`** (this is
-the proof the value came from the API; `count` = **985**, stable across both runs):
+**Complete single-metric response — run 1** (`/tmp/k6_evidence/q3/single_run1.http`, headers + body, REST port `28077`):
 
-```json
-{"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":985,"rate":328.1354371481373}}}}
+```
+HTTP/1.1 200 OK
+Date: Mon, 13 Jul 2026 19:21:32 GMT
+Content-Length: 170
+Content-Type: text/plain; charset=utf-8
+
+{"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":985,"rate":328.14224308887367}}}}
 ```
 
-Extracting `data.attributes.sample.count` prints `985`. The **list** route `GET
-/v1/metrics` returns the same value inside its `data[]` array (run 2):
+**Complete single-metric body — run 2** (`/tmp/k6_evidence/q3/single_run2.json`, with the captured `HTTP_STATUS`) — confirming stability:
 
-```json
-{
-  "type": "metrics",
-  "id": "dropped_iterations",
-  "attributes": {
-    "type": "counter",
-    "contains": "default",
-    "tainted": null,
-    "sample": {
-      "count": 985,
-      "rate": 328.1509262656229
-    }
-  }
-}
+```
+{"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":985,"rate":328.09823224832815}}}}
+HTTP_STATUS:200
 ```
 
-**Corroboration via `k6 stats dropped_iterations`** (reads the same REST API):
+**Complete JSON:API list body — run 1** (`GET /v1/metrics`, `/tmp/k6_evidence/q3/list_run1.json`):
+
+```
+{"data":[{"type":"metrics","id":"data_received","attributes":{"type":"counter","contains":"data","tainted":null,"sample":{"count":0,"rate":0}}},{"type":"metrics","id":"iteration_duration","attributes":{"type":"trend","contains":"time","tainted":null,"sample":{"avg":1000.5278415333333,"max":1000.978626,"med":1000.489833,"min":1000.077083,"p(90)":1000.9466754,"p(95)":1000.9598765}}},{"type":"metrics","id":"iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":15,"rate":4.997089996277264}}},{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":985,"rate":328.14224308887367}}},{"type":"metrics","id":"vus","attributes":{"type":"gauge","contains":"default","tainted":null,"sample":{"value":5}}},{"type":"metrics","id":"vus_max","attributes":{"type":"gauge","contains":"default","tainted":null,"sample":{"value":5}}},{"type":"metrics","id":"data_sent","attributes":{"type":"counter","contains":"data","tainted":null,"sample":{"count":0,"rate":0}}}]}
+HTTP_STATUS:200
+```
+
+**Observed:** `GET /v1/metrics/dropped_iterations` returns `HTTP/1.1 200 OK` with `data.attributes.sample.count = 985` (both runs; run 2 `count=985` as well). The list route returns all seven metrics; within it `iterations` shows `count:15` and `dropped_iterations` shows `count:985` — `15 + 985 = 1000`, the requested iteration total.
+
+**`k6 stats` — full output, and the positional-argument semantics (findings #5, #17).** `k6 stats` prints **all** metrics; the CLI **ignores** any positional argument (`cmd/stats.go` `RunE func(_ *cobra.Command, _ []string)`), so `k6 stats dropped_iterations` returns the same set. Proven by comparing the metric-name sets of `k6 stats` vs `k6 stats dropped_iterations`:
+
+```bash
+$ grep "name:" /tmp/k6_evidence/q3/stats_run1.yaml | sort            # k6 stats (no arg)
+- name: data_received
+- name: data_sent
+- name: dropped_iterations
+- name: iteration_duration
+- name: iterations
+- name: vus
+- name: vus_max
+$ grep "name:" /tmp/k6_evidence/q3/stats_arg_run1.yaml | sort        # k6 stats dropped_iterations
+- name: data_received
+- name: data_sent
+- name: dropped_iterations
+- name: iteration_duration
+- name: iterations
+- name: vus
+- name: vus_max
+$ diff <(grep name: stats_run1.yaml|sort) <(grep name: stats_arg_run1.yaml|sort) && echo IDENTICAL
+IDENTICAL
+```
+
+The `dropped_iterations` block extracted from the full `k6 stats` YAML (`/tmp/k6_evidence/q3/stats_run1.yaml`) — **an excerpt of the all-metrics output, not a filtered query:**
 
 ```yaml
 - name: dropped_iterations
@@ -463,16 +830,13 @@ Extracting `data.attributes.sample.count` prints `985`. The **list** route `GET
   tainted: ""
   sample:
     count: 985
-    rate: 328.1354371481373
-```
+    rate: 328.14224308887367
 
-(The same run's `iterations` counter reads `count: 15`; 15 completed + 985 dropped = the
-1000 requested iterations.)
+```
 
 ### Secondary case — `constant-arrival-rate` over-capacity (drops accrue during the run)
 
-**Harness** (`/tmp/q3_arrival.js`): `rate: 200/s` with only `maxVUs: 5` cannot be serviced,
-so drops accumulate throughout the 10 s run.
+`/tmp/k6_evidence/q3/q3_arrival.js` — 200 iterations/s for 10 s with only 5 VUs, which cannot service the rate, so drops **accrue during the run** (not just at the end):
 
 ```javascript
 import { sleep } from 'k6';
@@ -481,332 +845,836 @@ export const options = {
     car: {
       executor: 'constant-arrival-rate',
       rate: 200, timeUnit: '1s', duration: '10s',
-      preAllocatedVUs: 5, maxVUs: 5,
+      preAllocatedVUs: 5, maxVUs: 5,   // cannot service 200/s => drops accrue during run
     },
   },
 };
 export default function () { sleep(1); }
 ```
 
-**Command + observed** — polling `GET /v1/metrics/dropped_iterations` (with `-l`) shows the
-value climbing **before / during / after**, all read from the API, and the final API value
-matches the console summary exactly:
+_Command (capture the true pre-run state, then poll the live API during the run, then read the final value; run under `--linger`):_
+
+```bash
+PORT=$(shuf -i 20000-39999 -n1)
+# BEFORE k6 starts — nothing is bound:
+curl -s -o /dev/null -w "http_code=%{http_code}\n" \
+     http://127.0.0.1:$PORT/v1/metrics/dropped_iterations ; echo "curl_exit=$?"
+/tmp/k6bin/k6_canonical run --linger --address 127.0.0.1:$PORT \
+    /tmp/k6_evidence/q3/q3_arrival.js & K6PID=$!
+# DURING — poll ~every 0.85 s; AFTER — read the final value
+```
+
+**Complete before/during/after poll transcript — run 1** (`/tmp/k6_evidence/q3/arrival_poll1.txt`):
 
 ```
-BEFORE/early (t~0.5s):  dropped_iterations.count = 85
-DURING  (t~3s):         dropped_iterations.count = 575
-DURING  (t~6s):         dropped_iterations.count = 1160
-AFTER   (t~11s, ended): dropped_iterations.count = 1951
-AFTER (raw JSON from API):
-{"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":1951,"rate":193.815880789517}}}}
-console final for cross-check:
-     dropped_iterations...: 1951 193.815881/s
+--- t=pre (before k6 starts) ---
+curl: (7) Failed to connect to 127.0.0.1 port 27732 after 0 ms: Could not connect to server
+http_code=000
+curl_exit=7 (7=connection refused, nothing bound)
+t=0.0s  dropped_iterations.count=-
+t=0.9s  dropped_iterations.count=155
+t=1.7s  dropped_iterations.count=320
+t=2.6s  dropped_iterations.count=475
+t=3.4s  dropped_iterations.count=640
+t=4.2s  dropped_iterations.count=805
+t=5.1s  dropped_iterations.count=975
+t=5.9s  dropped_iterations.count=1140
+t=6.8s  dropped_iterations.count=1305
+t=7.6s  dropped_iterations.count=1470
+t=8.5s  dropped_iterations.count=1635
+t=9.3s  dropped_iterations.count=1790
+t=10.2s  dropped_iterations.count=1951
+t=11.0s  dropped_iterations.count=1951
 ```
+
+**Poll transcript — run 2** (`/tmp/k6_evidence/q3/arrival_poll2.txt`) — same lifecycle, same final value:
+
+```
+--- t=pre (before k6 starts) ---
+curl: (7) Failed to connect to 127.0.0.1 port 36357 after 0 ms: Could not connect to server
+http_code=000
+curl_exit=7 (7=connection refused, nothing bound)
+t=0.0s  dropped_iterations.count=-
+t=0.9s  dropped_iterations.count=166
+t=1.7s  dropped_iterations.count=320
+t=2.6s  dropped_iterations.count=485
+t=3.4s  dropped_iterations.count=650
+t=4.2s  dropped_iterations.count=815
+t=5.1s  dropped_iterations.count=980
+t=5.9s  dropped_iterations.count=1150
+t=6.8s  dropped_iterations.count=1315
+t=7.6s  dropped_iterations.count=1480
+t=8.5s  dropped_iterations.count=1645
+t=9.3s  dropped_iterations.count=1800
+t=10.2s  dropped_iterations.count=1951
+t=11.0s  dropped_iterations.count=1951
+```
+
+**Final API value and console cross-check (Observed).** The final REST value (`/tmp/k6_evidence/q3/arrival_final1.json`) is `count:1951`; the console end-of-test summary (`/tmp/k6_evidence/q3/arrival_run1.log`) prints `dropped_iterations…: 1951` and `iterations………: 50` — API equals console, and `50 + 1951 = 2001 ≈ 200/s × 10s`:
+
+```bash
+$ cat /tmp/k6_evidence/q3/arrival_final1.json
+{"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":1951,"rate":193.81007071617887}}}}
+$ grep -E "dropped_iterations|iterations\.\.\." /tmp/k6_evidence/q3/arrival_run1.log
+     dropped_iterations...: 1951 193.810071/s
+     iterations...........: 50   4.966942/s
+# run 2 (stability):
+$ cat /tmp/k6_evidence/q3/arrival_final2.json
+{"data":{"type":"metrics","id":"dropped_iterations","attributes":{"type":"counter","contains":"default","tainted":null,"sample":{"count":1951,"rate":193.81529743293407}}}}
+```
+
+**Observed (before / during / after).** BEFORE k6 binds the port, `curl` fails with `curl: (7) Failed to connect … Could not connect to server`, `http_code=000`, `curl_exit=7` — the true pre-registration absence state. DURING, the API-reported `dropped_iterations.count` climbs monotonically (155→320→…→1790 in run 1; 166→…→1800 in run 2). AFTER the run, it settles at `1951` in both runs, matching the console summary.
 
 ### Direct answer
 
-Queried from the REST API, `dropped_iterations` is **985** for the `shared-iterations`
-over-`maxDuration` scenario (raw JSON `data.attributes.sample.count = 985`, stable across
-two runs, corroborated by `k6 stats`), and **1951** for the `constant-arrival-rate`
-over-capacity scenario (whose API value climbs 85 → 575 → 1160 → 1951 and matches the
-console summary of 1951) — **Observed**. The value provably came from the API: the raw
-JSON:API bodies above were returned by `GET /v1/metrics/dropped_iterations` and `GET
-/v1/metrics` while the run was lingering, and `k6 stats` reproduces the same figure through
-the same API.
+**Observed:** `dropped_iterations = 985` for the primary over-`maxDuration` `shared-iterations` scenario, obtained from the REST API via `GET /v1/metrics/dropped_iterations` (`HTTP 200`, `data.attributes.sample.count = 985`) — proven to come from the API, not the console, because `--linger` kept the server alive and the raw JSON body was captured with its HTTP status. The value is stable across two runs. The secondary `constant-arrival-rate` over-capacity scenario yields `1951` drops that accrue during the run (API == console).
 
-### Root cause (`file:line`)
+### Root cause (`path:line`)
 
-- **Metric definition.** `DroppedIterationsName = "dropped_iterations"`
-  [`metrics/builtin.go:10`], registered as a Counter via
-  `registry.MustNewMetric(DroppedIterationsName, Counter)` [`metrics/builtin.go:84`].
-- **Primary (end-of-test) drop site.** In `shared-iterations`, a deferred function pushes a
-  single sample after all VUs finish: `if attemptedIters < totalIters { … Metric:
-  …DroppedIterations …, Value: float64(totalIters - attemptedIters) }`
-  [`lib/executor/shared_iterations.go:213-225`] — emitted at test end, which is why
-  `--linger` is required to read it via REST.
-- **Secondary (during-run) drop site.** In `constant-arrival-rate`, when no VU is free the
-  loop pushes `Value: 1` per dropped iteration: `droppedIterationMetric` [`:324`], `if
-  vusPool.TryRunIteration()` [`:332`], `Metric: droppedIterationMetric` [`:341`], `Value: 1`
-  [`lib/executor/constant_arrival_rate.go:345`]. (Analogous sites exist at
-  `lib/executor/per_vu_iterations.go` and `lib/executor/ramping_arrival_rate.go`.)
-- **REST routes.** `mux.HandleFunc("/v1/metrics", …) → handleGetMetrics`
-  [`api/v1/routes.go:23,28`] and `mux.HandleFunc("/v1/metrics/", …)` which extracts the id
-  and calls `handleGetMetric` [`api/v1/routes.go:31,37,38`].
-- **JSON shape (`sample.count`).** ``Metric.Sample map[string]float64 `json:"sample"` ``
-  [`api/v1/metric.go:69`] filled by `Sample: m.Sink.Format(t)` [`api/v1/metric.go:80`]; a
-  Counter's `Format` returns `{"count": c.Value, "rate": …}` [`metrics/sink.go:64-67`]. The
-  JSON:API envelope wraps it as ``Attributes Metric `json:"attributes"` ``
-  [`api/v1/metric_jsonapi.go:21`] inside ``Data …`json:"data"` `` (list `[]metricData` at
-  `:10-11`, single `metricData` at `:15`). The value path is therefore
-  `data.attributes.sample.count`.
-- **REST bind + flags.** Default bind `localhost:6565` [`cmd/state/state.go:150`], flag
-  `--address/-a` [`cmd/root.go:186`], `--linger/-l` [`cmd/config.go:32`]; the `k6 stats`
-  command [`cmd/stats.go:13`].
+- `metrics/builtin.go:10` `DroppedIterationsName = "dropped_iterations"`; `metrics/builtin.go:44` the field; `metrics/builtin.go:84` registers it via `registry.MustNewMetric(DroppedIterationsName, metrics.Counter)`.
+- **Primary drop site (test end):** `lib/executor/shared_iterations.go:217-229` — a `defer` that, after `activeVUs.Wait()`, checks `lib/executor/shared_iterations.go:219` `if attemptedIters < totalIters` and pushes `lib/executor/shared_iterations.go:222` the `DroppedIterations` metric with `lib/executor/shared_iterations.go:225` `Value: float64(totalIters - attemptedIters)`. Because it fires at the end, `--linger` is required to query it live.
+- **Secondary drop site (during run):** `lib/executor/constant_arrival_rate.go:324` `droppedIterationMetric`; `:332` `if !vusPool.TryRunIteration()`; `:341` the metric; `:345` `Value: 1` — accrues per dropped iteration as the run proceeds. Analogous per-VU / ramping sites exist at `lib/executor/per_vu_iterations.go:202` and `lib/executor/ramping_arrival_rate.go:472`.
+- **REST API path:** `api/v1/routes.go:23` registers `"/v1/metrics"` → `:28` `handleGetMetrics`; `api/v1/routes.go:31` `"/v1/metrics/"` → `:37` extracts the id → `:38` `handleGetMetric` (handlers in `api/v1/metric_routes.go`). The JSON shape: `api/v1/metric.go:69` `Sample map[string]float64 `json:"sample"``, filled at `api/v1/metric.go:80` `Sample: m.Sink.Format(t)`; for a counter `metrics/sink.go:64` `CounterSink.Format` returns `metrics/sink.go:66` `"count": c.Value` (and `:67` `"rate"`). The JSON:API envelope: `api/v1/metric_jsonapi.go:11` `Data []metricData` (list) vs `:15` `Data metricData` (single), `:18` `metricData`, `:21` `Attributes Metric`.
+- **Bind & flags:** `cmd/state/state.go:150` defaults the API to `Address: "localhost:6565"`; `cmd/config.go:32` defines the `--linger`/`-l` flag; `cmd/stats.go` `RunE func(_ *cobra.Command, _ []string)` ignores positional args (findings #5, #17).
 
 ### Observed vs. inferred
 
-- **Observed:** the raw REST JSON from both `/v1/metrics/{id}` and `/v1/metrics`; the
-  extracted `count = 985` (×2) and `1951`; the `k6 stats` YAML; the live before/during/after
-  climb; the API-vs-console cross-check.
-- **_inferred_:** nothing material — every reported value was read directly from the API at
-  runtime.
-
----
+- **Observed:** the `HTTP 200` status and raw `count:985` / `count:1951` bodies, the list body, the identical `k6 stats` name-sets (arg ignored), the connection-refused pre-run state, and the monotonic during-run climb.
+- **Source-inferred:** that 985 equals `totalIters − attemptedIters` computed in the `shared-iterations` `defer` — read from `shared_iterations.go`; the runtime *value* (985) is Observed.
 
 ## Q4 — `SharedArray` data-sharing footprint
 
-**Question.** Does the process memory footprint for a file loaded via `SharedArray` stay
-**approximately constant as the VU count increases**, or does **each VU create its own
-copy**? Support with test-script output and explain the root cause in the `k6/data` module.
+**Question.** Does the process memory footprint for a file loaded via `SharedArray` stay approximately constant as VU count increases, or does each VU create its own copy? Support with test-script output and explain the root cause in the `k6/data` module.
 
-**Data file.** A 17 MB JSON array of 50 000 records (each `{id,name,email,pad:'x'*256}`) was
-generated at `/tmp/q4_data.json`.
+### Data generation (magnitude proof)
 
-**Two scripts.** The `SharedArray` load runs its constructor once per process; the naive
-load runs `JSON.parse(open(...))` in the init context, which executes once **per VU**:
+`/tmp/k6_evidence/q4/gen_data.py` writes 50,000 records, each padded to be non-trivial:
 
-```javascript
-// /tmp/q4_shared.js
-import { SharedArray } from 'k6/data';
-import { sleep } from 'k6';
-const data = new SharedArray('users', function () { return JSON.parse(open('/tmp/q4_data.json')); });
-export default function () { const u = data[(Math.random()*data.length)|0]; void u; sleep(1); }
+```python
+import json, sys
+n = 50000
+pad = 'x' * 256
+recs = [{"id": i, "name": f"user_{i}", "email": f"user_{i}@example.com", "pad": pad} for i in range(n)]
+with open('/tmp/k6_evidence/q4/q4_data.json', 'w') as f:
+    json.dump(recs, f)
+print(f"records_written={n}")
 ```
 
-```javascript
-// /tmp/q4_naive.js
-import { sleep } from 'k6';
-const data = JSON.parse(open('/tmp/q4_data.json'));
-export default function () { const u = data[(Math.random()*data.length)|0]; void u; sleep(1); }
-```
-
-**Command** — peak resident set size (VmHWM) measured with `/usr/bin/time -v` at VU counts
-1/50/100/200 for each script, twice each:
+_Command and exact size/count proof:_
 
 ```bash
-/usr/bin/time -v /tmp/k6bin/k6 run --vus N --duration 3s SCRIPT 2>&1 | grep "Maximum resident set size"
+$ python3 /tmp/k6_evidence/q4/gen_data.py
+records_written=50000
+$ wc -c < /tmp/k6_evidence/q4/q4_data.json
+16916670
+$ python3 -c "import json;print(len(json.load(open('/tmp/k6_evidence/q4/q4_data.json')))) "
+50000
 ```
 
-**Observed output** — peak RSS ("Maximum resident set size", kB → MB):
+**Observed:** the data file is **16,916,670 bytes (~16.1 MiB)** containing **50,000** records.
 
-| VUs | SharedArray run1 | SharedArray run2 | Naive run1 | Naive run2 |
-|-----|------------------|------------------|------------|------------|
-| 1   | 175.5 MB         | 176.0 MB         | 195.0 MB   | 203.0 MB   |
-| 50  | 189.0 MB         | 174.0 MB         | 4191.7 MB  | 4000.4 MB  |
-| 100 | 174.6 MB         | 191.0 MB         | 7769.6 MB  | 8446.1 MB  |
-| 200 | 177.0 MB         | 177.0 MB         | 16059.7 MB | 16070.1 MB |
+### Scripts
 
-Raw kB values (run1) for reference: SharedArray `179676, 193536, 178816, 181248`; Naive
-`199680, 4292260, 7956108, 16445128`.
+`/tmp/k6_evidence/q4/q4_shared.js` (wraps the file in a `SharedArray`) and `/tmp/k6_evidence/q4/q4_naive.js` (each VU does its own `JSON.parse(open(file))`). Both log a one-time probe on VU 1 / iteration 0 proving the array is populated:
+
+```javascript
+import { SharedArray } from 'k6/data';
+import { sleep } from 'k6';
+const data = new SharedArray('users', function () { return JSON.parse(open('/tmp/k6_evidence/q4/q4_data.json')); });
+export default function () {
+  if (__VU === 1 && __ITER === 0) console.log('SHARED len=' + data.length + ' sample=' + JSON.stringify(data[0]).slice(0,60));
+  const u = data[(Math.random() * data.length) | 0]; void u;
+  sleep(1);
+}
+```
+
+```javascript
+import { sleep } from 'k6';
+const data = JSON.parse(open('/tmp/k6_evidence/q4/q4_data.json'));
+export default function () {
+  if (__VU === 1 && __ITER === 0) console.log('NAIVE len=' + data.length + ' sample=' + JSON.stringify(data[0]).slice(0,60));
+  const u = data[(Math.random() * data.length) | 0]; void u;
+  sleep(1);
+}
+```
+
+### Test-script output (array populated)
+
+_Command and captured probe output (`/tmp/k6_evidence/q4/q4_shared_probe.log`, `/tmp/k6_evidence/q4/q4_naive_probe.log`):_
+
+```
+$ /tmp/k6bin/k6_canonical run --address 127.0.0.1:$PORT --vus 1 --duration 2s \
+      /tmp/k6_evidence/q4/q4_shared.js ; echo "exit=$?"
+time="2026-07-13T19:48:49Z" level=info msg="SHARED len=50000 sample={\"id\":0,\"name\":\"user_0\",\"email\":\"user_0@example.com\",\"pad\":\"" source=console
+exit=0
+$ /tmp/k6bin/k6_canonical run --address 127.0.0.1:$PORT --vus 1 --duration 2s \
+      /tmp/k6_evidence/q4/q4_naive.js ; echo "exit=$?"
+time="2026-07-13T19:48:53Z" level=info msg="NAIVE len=50000 sample={\"id\":0,\"name\":\"user_0\",\"email\":\"user_0@example.com\",\"pad\":\"" source=console
+exit=0
+```
+
+**Observed:** both scripts see `len=50000` with `sample={"id":0,"name":"user_0",…}` — the array is fully populated in both cases.
+
+### Peak-RSS measurement (status-preserving; no `grep` masking)
+
+Each configuration was measured with `/usr/bin/time -v` writing its full report to a file and the k6 exit status captured directly (no pipe through `grep`, so a failed or OOM-killed run cannot masquerade as success). VU counts 1/50/100/200, two runs each, for both scripts:
+
+```bash
+for script in shared naive; do
+  for vus in 1 50 100 200; do
+    for run in 1 2; do
+      PORT=$(shuf -i 20000-39999 -n1)
+      /usr/bin/time -v /tmp/k6bin/k6_canonical run --address 127.0.0.1:$PORT \
+          --vus "$vus" --duration 5s /tmp/k6_evidence/q4/q4_${script}.js \
+          > k6out_${script}_vus${vus}_run${run}.log 2> time_${script}_vus${vus}_run${run}.txt
+      echo "exit=$?"   # captured, NOT masked
+      grep "Maximum resident set size" time_${script}_vus${vus}_run${run}.txt
+    done
+  done
+done
+```
+
+**Complete results table** (`/tmp/k6_evidence/q4/rss_results.tsv`; `maxrss_kb` is the exact `/usr/bin/time -v` "Maximum resident set size (kbytes)"; every `exit` is `0`):
+
+```
+script	vus	run	exit	maxrss_kb	maxrss_mb
+shared	1	1	0	183236	178.9
+shared	50	1	0	181244	177.0
+shared	100	1	0	182272	178.0
+shared	200	1	0	180228	176.0
+shared	1	2	0	184276	180.0
+shared	50	2	0	192512	188.0
+shared	100	2	0	181188	176.9
+shared	200	2	0	182292	178.0
+naive	1	1	0	198096	193.5
+naive	50	1	0	4184072	4086.0
+naive	100	1	0	7571176	7393.7
+naive	200	1	0	16581628	16193.0
+naive	1	2	0	209920	205.0
+naive	50	2	0	4141320	4044.3
+naive	100	2	0	7953024	7766.6
+naive	200	2	0	17246552	16842.3
+```
+
+**Full `/usr/bin/time -v` extract for the two extreme 200-VU runs (Observed) — the constructor-once proof:**
+
+```
+$ grep -E "Maximum resident|User time|Elapsed|Minor .* page faults|Exit status" \
+       /tmp/k6_evidence/q4/time_naive_vus200_run1.txt
+User time (seconds): 177.91
+Elapsed (wall clock) time (h:mm:ss or m:ss): 1:02.92
+Maximum resident set size (kbytes): 16581628
+Minor (reclaiming a frame) page faults: 4260969
+Exit status: 0
+$ grep -E "Maximum resident|User time|Elapsed|Minor .* page faults|Exit status" \
+       /tmp/k6_evidence/q4/time_shared_vus200_run1.txt
+User time (seconds): 1.19
+Elapsed (wall clock) time (h:mm:ss or m:ss): 0:03.73
+Maximum resident set size (kbytes): 180228
+Minor (reclaiming a frame) page faults: 45626
+Exit status: 0
+```
+
+**Resource disclosure (Observed).** All 16 runs exited `0`; none was OOM-killed. Peak usage was the naive 200-VU run at ~16.8 GB, comfortably within the host’s available memory (~3.7 TiB), so the high-memory naive runs completed rather than aborting.
 
 ### Direct answer
 
-With `SharedArray`, the process footprint stays **approximately constant** as VUs increase
-— ~175–191 MB across 1→200 VUs — whereas the naive `open()`/`JSON.parse` load grows
-**roughly linearly**, from ~195 MB at 1 VU to ~16 GB at 200 VUs (~79.7 MB per additional
-VU) — **Observed**, stable across both repeats. So **each VU does *not* get its own copy of
-a `SharedArray`**; the data is stored once per process. The naive load, by contrast,
-creates one full copy per VU.
+**Observed:** the `SharedArray` footprint stays **approximately constant** — ~176–188 MB across 1→200 VUs (both runs) — whereas the naive per-VU load grows **roughly linearly**, ~80 MB per added VU, reaching ~16.2–16.8 GB at 200 VUs. So each VU does **not** copy the `SharedArray`; the naive script makes one full copy of the dataset per VU. The constructor-once behavior is confirmed at runtime by CPU time: the shared 200-VU run used **User time 1.19 s** (parse once), while the naive 200-VU run used **177.91 s** (~200 parses).
 
-### Root cause (`file:line`)
+### Root cause (`path:line`)
 
-- **One per-process store.** The module's root holds a single `sharedArrays`:
-  `RootModule struct { shared sharedArrays }` [`js/modules/k6/data/data.go:21-23`], where
-  `sharedArrays struct { data map[string]sharedArray; mu sync.RWMutex }`
-  [`js/modules/k6/data/data.go:31-34`]; `New()` creates the one map
-  [`js/modules/k6/data/data.go:43-49`].
-- **Every VU shares the same map by pointer.** `NewModuleInstance` hands each VU a pointer
-  to the root's store: `return &Data{ vu: vu, shared: &rm.shared }`
-  [`js/modules/k6/data/data.go:53-58`].
-- **The JS-visible value is a proxy, not a copy.** The records are stored once as
-  `sharedArray struct { arr []string }` [`js/modules/k6/data/share.go:10-12`]; `wrap()`
-  returns `rt.NewDynamicArray(wrappedSharedArray{...})` — a sobek `DynamicArray` proxy over
-  the single backing slice [`js/modules/k6/data/share.go:23-33`]. Writes are rejected:
-  `Set`/`SetLen` `panic(s.rt.NewTypeError("SharedArray is immutable"))`
-  [`js/modules/k6/data/share.go:36-41`]. Reads are **copy-on-read**: `Get(index)` does
-  `s.parse(...)` (JSON.parse of the stored string) plus `deepFreeze` and returns a fresh
-  value per access [`js/modules/k6/data/share.go:44-59`].
-- **Why the naive load duplicates.** k6 VUs otherwise run isolated (shared-nothing) JS
-  runtimes, so a top-level `JSON.parse(open(...))` executes once per VU and each VU keeps
-  its own parsed copy — which is exactly the linear curve observed; `SharedArray` is the
-  deliberate exception that stores the data once Go-side and hands every VU a lightweight
-  proxy.
+- `js/modules/k6/data/data.go:20-23` `RootModule{ shared sharedArrays }` — a **single per-process** store; `js/modules/k6/data/data.go:25-28` `Data{ vu; shared *sharedArrays }`; `:30-33` `sharedArrays{ data map[string]sharedArray; mu sync.RWMutex }`; `:42-48` `New()` builds one map. Critically, `js/modules/k6/data/data.go:52-57` `NewModuleInstance` hands **every VU** `&rm.shared` — a pointer to the *same* map — even though VUs otherwise run isolated JS runtimes.
+- **Constructor-once / cache path (finding #15):** `js/modules/k6/data/data.go:95` calls `array := d.shared.get(rt, name, fn)`; `js/modules/k6/data/data.go:152-163` `get()` uses a double-checked `RLock`/`Lock` (`:153` `RLock`, `:157` `Lock`) and only on a miss calls `:161` `getShareArrayFromCall(rt, call)` — which runs the user constructor **once** and caches the result under `data[name]`. Subsequent VUs hit the cache, so the file is parsed once (the 1.19 s vs 177.91 s CPU contrast).
+- **No per-VU copy of the array:** `js/modules/k6/data/share.go:9-11` `sharedArray{ arr []string }` stores the records once; `js/modules/k6/data/share.go:21-33` `wrap()` returns an `rt.NewDynamicArray` **proxy** (not a per-VU array copy); `js/modules/k6/data/share.go:35-41` `Set`/`SetLen` panic `"SharedArray is immutable"`; `js/modules/k6/data/share.go:44-58` `Get(index)` does **copy-on-read** (parse + `deepFreeze` of the single requested element). Total process RSS still includes each VU’s small sobek runtime, but not a duplicated 16 MB dataset — hence the flat curve.
+
+**Official corroboration (documentation-of-intent).** Grafana’s `SharedArray` documentation (https://grafana.com/docs/k6/latest/javascript-api/k6-data/sharedarray/) states that it "shares the underlying memory between VUs," the "function executes only once, and its result is saved in memory once," and that "when a script requests an element, k6 gives a copy of that element." The data-parameterization guide (https://grafana.com/docs/k6/latest/examples/data-parameterization/) adds that "each VU in k6 is a separate JS VM" and `SharedArray` was added "to prevent multiple copies of the whole data file," and the v0.30.0 release notes (https://github.com/grafana/k6/releases/tag/v0.30.0) describe the "JS Proxy to transparently copy only the row each VU requests." These match the observed flat-vs-linear curves and the copy-on-read proxy.
 
 ### Observed vs. inferred
 
-- **Observed:** both peak-RSS curves (flat for `SharedArray`, linear for naive), stable
-  across two repeats.
-- **_inferred_:** the ~80 MB/VU slope is the naive script's per-VU parsed-copy cost; per
-  Grafana documentation the `SharedArray` constructor runs once and element access returns
-  a copy — this documentation is consistent with, and corroborated by, the observed flat
-  footprint (documentation is **_inferred_**; the flat/linear footprints are **Observed**).
-
----
+- **Observed:** the full RSS table (both runs, all exits `0`), the `len=50000` probe output, and the 1.19 s-vs-177.91 s CPU-time contrast.
+- **Source-inferred:** that the flat footprint is caused by the single shared map + copy-on-read proxy — read from `data.go`/`share.go`; the runtime *footprint* (flat vs linear) and *CPU* (parse-once) are Observed.
 
 ## Q5 — Prometheus remote-write metric-name integrity
 
-**Question.** Investigate metric reporting through the **Prometheus remote-write output**
-and provide test-script output proving that the exported data **preserves the integrity of
-metric names** (the name-mapping / sanitization behavior).
+**Question.** Investigate metric reporting through the Prometheus remote-write output and prove, with test-script output, that the exported data preserves the integrity of metric names (the name-mapping / sanitization behavior).
 
-**Capture harness.** k6's remote-write output POSTs a **snappy-compressed
-`prompb.WriteRequest`** to `/api/v1/write`. A minimal receiver was built under `/tmp`
-(`/tmp/q5bin/q5recv`) that (1) saves each raw request body to `/tmp/q5_raw/req_NNN.snappy`,
-then (2) `snappy.Decode` → `proto.Unmarshal` into the **same `prompb` type k6 uses**
-(`buf.build/gen/go/prometheus/prometheus/protocolbuffers/go`, from `go.mod:63`), and (3)
-prints every `__name__` label plus each series' full label set. It was compiled against the
-repository's own vendored dependencies (module renamed `q5recv`, repo `vendor/` symlinked,
-`GOFLAGS=-mod=vendor GOPROXY=off`), so the decode uses the exact protobuf types k6 links
-against — not a re-implementation.
+### Bounded loopback receiver (source + build)
 
-**k6 script `/tmp/q5_metrics.js`** (a custom Counter + a custom Trend, alongside k6's
-built-in metrics):
+`/tmp/k6_evidence/q5/q5recv_main.go` — a minimal receiver that validates the request contract, bounds each body with `io.LimitReader(r.Body, 10<<20)`, persists each raw body verbatim (mode `0600`), logs method/headers/length, and replies `204`. Decoding is deliberately done by a **separate** tool so the byte-integrity proof reads the exact persisted bytes:
+
+```go
+// Command q5recv is a minimal, bounded loopback receiver for Prometheus remote-write.
+// It validates the request contract k6's pkg/remote client sends (POST, snappy,
+// application/x-protobuf, RW version), persists each raw request body verbatim to disk
+// (mode 0600), and logs method/headers/length. Decoding is done separately by q5decode
+// so the byte-integrity proof reads the exact persisted bytes.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+)
+
+const maxBody = 10 << 20 // 10 MiB hard bound (finding #12: bounded reader)
+
+func main() {
+	addr := flag.String("addr", "127.0.0.1:9090", "loopback bind address")
+	out := flag.String("out", "/tmp/k6_evidence/q5/raw", "raw body output dir")
+	flag.Parse()
+
+	var n int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/write", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+		if err != nil {
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		i := atomic.AddInt64(&n, 1)
+		fp := filepath.Join(*out, fmt.Sprintf("req_%03d.snappy", i))
+		if err := os.WriteFile(fp, body, 0o600); err != nil {
+			log.Printf("write error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("REQ %d method=%s len=%d Content-Encoding=%q Content-Type=%q RW-Version=%q User-Agent=%q -> %s",
+			i, r.Method, len(body),
+			r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"),
+			r.Header.Get("X-Prometheus-Remote-Write-Version"), r.Header.Get("User-Agent"), fp)
+		w.WriteHeader(http.StatusNoContent) // 204, standard RW ack
+	})
+
+	ln, err := net.Listen("tcp", *addr) // loopback only
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	log.Printf("q5recv listening on http://%s/api/v1/write (maxBody=%d)", *addr, maxBody)
+	log.Fatal(http.Serve(ln, mux))
+}
+```
+
+### Direct Snappy→protobuf decoder (source + build)
+
+`/tmp/k6_evidence/q5/q5decode_main.go` — reads the raw `.snappy` bodies from disk, computes SHA-256, `snappy.Decode`s, and `proto.Unmarshal`s with the **same vendored** `prompb.WriteRequest` type k6 marshals with, then prints every series’ complete wire-ordered label set and the aggregate `__name__` set (no re-serialization, no `grep|sort` filtering):
+
+```go
+// Command q5decode reads Prometheus remote-write raw bodies straight from disk, snappy-
+// decodes them, unmarshals with the SAME vendored prompb type k6 marshals with, and prints
+// every series' COMPLETE wire-ordered label set plus the aggregate __name__ set. This proves
+// integrity against the exact emitted bytes (no re-serialization).
+package main
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+
+	prompb "buf.build/gen/go/prometheus/prometheus/protocolbuffers/go"
+	"github.com/klauspost/compress/snappy"
+	"google.golang.org/protobuf/proto"
+)
+
+func main() {
+	names := map[string]bool{}
+	for _, path := range os.Args[1:] {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Printf("ERROR reading %s: %v\n", path, err)
+			continue
+		}
+		sum := sha256.Sum256(raw)
+		dec, err := snappy.Decode(nil, raw)
+		if err != nil {
+			fmt.Printf("ERROR snappy.Decode %s: %v\n", path, err)
+			continue
+		}
+		var wr prompb.WriteRequest
+		if err := proto.Unmarshal(dec, &wr); err != nil {
+			fmt.Printf("ERROR proto.Unmarshal %s: %v\n", path, err)
+			continue
+		}
+		fmt.Printf("FILE %s  raw_bytes=%d  sha256=%x  decoded_bytes=%d  series=%d\n",
+			path, len(raw), sum, len(dec), len(wr.Timeseries))
+		for _, ts := range wr.Timeseries {
+			parts := make([]string, 0, len(ts.Labels))
+			for _, l := range ts.Labels { // labels are already sorted on the wire by MapSeries
+				parts = append(parts, l.Name+"="+l.Value)
+				if l.Name == "__name__" {
+					names[l.Value] = true
+				}
+			}
+			fmt.Printf("  series: %s\n", strings.Join(parts, "  "))
+		}
+	}
+	all := make([]string, 0, len(names))
+	for k := range names {
+		all = append(all, k)
+	}
+	sort.Strings(all)
+	fmt.Printf("\n__name__ SET (%d unique):\n", len(all))
+	for _, k := range all {
+		fmt.Println("  " + k)
+	}
+}
+```
+
+_Build (inside the base-commit clone so both link the vendored `prompb` + `snappy`):_
+
+```bash
+cp /tmp/k6_evidence/q5/q5recv_main.go   /tmp/k6canon/q5recv/main.go
+cp /tmp/k6_evidence/q5/q5decode_main.go /tmp/k6canon/q5decode/main.go
+(cd /tmp/k6canon && go build -o /tmp/q5bin/q5recv ./q5recv \
+                 && go build -o /tmp/q5bin/q5decode ./q5decode)
+```
+
+### k6 script (with an explicit empty tag) and harness
+
+`/tmp/k6_evidence/q5/q5_rw.js` — one custom `Counter` and one custom `Trend`, each tagged with a non-empty `present_tag` (must appear on the wire) and an **explicit empty** `empty_tag` (must be omitted):
 
 ```javascript
 import { Counter, Trend } from 'k6/metrics';
 import { sleep } from 'k6';
+
+// One custom Counter and one custom Trend so we observe both the counter "_total"
+// suffix and the trend stat suffixes (_p99, _count, ...) on the wire.
 const myCounter = new Counter('my_custom_counter');
 const myTrend = new Trend('my_custom_trend');
-export const options = { vus: 2, duration: '5s' };
-export default function () { myCounter.add(1); myTrend.add(Math.random()*100); sleep(0.2); }
+
+export const options = {
+  vus: 3,
+  duration: '10s',
+};
+
+export default function () {
+  // present_tag carries a NON-EMPTY value  -> MUST appear on the wire.
+  // empty_tag   carries an explicit EMPTY value -> MUST be OMITTED
+  //             (MapTagSet skips key==""||value=="", prometheus.go:25).
+  myCounter.add(1, { present_tag: 'yes', empty_tag: '' });
+  myTrend.add(Math.random() * 100, { present_tag: 'yes', empty_tag: '' });
+  sleep(0.2);
+}
 ```
 
-**Command** (run twice):
+The harness `/tmp/k6_evidence/q5/run_q5.sh` applies the safe pattern (unique loopback port via `shuf`, owned receiver PID with `trap … EXIT`, bounded TCP-connect readiness poll, raw dir mode `0700`) and forces the required trend stats via `K6_PROMETHEUS_RW_TREND_STATS=p(99),count,sum` (finding #9) for **both** runs:
 
 ```bash
-/tmp/q5bin/q5recv > /tmp/q5_recv_run1.log 2>&1 &          # receiver on :9090 /api/v1/write
-K6_PROMETHEUS_RW_SERVER_URL="http://localhost:9090/api/v1/write" \
-  /tmp/k6bin/k6 run --out experimental-prometheus-rw /tmp/q5_metrics.js > /tmp/q5_run1.log 2>&1
-grep -E "__name__|k6_" /tmp/q5_recv_run1.log | sort -u
+#!/usr/bin/env bash
+set -euo pipefail
+
+EVID=/tmp/k6_evidence/q5
+RAW="$EVID/raw"
+K6=/tmp/k6bin/k6_canonical
+RECV=/tmp/q5bin/q5recv
+SCRIPT_JS="$EVID/q5_rw.js"
+TREND_STATS="p(99),count,sum"   # review finding #9 directive; sum supported via remotewrite.go:171-173
+
+PORT=$(shuf -i 20000-39999 -n1)
+ADDR="127.0.0.1:$PORT"
+echo "CHOSEN_ADDR=$ADDR"
+echo "TREND_STATS=$TREND_STATS"
+
+rm -rf "$RAW"; mkdir -p "$RAW"; chmod 700 "$RAW"
+mkdir -p "$EVID/run1" "$EVID/run2"; rm -f "$EVID"/run1/*.snappy "$EVID"/run2/*.snappy
+
+"$RECV" -addr "$ADDR" -out "$RAW" > "$EVID/recv.log" 2>&1 &
+RECV_PID=$!
+echo "RECV_PID=$RECV_PID"
+cleanup(){
+  if kill -0 "$RECV_PID" 2>/dev/null; then
+    kill "$RECV_PID" 2>/dev/null || true
+    wait "$RECV_PID" 2>/dev/null || true
+    echo "receiver PID $RECV_PID shut down"
+  fi
+}
+trap cleanup EXIT
+
+ready=0
+for i in $(seq 1 50); do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then exec 3>&- 3<&- 2>/dev/null || true; ready=1; break; fi
+  sleep 0.1
+done
+[ "$ready" = 1 ] || { echo "receiver never became ready"; exit 1; }
+echo "receiver ready after ${i} polls"
+
+export K6_PROMETHEUS_RW_SERVER_URL="http://$ADDR/api/v1/write"
+export K6_PROMETHEUS_RW_TREND_STATS="$TREND_STATS"
+
+echo ""
+echo "########## RUN 1 (K6_PROMETHEUS_RW_TREND_STATS=$TREND_STATS) ##########"
+set +e
+"$K6" run --out experimental-prometheus-rw "$SCRIPT_JS" > "$EVID/run1.log" 2>&1
+echo "RUN1_EXIT=$?"
+set -e
+cp -p "$RAW"/*.snappy "$EVID/run1/" 2>/dev/null || echo "NO run1 bodies"
+echo "run1 bodies:"; ls -la "$EVID/run1/"
+rm -f "$RAW"/*.snappy
+
+echo ""
+echo "########## RUN 2 (reproducibility, same config) ##########"
+set +e
+"$K6" run --out experimental-prometheus-rw "$SCRIPT_JS" > "$EVID/run2.log" 2>&1
+echo "RUN2_EXIT=$?"
+set -e
+cp -p "$RAW"/*.snappy "$EVID/run2/" 2>/dev/null || echo "NO run2 bodies"
+echo "run2 bodies:"; ls -la "$EVID/run2/"
+
+echo ""
+echo "########## RECEIVER LOG (full, both runs) ##########"
+cat "$EVID/recv.log"
+echo "DONE"
 ```
 
-**Observed output** — the complete decoded `__name__` set (identical across both runs):
+_Command:_
 
-```
-k6_data_received_total
-k6_data_sent_total
-k6_iteration_duration_p99
-k6_iterations_total
-k6_my_custom_counter_total
-k6_my_custom_trend_p99
-k6_vus
-k6_vus_max
+```bash
+/tmp/k6_evidence/q5/run_q5.sh                         # runs k6 twice against the receiver
+/tmp/q5bin/q5decode /tmp/k6_evidence/q5/run1/*.snappy  # decode run 1 raw bodies
+/tmp/q5bin/q5decode /tmp/k6_evidence/q5/run2/*.snappy  # decode run 2 raw bodies
 ```
 
-A representative full label set printed by the receiver (labels shown in wire order),
-demonstrating lexicographic sorting and that empty tags are skipped:
+### Request contract (receiver log)
+
+**Complete receiver log** (`/tmp/k6_evidence/q5/recv.log`) — every POST with its headers and byte length:
 
 ```
-series: __name__=k6_my_custom_counter_total  group=  scenario=default   wire_label_order_sorted=true
-series: __name__=k6_vus                                                  wire_label_order_sorted=true
+2026/07/13 19:39:57 q5recv listening on http://127.0.0.1:38022/api/v1/write (maxBody=10485760)
+2026/07/13 19:40:02 REQ 1 method=POST len=368 Content-Encoding="snappy" Content-Type="application/x-protobuf" RW-Version="0.1.0" User-Agent="k6-prometheus-rw-output" -> /tmp/k6_evidence/q5/raw/req_001.snappy
+2026/07/13 19:40:07 REQ 2 method=POST len=380 Content-Encoding="snappy" Content-Type="application/x-protobuf" RW-Version="0.1.0" User-Agent="k6-prometheus-rw-output" -> /tmp/k6_evidence/q5/raw/req_002.snappy
+2026/07/13 19:40:07 REQ 3 method=POST len=218 Content-Encoding="snappy" Content-Type="application/x-protobuf" RW-Version="0.1.0" User-Agent="k6-prometheus-rw-output" -> /tmp/k6_evidence/q5/raw/req_003.snappy
+2026/07/13 19:40:12 REQ 4 method=POST len=368 Content-Encoding="snappy" Content-Type="application/x-protobuf" RW-Version="0.1.0" User-Agent="k6-prometheus-rw-output" -> /tmp/k6_evidence/q5/raw/req_004.snappy
+2026/07/13 19:40:17 REQ 5 method=POST len=370 Content-Encoding="snappy" Content-Type="application/x-protobuf" RW-Version="0.1.0" User-Agent="k6-prometheus-rw-output" -> /tmp/k6_evidence/q5/raw/req_005.snappy
+2026/07/13 19:40:17 REQ 6 method=POST len=258 Content-Encoding="snappy" Content-Type="application/x-protobuf" RW-Version="0.1.0" User-Agent="k6-prometheus-rw-output" -> /tmp/k6_evidence/q5/raw/req_006.snappy
 ```
 
-**Byte-integrity proof.** An independent decoder (`/tmp/q5bin/q5decode`) re-read the
-persisted raw payloads directly from disk — `req_001.snappy` (528 B → 8 series) and
-`req_002.snappy` (370 B → 6 series) — and produced the **same** eight names, confirming the
-result comes from the exact bytes k6 emitted, not from a re-serialized copy.
+**Observed:** k6’s remote-write client issues `method=POST` to `/api/v1/write` with `Content-Encoding="snappy"`, `Content-Type="application/x-protobuf"`, `X-Prometheus-Remote-Write-Version="0.1.0"`, `User-Agent="k6-prometheus-rw-output"`, flushing at ~5 s intervals (3 bodies per run). Both runs exited `0` (`RUN1_EXIT=0`, `RUN2_EXIT=0` in `/tmp/k6_evidence/q5/run_q5_driver.log`).
+
+### Byte integrity — independent SHA-256 agrees with the decoder
+
+_Command and output (`/tmp/k6_evidence/q5/sha256_lengths.log`), independently hashing the same files the decoder read:_
+
+```
+$ for f in /tmp/k6_evidence/q5/run1/*.snappy /tmp/k6_evidence/q5/run2/*.snappy; do \
+      printf "%s  bytes=%s  sha256=%s\n" "$(basename $f)" "$(wc -c <$f)" "$(sha256sum $f|cut -d" " -f1)"; done
+# run1
+req_001.snappy  bytes=368  sha256=4c408c68a430be963770a2a958dfe74480c1b26d1d6a42a163fa29626f7bd8b4
+req_002.snappy  bytes=380  sha256=0bcfc9a6ca159372e8e9f95d22f3ff1819973a659ab077439498f4ffb0515640
+req_003.snappy  bytes=218  sha256=1fb0c70e408ca8974704b374d84ba77890186ba8a40206ecea58b2626d59f2cc
+# run2
+req_004.snappy  bytes=368  sha256=6da0d63f5b6794d8f890d1f48caaeedcdf976ad6af091b587b9471472cec5ab3
+req_005.snappy  bytes=370  sha256=b7026ff10cb0afc5419bb179a6d6c03b2d26c0b5f8fee0c61a6c93f0b0df142f
+req_006.snappy  bytes=258  sha256=9bb918a9239409aeb8135f17638ebb301efe3b3c538d6a2e184a918a6751ff7f
+```
+
+These lengths and hashes **exactly match** the `raw_bytes=`/`sha256=` values the decoder computed internally (below), so the decoded names are proven against the exact emitted bytes.
+
+### Decoded wire labels — run 1 (complete)
+
+_Command: `/tmp/q5bin/q5decode /tmp/k6_evidence/q5/run1/*.snappy` → `/tmp/k6_evidence/q5/decode_run1.log`:_
+
+```
+FILE /tmp/k6_evidence/q5/run1/req_001.snappy  raw_bytes=368  sha256=4c408c68a430be963770a2a958dfe74480c1b26d1d6a42a163fa29626f7bd8b4  decoded_bytes=926  series=12
+  series: __name__=k6_vus_max
+  series: __name__=k6_my_custom_counter_total  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_p99  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_count  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_sum  present_tag=yes  scenario=default
+  series: __name__=k6_data_sent_total  scenario=default
+  series: __name__=k6_data_received_total  scenario=default
+  series: __name__=k6_iteration_duration_p99  scenario=default
+  series: __name__=k6_iteration_duration_count  scenario=default
+  series: __name__=k6_iteration_duration_sum  scenario=default
+  series: __name__=k6_iterations_total  scenario=default
+  series: __name__=k6_vus
+FILE /tmp/k6_evidence/q5/run1/req_002.snappy  raw_bytes=380  sha256=0bcfc9a6ca159372e8e9f95d22f3ff1819973a659ab077439498f4ffb0515640  decoded_bytes=926  series=12
+  series: __name__=k6_data_received_total  scenario=default
+  series: __name__=k6_iteration_duration_p99  scenario=default
+  series: __name__=k6_iteration_duration_count  scenario=default
+  series: __name__=k6_iteration_duration_sum  scenario=default
+  series: __name__=k6_iterations_total  scenario=default
+  series: __name__=k6_my_custom_counter_total  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_p99  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_count  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_sum  present_tag=yes  scenario=default
+  series: __name__=k6_vus
+  series: __name__=k6_vus_max
+  series: __name__=k6_data_sent_total  scenario=default
+FILE /tmp/k6_evidence/q5/run1/req_003.snappy  raw_bytes=218  sha256=1fb0c70e408ca8974704b374d84ba77890186ba8a40206ecea58b2626d59f2cc  decoded_bytes=448  series=6
+  series: __name__=k6_data_received_total  scenario=default
+  series: __name__=k6_iteration_duration_sum  scenario=default
+  series: __name__=k6_iteration_duration_p99  scenario=default
+  series: __name__=k6_iteration_duration_count  scenario=default
+  series: __name__=k6_iterations_total  scenario=default
+  series: __name__=k6_data_sent_total  scenario=default
+
+__name__ SET (12 unique):
+  k6_data_received_total
+  k6_data_sent_total
+  k6_iteration_duration_count
+  k6_iteration_duration_p99
+  k6_iteration_duration_sum
+  k6_iterations_total
+  k6_my_custom_counter_total
+  k6_my_custom_trend_count
+  k6_my_custom_trend_p99
+  k6_my_custom_trend_sum
+  k6_vus
+  k6_vus_max
+```
+
+### Decoded wire labels — run 2 (complete, reproducibility)
+
+_Command: `/tmp/q5bin/q5decode /tmp/k6_evidence/q5/run2/*.snappy` → `/tmp/k6_evidence/q5/decode_run2.log`:_
+
+```
+FILE /tmp/k6_evidence/q5/run2/req_004.snappy  raw_bytes=368  sha256=6da0d63f5b6794d8f890d1f48caaeedcdf976ad6af091b587b9471472cec5ab3  decoded_bytes=926  series=12
+  series: __name__=k6_vus_max
+  series: __name__=k6_my_custom_counter_total  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_p99  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_count  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_sum  present_tag=yes  scenario=default
+  series: __name__=k6_data_sent_total  scenario=default
+  series: __name__=k6_data_received_total  scenario=default
+  series: __name__=k6_iteration_duration_p99  scenario=default
+  series: __name__=k6_iteration_duration_count  scenario=default
+  series: __name__=k6_iteration_duration_sum  scenario=default
+  series: __name__=k6_iterations_total  scenario=default
+  series: __name__=k6_vus
+FILE /tmp/k6_evidence/q5/run2/req_005.snappy  raw_bytes=370  sha256=b7026ff10cb0afc5419bb179a6d6c03b2d26c0b5f8fee0c61a6c93f0b0df142f  decoded_bytes=926  series=12
+  series: __name__=k6_vus
+  series: __name__=k6_vus_max
+  series: __name__=k6_data_sent_total  scenario=default
+  series: __name__=k6_data_received_total  scenario=default
+  series: __name__=k6_iteration_duration_p99  scenario=default
+  series: __name__=k6_iteration_duration_count  scenario=default
+  series: __name__=k6_iteration_duration_sum  scenario=default
+  series: __name__=k6_iterations_total  scenario=default
+  series: __name__=k6_my_custom_counter_total  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_sum  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_p99  present_tag=yes  scenario=default
+  series: __name__=k6_my_custom_trend_count  present_tag=yes  scenario=default
+FILE /tmp/k6_evidence/q5/run2/req_006.snappy  raw_bytes=258  sha256=9bb918a9239409aeb8135f17638ebb301efe3b3c538d6a2e184a918a6751ff7f  decoded_bytes=532  series=8
+  series: __name__=k6_vus
+  series: __name__=k6_vus_max
+  series: __name__=k6_data_sent_total  scenario=default
+  series: __name__=k6_data_received_total  scenario=default
+  series: __name__=k6_iteration_duration_p99  scenario=default
+  series: __name__=k6_iteration_duration_count  scenario=default
+  series: __name__=k6_iteration_duration_sum  scenario=default
+  series: __name__=k6_iterations_total  scenario=default
+
+__name__ SET (12 unique):
+  k6_data_received_total
+  k6_data_sent_total
+  k6_iteration_duration_count
+  k6_iteration_duration_p99
+  k6_iteration_duration_sum
+  k6_iterations_total
+  k6_my_custom_counter_total
+  k6_my_custom_trend_count
+  k6_my_custom_trend_p99
+  k6_my_custom_trend_sum
+  k6_vus
+  k6_vus_max
+```
+
+**Observed (stable across both runs):** the aggregate `__name__` set is **12 unique names, all `k6_`-prefixed, byte-identical between run 1 and run 2**:
+
+```
+k6_data_received_total        (built-in Counter  -> _total)
+k6_data_sent_total            (built-in Counter  -> _total)
+k6_iterations_total           (built-in Counter  -> _total)
+k6_vus                        (built-in Gauge    -> no suffix)
+k6_vus_max                    (built-in Gauge    -> no suffix)
+k6_iteration_duration_p99     (built-in Trend    -> _p99)
+k6_iteration_duration_count   (built-in Trend    -> _count)
+k6_iteration_duration_sum     (built-in Trend    -> _sum)
+k6_my_custom_counter_total    (custom  Counter   -> _total)
+k6_my_custom_trend_p99        (custom  Trend     -> _p99)
+k6_my_custom_trend_count      (custom  Trend     -> _count)
+k6_my_custom_trend_sum        (custom  Trend     -> _sum)
+```
+
+Each name equals `"k6_"` + the original k6 metric name, plus (for counters) the `_total` suffix and (for trends) the stat suffix `_p99`/`_count`/`_sum`. **No character was mangled** — the mapping is prefix + suffix only.
+
+### Empty-tag omission (finding #9) — negative assertion
+
+_Command and output — the explicit empty `empty_tag` never reaches the wire, while `present_tag=yes` always does, and the prior draft’s spurious bare `group=` label does not appear:_
+
+```bash
+$ grep -c "empty_tag" /tmp/k6_evidence/q5/decode_run1.log /tmp/k6_evidence/q5/decode_run2.log
+/tmp/k6_evidence/q5/decode_run1.log:0
+/tmp/k6_evidence/q5/decode_run2.log:0
+$ grep -c "present_tag=yes" /tmp/k6_evidence/q5/decode_run1.log /tmp/k6_evidence/q5/decode_run2.log
+/tmp/k6_evidence/q5/decode_run1.log:8
+/tmp/k6_evidence/q5/decode_run2.log:8
+$ grep -c "group=" /tmp/k6_evidence/q5/decode_run1.log /tmp/k6_evidence/q5/decode_run2.log
+/tmp/k6_evidence/q5/decode_run1.log:0
+/tmp/k6_evidence/q5/decode_run2.log:0
+```
+
+**Observed:** `empty_tag` = `0/0` (absent on the wire), `present_tag=yes` = `8/8` (present), bare `group=` = `0/0`. The empty-valued tag is omitted; the non-empty tag is preserved.
+
+### The `sum` trend stat — empirical correction
+
+**Observed:** `K6_PROMETHEUS_RW_TREND_STATS=p(99),count,sum` runs cleanly (`exit 0`, no error/warning) and produces the `_sum` series (`k6_my_custom_trend_sum`, `k6_iteration_duration_sum`). This is notable because k6 **core**’s `metrics/sample.go:143-147` `GetResolversForTrendColumns` supports only `avg/min/med/max/count` (and `p(x)`), **not** `sum`. **Source-inferred (then confirmed by the run):** the remote-write output adds `sum` itself — `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:153-173` `setTrendStatsResolver` sets `:155` `hasSum := false`, strips `"sum"` from the list at `:158-159`, calls `:164` `GetResolversForTrendColumns(trendStatsCopy)` on the remainder (with the `:168` comment "sum is not supported from GetResolversForTrendColumns"), and re-adds it at `:171-173` `resolvers["sum"] = func(t *metrics.TrendSink) float64 { return t.Total() }`. Running first corrected an initial source-reading doubt.
 
 ### Direct answer
 
-Metric-name integrity is preserved by a **prefix-only** mapping: every exported
-`__name__` equals `k6_` + the original k6 metric name, with an optional stat/type
-**suffix** — `_total` for counters, `_p99` for the default trend stat, and no suffix for
-gauges. There is **no character mangling or sanitization of the base name** — k6's metric
-names already satisfy the Prometheus identifier charset, so only the `k6_` namespace (and
-the suffix) is added. Labels are emitted **lexicographically sorted** and empty tag values
-are skipped. **Observed**, stable across both runs.
+**Observed:** the remote-write output **preserves metric-name integrity**: every exported time series’ `__name__` is exactly `"k6_"` + the original k6 metric name, with only an added `_total` (counters) or stat suffix (`_p99`/`_count`/`_sum` for trends) — no character substitution or mangling — and the exact same 12-name set is produced across two runs. Empty-valued tags are dropped from the wire while non-empty tags are preserved. This is proven against the exact emitted bytes (independent SHA-256 == decoder-internal SHA-256).
 
-### Root cause (`file:line`)
+### Root cause (`path:line`) — full literal paths
 
-- **Output registration.** `experimental-prometheus-rw` maps to the vendored package:
-  `return remotewrite.New(params)` [`cmd/outputs.go:67`] (import at
-  [`cmd/outputs.go:20`]).
-- **The `__name__` mapping.** `const namelbl = "__name__"`
-  [`vendor/.../remotewrite/prometheus.go:11`]; in `MapSeries(series, suffix)` the value is
-  built as `v := defaultMetricPrefix + series.Metric.Name`
-  [`vendor/.../remotewrite/prometheus.go:40`], with `if suffix != "" { v += "_" + suffix }`
-  [`vendor/.../remotewrite/prometheus.go:41-43`], then appended as
-  `&prompb.Label{Name: namelbl, Value: v}` [`vendor/.../remotewrite/prometheus.go:44-47`].
-  Labels are then `sort.Slice`-sorted lexicographically
-  [`vendor/.../remotewrite/prometheus.go:48-50`]. Empty tags are skipped in `MapTagSet()`:
-  `if key == "" || value == "" { continue }`
-  [`vendor/.../remotewrite/prometheus.go:24-26`].
-- **Per-type suffixes.** In `MapPrompb()` the suffix is chosen by sink type: Counter →
-  `"total"` [`vendor/.../remotewrite/remotewrite.go:330-332`], Gauge → `""`
-  [`vendor/.../remotewrite/remotewrite.go:335-337`], Rate → `"rate"`
-  [`vendor/.../remotewrite/remotewrite.go:341`], Trend → `trend.MapPrompb`
-  [`vendor/.../remotewrite/remotewrite.go:352-354`]. Trend-stat names are normalized
-  `p(99)` → `p99` (parentheses/dots stripped, `p` prepended)
-  [`vendor/.../remotewrite/remotewrite.go:180-188`].
-- **Defaults.** `defaultServerURL = "http://localhost:9090/api/v1/write"`
-  [`vendor/.../remotewrite/config.go:21`]; `defaultMetricPrefix = "k6_"`
-  [`vendor/.../remotewrite/config.go:24`]; `defaultTrendStats = []string{"p(99)"}`
-  [`vendor/.../remotewrite/config.go:28`]; env override `K6_PROMETHEUS_RW_SERVER_URL`
-  [`vendor/.../remotewrite/config.go:301`].
-- **Dependency.** `github.com/grafana/xk6-output-prometheus-remote v0.5.0` [`go.mod:20`],
-  vendored under `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/`.
+- `cmd/outputs.go:20` imports the vendored `remotewrite` package; `cmd/outputs.go:67` returns `remotewrite.New(params)` for the `experimental-prometheus-rw` output.
+- **Name mapping:** `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:11` `const namelbl = "__name__"`; `…/prometheus.go:39-52` `MapSeries`; `…/prometheus.go:40` `v := defaultMetricPrefix + series.Metric.Name`; `…/prometheus.go:45` `Name: namelbl`; `…/prometheus.go:48-50` sorts labels lexicographically. `defaultMetricPrefix` is `"k6_"` at `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/config.go:24` (defaults: server URL `config.go:21`, `defaultTrendStats=["p(99)"]` `config.go:28`, env overrides `K6_PROMETHEUS_RW_SERVER_URL` `config.go:301` and `K6_PROMETHEUS_RW_TREND_STATS` `config.go:370`).
+- **Empty-tag omission:** `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/prometheus.go:16-31` `MapTagSet`; `…/prometheus.go:25` skips a label when `key == "" || value == ""`.
+- **Type → suffix dispatch:** `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/remotewrite.go:316` `MapPrompb()`; `…/remotewrite.go:331` `mapMonoSeries(…, "total")` for a Counter (`_total`); `…/remotewrite.go:341` `"rate"`; `…/remotewrite.go:356` `newts = trend.MapPrompb(swm.TimeSeries, swm.Latest)` for a Trend. _(Corrects the prior draft, which cited `:352-354` for the trend dispatch — it is at `:356`.)_ The trend suffix is applied at `vendor/github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite/trend.go:36` `MapPrompb` and `…/trend.go:78` `Append(suffix)` (`ts.Labels[tg.ixname].Value += "_" + suffix`).
+- **Why prefix-only preserves integrity (finding #16, Source-inferred):** k6 metric names already satisfy the Prometheus identifier charset, enforced at creation by `metrics/registry.go:30` `nameRegexString = "^[a-zA-Z_][a-zA-Z0-9_]{1,128}$"`, compiled at `metrics/registry.go:35`, checked by `metrics/registry.go:37-38` `checkName`, and gated in `NewMetric` at `metrics/registry.go:47-48` with `badNameWarning`. Because names are already valid identifiers, the exporter only namespaces them (`k6_` + optional suffix) — no sanitization/mangling is needed. This general rule is **Source-inferred** from `registry.go`; the specific decoded names are **Observed**.
+- Dependencies: `go.mod:20` `github.com/grafana/xk6-output-prometheus-remote v0.5.0`; the `prompb` type is the vendored `buf.build/gen/go/prometheus/prometheus/protocolbuffers/go` (`go.mod:63`).
+
+**Official corroboration (documentation-of-intent).** Grafana’s Prometheus remote-write documentation (https://grafana.com/docs/k6/latest/results-output/real-time/prometheus-remote-write/) states that "all time series are prefixed with the `k6_` namespace" and that `K6_PROMETHEUS_RW_TREND_STATS` "accepts a comma-separated list of stats functions: count, sum, min, max, avg, med, p(x)" with default `p(99)` — the official list **includes `sum`**, independently corroborating the empirical correction above. The Grafana Cloud Prometheus page (https://grafana.com/docs/k6/latest/results-output/real-time/grafana-cloud-prometheus/) likewise notes "all the k6 time series have a `k6_` prefix."
 
 ### Observed vs. inferred
 
-- **Observed:** the eight `k6_`-prefixed `__name__` values, decoded from the exact emitted
-  bytes; the per-type suffixes (`_total`, `_p99`, none for gauges); sorted labels; skipped
-  empty tags; byte-integrity via the independent on-disk decode; identical across two runs.
-- **_inferred_:** nothing material — the mapping was proven from the emitted bytes rather
-  than from reading `prometheus.go` alone. (The web-search confirmation of the remote-write
-  naming convention was rate-limited/unavailable, so the vendored source above is the
-  authoritative reference, corroborated by the decoded bytes.)
+- **Observed:** the decoded `__name__` set (12 names, identical across two runs), the `_total`/`_p99`/`_count`/`_sum` suffixes, the empty-tag omission (0/0) and `present_tag` presence (8/8), the request headers, the SHA-256/length agreement, and that `sum` is accepted and produces `_sum`.
+- **Source-inferred:** the general rule that k6 names already satisfy the Prometheus charset (`metrics/registry.go:30-48`) so integrity is prefix-only; the exact code layer that drops the empty tag (k6 core vs `MapTagSet` at `prometheus.go:25`) — the observable *absence* on the wire is definitive, the precise dropping site is read from source.
 
----
+## Cleanup and final state
+
+Every observation artifact lived under `/tmp` (outside the checkout), so the repository stayed pristine throughout. The gRPC server (Q2) and remote-write receiver (Q5) were each shut down by a `trap … EXIT` in their own harness immediately after that experiment, so no helper process survived into this phase (verified below). The cleanup harness then removed every `/tmp` artifact by **explicit path** — the working tree under `/tmp/blitzy/…` is never a target of any `rm` — and confirmed each removal, the absence of lingering processes/listeners, and that the only working-tree change is the single deliverable.
+
+_Command and complete captured output:_
+
+```
+###### CLEANUP TRANSCRIPT ######
+
+# (1) BEFORE — observation artifacts present under /tmp (never inside the checkout):
+$ du -sh /tmp/k6_evidence /tmp/k6bin /tmp/q2bin /tmp/q5bin /tmp/k6canon 2>/dev/null; ls -1 /tmp/build_doc*.py
+17M	/tmp/k6_evidence
+123M	/tmp/k6bin
+13M	/tmp/q2bin
+13M	/tmp/q5bin
+133M	/tmp/k6canon
+/tmp/build_doc.py
+/tmp/build_doc2.py
+/tmp/build_doc3.py
+[exit=0]
+
+# (2) Owned helper processes (q2 gRPC server, q5 receiver) — terminated by per-experiment traps already:
+$ ps -eo pid,args | grep -E 'q2harness|q5recv|q5decode|k6_canonical' | grep -v grep
+(no matching processes)
+[exit=0]
+$ Q2PID=$(cat /tmp/k6_evidence/q2/server.pid); kill -0 "$Q2PID" 2>/dev/null && kill "$Q2PID" || echo "recorded q2 pid $Q2PID not alive — nothing to kill"
+recorded q2 pid 136685 not alive — nothing to kill
+[exit=0]
+
+# (3) Remove every /tmp observation artifact (explicit paths only; the checkout under /tmp/blitzy is never touched):
+$ rm -rf /tmp/k6_evidence
+[exit=0]
+$ rm -rf /tmp/k6bin
+[exit=0]
+$ rm -rf /tmp/q2bin
+[exit=0]
+$ rm -rf /tmp/q5bin
+[exit=0]
+$ rm -rf /tmp/k6canon
+[exit=0]
+$ rm -rf /tmp/build_doc.py
+[exit=0]
+$ rm -rf /tmp/build_doc2.py
+[exit=0]
+$ rm -rf /tmp/build_doc3.py
+[exit=0]
+
+# (4) AFTER — verify each artifact is gone:
+$ for p in /tmp/k6_evidence /tmp/k6bin /tmp/q2bin /tmp/q5bin /tmp/k6canon /tmp/build_doc*.py; do [ -e "$p" ] && echo "STILL PRESENT: $p" || echo "removed: $p"; done
+removed: /tmp/k6_evidence
+removed: /tmp/k6bin
+removed: /tmp/q2bin
+removed: /tmp/q5bin
+removed: /tmp/k6canon
+removed: /tmp/build_doc.py
+removed: /tmp/build_doc2.py
+removed: /tmp/build_doc3.py
+[exit=0]
+
+# (5) No lingering helper processes or loopback listeners on the harness port range:
+$ ps -eo pid,args | grep -E 'q2harness|q5recv|q5decode|k6_canonical|/tmp/k6bin/k6' | grep -v grep | wc -l
+0
+[exit=0]
+$ ss -ltn | awk '{print $4}' | grep -E '127.0.0.1:(2|3)[0-9]{4}$' | wc -l
+0
+[exit=0]
+
+# (6) Repository read-only proof — ONLY the single deliverable differs from the committed tree:
+$ cd /tmp/blitzy/k6/blitzy-2ee44ea5-9c3d-489f-9a4d-c0ce8e36a5ce_a34a64 && git status --porcelain
+ M blitzy/documentation/k6_ddc3b0b1d23c.md
+[exit=0]
+$ git diff --stat HEAD -- . ':(exclude)blitzy/documentation/k6_ddc3b0b1d23c.md'   # any OTHER file changed?
+(empty output above = no source file changed)
+[exit=0]
+
+###### END ######
+```
+
+**Observed:** all five `/tmp` directories and the three generator scripts were removed (each `rm` `exit=0`, and the AFTER check reports `removed:` for every path); no `q2harness`/`q5recv`/`q5decode`/`k6_canonical` process remained (`ps … | wc -l` = `0`); no loopback listener remained on the harness port range (`ss … | wc -l` = `0`); the recorded Q2 server PID (`136685`) was already dead. `git status --porcelain` shows the **single** entry ` M blitzy/documentation/k6_ddc3b0b1d23c.md`, and the exclude-scoped `git diff` is empty — proving **no source file was modified**. The cleanup capture log itself is removed as the final action after this section is embedded, leaving `/tmp` free of investigation artifacts. This document is then committed as the sole repository change.
 
 ## Coverage pass
 
-Every named mechanism, metric, log line, function/struct, flag, and route posed across the
-five questions, confirmed addressed with **Observed** runtime evidence (unless explicitly
-labeled **_inferred_**).
+A final decomposition confirming every named mechanism, metric, API, module, and flag in each question is addressed, each next to its evidence. **Observed** = produced at runtime and captured above; **Source-inferred** = read from source (labeled as such).
 
-**Q1 — VU lifecycle on SIGINT (`ramping-vus`):**
-- [x] `ramping-vus` executor with ≥5 VUs exercised (`startVUs: 5`) — **Observed**.
-- [x] Exact single-SIGINT log line `level=debug msg="Stopping k6 in response to signal..." sig=interrupt` — **Observed** (matches assertion at `cmd/tests/cmd_run_test.go:1225,1246`).
-- [x] Abort log `level=error msg="test run was aborted because k6 received a 'interrupt' signal"` — **Observed**.
-- [x] Summary line `0 complete and 5 interrupted iterations` (M = 5 > 0 ⇒ mid-execution termination) — **Observed**; stable across 2 runs.
-- [x] Exit code `105` (`ExternalAbort`, `errext/exitcodes/codes.go:41`) — **Observed**.
-- [x] Secondary path (second SIGINT) → `level=error msg="Aborting k6 in response to signal"` via a canonical script `teardown()` window — **Observed**; exit `105`.
-- [x] Root cause named: `handleTestAbortSignals()` (`cmd/common.go:97,101`), `runAbort` (`cmd/run.go:350-352`), `onHardStop` (`cmd/run.go:359-360`), summary format (`execution/scheduler.go:155-159`, `GetFullIterationCount`/`GetPartialIterationCount`), `GetGracefulStop()` semantics (`lib/executor/base_config.go:91-96`), gracefulStop-vs-hardStop contract (`lib/executor/vu_handle.go:63-67`), `rampingVUsType` (`lib/executor/ramping_vus.go:19`).
+**Q1 — VU lifecycle on `SIGINT` (`ramping-vus`).**
+- `ramping-vus` executor, `startVUs: 5` (≥5 VUs) — **Observed** (scenario banner `Up to 5 looping VUs`, harness at `/tmp/k6_evidence/q1/q1_ramping_vus.js`).
+- Exact shutdown log messages — **Observed** (`Stopping k6 in response to signal… sig=interrupt`; second signal `Aborting k6 in response to signal`).
+- Finish-in-progress-iteration **vs** terminate-mid-execution determination — **Observed** = terminated mid-execution (`0 complete and 5 interrupted iterations`, both runs).
+- Secondary condition (a **second** `SIGINT`) — **Observed** (double-SIGINT runs: `Stopping` → teardown → `Aborting` → `exit=105`).
+- Root cause `cmd/common.go:97/99/101/118`, `cmd/run.go:350/352/354/360`, `errext/exitcodes/codes.go:41`, `lib/executor/base_config.go:20/95-96`, `vu_handle.go:63/67`, `ramping_vus.go:19`, `execution/scheduler.go:156/158` — **Source-inferred** (causal chain); runtime effect **Observed**.
 
-**Q2 — gRPC server-streaming interruption:**
-- [x] `gracefulStop`/`gracefulRampDown = '30ms'` configured exactly — **Observed**.
-- [x] `grpc_streams: 5` — **Observed**.
-- [x] `grpc_streams_msgs_sent: 5` — **Observed**.
-- [x] **`grpc_streams_msgs_received: 195`** — **Observed**; stable across 3 runs.
-- [x] Interrupt log entries + `0 complete and 5 interrupted iterations`, exit `105` — **Observed**.
-- [x] Root cause named: counters in `js/modules/k6/grpc/metrics.go` (`:7-9`, `:17`, `:21`, `:25`); per-message increment `Value:1` in `queueMessage()` (`stream.go:149,153,158`); interrupt/close path `loop()` `case <-ctxDone` (`stream.go:119,133,136-140`, comment "VU is shutting down during an interrupt"); server-streaming RPC `rpc ListFeatures(Rectangle) returns (stream Feature)` (`route_guide.proto:38`); server pacing `time.Sleep(100 * time.Millisecond)` (`grpcservice/service.go:57-63`) — the 195 = 39 in-range features × 5 VUs.
+**Q2 — gRPC server-streaming interruption.**
+- gRPC **server-streaming** RPC (`ListFeatures`) — **Observed** (server harness + `route_guide.proto:38`).
+- `gracefulRampDown` **and** `gracefulStop` = `'30ms'` — **Observed** (script `options`, scenario banner).
+- Exact interrupt log entries — **Observed** (`Stopping…`, per-stream `stream is cancelled/finished error="canceled by client (k6)"`, `…is closing`, `STREAM_END` after `Stopping`).
+- `grpc_streams_msgs_received` value — **Observed** = `95` (stable ×3; full stream = `100`).
+- Active-stream interruption proof + event-loop correction (`js/runner.go:837-855`) — **Observed** (STREAM_END after Stopping) + **Source-inferred** (event-loop mechanism); the prior "post-stream `sleep(0.5)`" claim corrected.
+- Negative assertion (no `Error:` line) — **Observed** (`0/0/0`).
 
-**Q3 — `dropped_iterations` via the REST API:**
-- [x] Value obtained via REST API `GET /v1/metrics/dropped_iterations` — raw JSON `data.attributes.sample.count` = **985** (shared-iterations) — **Observed**; stable across 2 runs.
-- [x] List route `GET /v1/metrics` showing the `dropped_iterations` entry — **Observed**.
-- [x] `--linger/-l` used to keep the REST server alive past test end — **Observed**.
-- [x] `k6 stats dropped_iterations` corroboration (same API): count 985, iterations 15, 15+985 = 1000 — **Observed**.
-- [x] Secondary path: `constant-arrival-rate` over-capacity, live before/during/after polling `85 → 575 → 1160 → 1951`, final API count `1951` matching console — **Observed**.
-- [x] Root cause named: `DroppedIterationsName` + Counter registration (`metrics/builtin.go:10,44,84`); end-of-test drop `Value: float64(totalIters-attemptedIters)` (`lib/executor/shared_iterations.go:213-225`); during-run drop `Value:1` on `!TryRunIteration()` (`lib/executor/constant_arrival_rate.go:324-345`); routes (`api/v1/routes.go:23,28,31,37-38`); JSON shape `Sample map[string]float64` (`api/v1/metric.go:69,80`), `data.attributes` envelope (`api/v1/metric_jsonapi.go:10-11,21`), Counter `Format` `{"count":...}` (`metrics/sink.go:64-67`); REST bind `localhost:6565` (`cmd/state/state.go:150`), `--linger` (`cmd/config.go:32`), `k6 stats` (`cmd/stats.go`).
+**Q3 — `dropped_iterations` via the REST API.**
+- `dropped_iterations` metric — **Observed** (`metrics/builtin.go:10/44/84`; API + console values).
+- Exceeds maximum duration capacity — **Observed** (primary `shared-iterations` over `maxDuration`).
+- Value **from the REST API** `GET /v1/metrics/dropped_iterations` (not the console) — **Observed** = `985` (`HTTP/1.1 200 OK`, `data.attributes.sample.count`), captured with `--linger`.
+- `GET /v1/metrics` (list form) — **Observed** (`/tmp/k6_evidence/q3/list_run1.json`).
+- Secondary condition (`constant-arrival-rate` over-capacity, drops during run) — **Observed** = `1951` (API == console; before/during/after states).
+- `k6 stats` ignores positional args — **Observed** (identical name-sets) + **Source-inferred** (`cmd/stats.go` `RunE(_,_)`).
 
-**Q4 — `SharedArray` footprint:**
-- [x] Peak-RSS curve for `SharedArray`: **flat ~175–191 MB** across 1/50/100/200 VUs — **Observed**; 2 runs.
-- [x] Peak-RSS curve for naive per-VU load: **linear ~195 MB → 16 GB** (~79.7 MB/VU) — **Observed**; 2 runs.
-- [x] Direct answer: footprint stays approximately constant with `SharedArray`; each VU does not copy — **Observed**.
-- [x] Root cause named: single per-process store `RootModule.shared` / `sharedArrays{data map, mu}` (`js/modules/k6/data/data.go:21-34,43-49`); every VU gets a pointer `&Data{vu, shared:&rm.shared}` (`data.go:53-58`); proxy-backed `DynamicArray`, immutable, copy-on-read `Get()` (`js/modules/k6/data/share.go:10-12,23-41,44-59`); shared-nothing VU runtimes explain naive duplication.
+**Q4 — `SharedArray` footprint.**
+- Footprint approximately constant vs each-VU-copies — **Observed** = constant (~176–188 MB flat; naive ~16.8 GB at 200 VUs).
+- Supported by test-script output — **Observed** (`SHARED len=50000` / `NAIVE len=50000` probes).
+- Root cause in the `k6/data` module — **Source-inferred** (`js/modules/k6/data/data.go:20-33/52-57/95/152-163`, `share.go:9-11/21-33/35-41/44-58`); footprint + parse-once CPU (`1.19s` vs `177.91s`) **Observed**.
+- Magnitude/scale + two-run stability — **Observed** (VUs 1/50/100/200 × 2 runs; all `exit 0`, no OOM).
 
-**Q5 — Prometheus remote-write name integrity:**
-- [x] Decoded `__name__` set (8 names) from the **exact emitted bytes** — **Observed**; identical across 2 runs.
-- [x] `k6_` prefix on every name; no character mangling — **Observed**.
-- [x] Per-type/stat suffixes: `_total` (counters `k6_iterations_total`, `k6_data_sent_total`, `k6_data_received_total`, `k6_my_custom_counter_total`), `_p99` (trend `k6_my_custom_trend_p99`, `k6_iteration_duration_p99`), none for gauges (`k6_vus`, `k6_vus_max`) — **Observed**.
-- [x] Labels lexicographically sorted; empty tags skipped — **Observed**.
-- [x] Byte-integrity via independent on-disk re-decode of `req_001.snappy`/`req_002.snappy` — **Observed**.
-- [x] Root cause named: registration `remotewrite.New` (`cmd/outputs.go:20,67`); `__name__` = `defaultMetricPrefix + Metric.Name` (+suffix), sorted, empty tags skipped (`vendor/.../remotewrite/prometheus.go:11,24-26,40-50`); per-type suffixes + trend `p(99)→p99` (`vendor/.../remotewrite/remotewrite.go:180-188,330-354`); defaults `k6_`, default URL, `p(99)`, env override (`vendor/.../remotewrite/config.go:21,24,28,301`); dependency `xk6-output-prometheus-remote v0.5.0` (`go.mod:20`).
+**Q5 — Prometheus remote-write name integrity.**
+- `experimental-prometheus-rw` output — **Observed** (`cmd/outputs.go:20/67`; 6 POSTs to `/api/v1/write`).
+- Metric-name integrity (name mapping / sanitization) — **Observed** = prefix-only (`k6_` + suffix), 12 unique names byte-identical across two runs, verified against exact emitted bytes (independent SHA-256 == decoder-internal SHA-256).
+- Built-in + custom metrics, counter `_total`, trend `_p99`/`_count`/`_sum` — **Observed** (decoded `__name__` set).
+- Empty-tag omission — **Observed** (`empty_tag` `0/0`, `present_tag=yes` `8/8`).
+- `sum` trend stat validity — **Observed** (produces `_sum`) + **Source-inferred** (`remotewrite.go:153-173` `hasSum`); corroborated by official docs.
+- Root cause `prometheus.go:11/25/39-52`, `config.go:24`, `remotewrite.go:316/331/341/356`, `trend.go:36/78`; charset rule `metrics/registry.go:30-48` — **Source-inferred**; decoded names **Observed**.
 
-**Methodology coverage:**
-- [x] Canonical binary built from HEAD; banner `k6 v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)` recorded — **Observed**.
-- [x] Every value obtained through canonical entry points (`k6 run`, `k6 stats`, REST API, real remote-write output) — no debug hooks, mocks, or bypasses — **Observed**.
-- [x] Every magnitude/timing value confirmed stable across ≥2 runs (or reported as a distribution) with scale/duration stated — **Observed**.
-- [x] Complete, unedited output presented for each condition with the command that produced it; no elisions.
-- [x] Statements not directly observed at runtime are labeled **_inferred_**.
-- [x] Repository left read-only: no existing file modified; this document is the only artifact.
+**Cross-cutting.**
+- Canonical, default build + banner — **Observed** (foundation transcript: `k6_canonical v0.55.0 (commit/ddc3b0b1d2, …)`, `go1.21.13`).
+- Two-run stability for every magnitude/timing value — **Observed** (Q1 ×2, Q2 ×3, Q3 ×2, Q4 ×2, Q5 ×2).
+- Canonical entry points only (`k6 run`, `k6 stats`, REST API) — **Observed**.
+- Safe scripting, read-only repo, full cleanup — **Observed** (methodology bullets + cleanup transcript; only the deliverable changed).
+
