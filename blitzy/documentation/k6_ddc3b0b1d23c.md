@@ -42,7 +42,7 @@ $ git -C <repo> show --stat HEAD  # doc commit adds ONLY the markdown
  1 file changed, 618 insertions(+)
 ```
 
-- **Note on the banner commit — [OBSERVED] value, explained.** `./k6 version` stamps `commit/65a334ff68`, not `ddc3b0b1d2`, because k6's build embeds the git HEAD *at build time* via `debug.ReadBuildInfo()`'s `vcs.revision`, and the binary used for every capture here was built from the working tree at branch HEAD. That HEAD commit (`65a334ff6837...`) sits directly on top of the source commit `ddc3b0b1d23c...` and changes **only this Markdown document** — no `.go` file differs between them (this document is the sole delta, and this corrected revision is likewise committed on top of the same source, still touching no `.go` file). The compiled binary and the test binaries are therefore **behavior-identical** to a build at the source commit `ddc3b0b1d23c` (zero Go source differs); only the VCS stamp differs. `Version = "0.55.0"` is fixed in source [lib/consts/consts.go:12].
+- **Note on the banner commit — the stamped value is [OBSERVED]; the mechanism that produces it is _[INFERRED, code-grounded]_.** The binary used for the captures in this document was built at the branch HEAD that first added this file, so `./k6 version` stamps `commit/65a334ff68` (the banner reproduced above and the debug-log line below), not the source commit `ddc3b0b1d2`. `FullVersion()` [lib/consts/consts.go:16-52] builds this string from the VCS stamp Go embeds at build time: `debug.ReadBuildInfo()` [lib/consts/consts.go:19] supplies the `vcs.revision` build setting [lib/consts/consts.go:30], which is truncated to ten characters (`commitLen := 10`) [lib/consts/consts.go:31-35] and formatted as `commit/%s` [lib/consts/consts.go:52]; a modified working tree appends `-dirty` via `vcs.modified` [lib/consts/consts.go:36] and the `if dirty` branch [lib/consts/consts.go:48-50]. Because the stamp tracks HEAD-at-build-time, it necessarily differs both from the source commit `ddc3b0b1d2` and from any later rebuild: every commit on this branch — including this document's own revisions — advances HEAD while touching **no `.go` file**. A fresh `go build` at the current HEAD confirms the mechanism [OBSERVED]: `k6 v0.55.0 (commit/3e5dacba06-dirty, go1.21.13, linux/amd64)` — the ten-char `3e5dacba06` is the current HEAD and `-dirty` reflects this document's uncommitted edit. The compiled binary and the test binaries are therefore **behavior-identical** to a build at the source commit `ddc3b0b1d23c` (zero Go source differs); only the VCS stamp changes. `Version = "0.55.0"` is fixed in source [lib/consts/consts.go:12].
 - **Toolchain** — Go **1.21.13**, matching `go.mod` (`go 1.21`, `toolchain go1.21.13`). The Go race detector requires `CGO_ENABLED=1` plus a C compiler — here **gcc 15.2.0** (captured above).
 - **Race target** — `CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race ./lib/executor/...`, the **same approach** as the `Makefile` `tests` target [Makefile:28-29] (which runs `go test -race -timeout 210s ./...` across the whole module). The race detector is the authoritative, project-native instrument for adjudicating a suspected data race.
 - **Leak tool** — `go.uber.org/goleak` v1.3.0 (already vendored). The project itself calls `goleak.Find()` [cmd/tests/tests.go:57]; the temporary harness used here calls `goleak.VerifyNone(t)` (the `defer`-friendly wrapper around the same detector) so a surviving goroutine fails the test directly.
@@ -279,18 +279,53 @@ export default function () {
 ```
 #!/usr/bin/env bash
 # Usage: run_ctrlc.sh <label> <script.js> <sigints:1|2> <delay1_s> [delay2_s]
-set -u
+# Sends one or two SIGINTs to a background `k6 run` and reports the SIGINT->exit interval.
+set -euo pipefail
+
+# --- strict, validated inputs (reject anything unexpected before doing any work) ---
+label=${1:?label required}; script=${2:?script required}; nsig=${3:?nsig required}
+d1=${4:?delay1 required}; d2=${5:-0}
+[[ $label =~ ^[A-Za-z0-9_]+$ ]]      || { echo "bad label (want [A-Za-z0-9_]+): $label" >&2; exit 2; }
+[[ $nsig  =~ ^[12]$ ]]               || { echo "bad nsig (want 1|2): $nsig" >&2; exit 2; }
+[[ $d1    =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "bad delay1 (want number): $d1" >&2; exit 2; }
+[[ $d2    =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "bad delay2 (want number): $d2" >&2; exit 2; }
+if [[ $nsig -eq 2 ]]; then awk "BEGIN{exit !($d2>0)}" || { echo "nsig=2 needs delay2>0" >&2; exit 2; }; fi
+[[ -f $script && -r $script ]]       || { echo "unreadable script: $script" >&2; exit 2; }
+
 K6=/tmp/blitzy_qna_work/k6
-label="$1"; script="$2"; nsig="$3"; d1="$4"; d2="${5:-0}"
-out="/tmp/blitzy_qna_work/captures/ctrlc_${label}.out"
+[[ -x $K6 ]] || { echo "k6 not executable: $K6" >&2; exit 2; }
+
+# --- contained, symlink-safe output under a canonical capture root ---
+root=$(cd /tmp/blitzy_qna_work && mkdir -p captures && cd captures && pwd -P)
+out="$root/ctrlc_${label}.out"                 # label is [A-Za-z0-9_]+ => no separator, no traversal
+[[ -L $out ]] && { echo "refusing to write through symlink: $out" >&2; exit 2; }
+: > "$out"
+
+# --- lifecycle: terminate ONLY our captured child/watchdog (never pkill/killall); exit promptly on a signal ---
+pid=""; wd=""
+cleanup() {
+  if [[ -n $wd  ]]; then kill -TERM "$wd" 2>/dev/null || true; fi
+  if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+}
+on_signal() { cleanup; exit 143; }
+trap cleanup EXIT
+trap on_signal INT TERM HUP
+isleep() { local s; sleep "$1" & s=$!; wait "$s" 2>/dev/null || true; }   # trap-interruptible sleep
+
 ms() { date +%s%3N; }
 t0=$(ms)
-"$K6" run --no-color "$script" >"$out" 2>&1 &
-pid=$!
-sleep "$d1"; ts1=$(ms); kill -INT "$pid"
-if [ "$nsig" -ge 2 ]; then sleep "$d2"; ts2=$(ms); kill -INT "$pid"; fi
-wait "$pid"; rc=$?; te=$(ms)
-if [ "$nsig" -ge 2 ]; then
+"$K6" run --no-color "$script" >"$out" 2>&1 & pid=$!
+( for _ in $(seq 1 600); do kill -0 "$pid" 2>/dev/null || exit 0; sleep 0.1; done
+  kill -KILL "$pid" 2>/dev/null || true ) & wd=$!   # bounded (~60s) deadline; self-exits when child ends
+
+isleep "$d1"; ts1=$(ms); kill -INT "$pid" 2>/dev/null || true
+if [[ $nsig -ge 2 ]]; then isleep "$d2"; ts2=$(ms); kill -INT "$pid" 2>/dev/null || true; fi
+
+rc=0; wait "$pid" || rc=$?; te=$(ms)
+if [[ -n $wd ]]; then kill -TERM "$wd" 2>/dev/null || true; wd=""; fi
+pid=""
+
+if [[ $nsig -ge 2 ]]; then
   printf '=== RUN %s === SIGINT #1 at t=%dms ; SIGINT #2 at t=%dms ; EXIT rc=%d time_from_SIGINT1_to_exit=%dms total=%dms\n' \
     "$label" "$((ts1-t0))" "$((ts2-t0))" "$rc" "$((te-ts1))" "$((te-t0))"
 else
@@ -838,20 +873,64 @@ export default function () {
 }
 ```
 ```
-#!/bin/bash
-# Args: rep_label
-REP="$1"
+#!/usr/bin/env bash
+# Usage: run_seg.sh <rep_label>
+# Runs the 3 non-overlapping segment instances in parallel and PROPAGATES failure
+# (exits nonzero if ANY instance failed) so a chained `&& python3 ...` gates correctly.
+set -euo pipefail
+
+REP=${1:?rep_label required}
+[[ $REP =~ ^[A-Za-z0-9_]+$ ]] || { echo "bad rep_label (want [A-Za-z0-9_]+): $REP" >&2; exit 2; }
+
+K6=./k6
+[[ -x $K6 ]]                          || { echo "k6 not executable: $K6" >&2; exit 2; }
+[[ -f seg_cli.js && -r seg_cli.js ]]  || { echo "unreadable seg_cli.js" >&2; exit 2; }
+
 SEQ="0,1/3,2/3,1"
-./k6 run seg_cli.js --execution-segment "0:1/3"   --execution-segment-sequence "$SEQ" --quiet -o json="captures/seg${REP}_0.json" > "captures/seg${REP}_0.stdout" 2>&1 &
-p0=$!
-./k6 run seg_cli.js --execution-segment "1/3:2/3" --execution-segment-sequence "$SEQ" --quiet -o json="captures/seg${REP}_1.json" > "captures/seg${REP}_1.stdout" 2>&1 &
-p1=$!
-./k6 run seg_cli.js --execution-segment "2/3:1"   --execution-segment-sequence "$SEQ" --quiet -o json="captures/seg${REP}_2.json" > "captures/seg${REP}_2.stdout" 2>&1 &
-p2=$!
-wait $p0; r0=$?
-wait $p1; r1=$?
-wait $p2; r2=$?
-echo "rep=${REP} exit codes: inst0=$r0 inst1=$r1 inst2=$r2"
+segs=("0:1/3" "1/3:2/3" "2/3:1")
+
+# --- contained, symlink-safe capture root (REP is [A-Za-z0-9_]+ => no traversal) ---
+root=$(mkdir -p captures && cd captures && pwd -P)
+for i in 0 1 2; do
+  for ext in json stdout; do
+    f="$root/seg${REP}_${i}.${ext}"
+    [[ -L $f ]] && { echo "refusing to write through symlink: $f" >&2; exit 2; }
+    : > "$f"
+  done
+done
+
+# --- lifecycle: stop ONLY our captured children (never pkill/killall); exit promptly on a signal ---
+pids=()
+cleanup() {
+  for p in "${pids[@]:-}"; do if [[ -n $p ]] && kill -0 "$p" 2>/dev/null; then kill -KILL "$p" 2>/dev/null || true; fi; done
+  for p in "${pids[@]:-}"; do if [[ -n $p ]]; then wait "$p" 2>/dev/null || true; fi; done
+}
+on_signal() { cleanup; exit 143; }
+trap cleanup EXIT
+trap on_signal INT TERM HUP
+
+for i in 0 1 2; do
+  "$K6" run seg_cli.js --execution-segment "${segs[$i]}" --execution-segment-sequence "$SEQ" \
+      --quiet -o json="$root/seg${REP}_${i}.json" > "$root/seg${REP}_${i}.stdout" 2>&1 &
+  pids[$i]=$!
+done
+
+# --- bounded (~120s) deadline; self-exits once all children end ---
+( for _ in $(seq 1 1200); do a=0; for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && a=1; done
+    [[ $a -eq 0 ]] && exit 0; sleep 0.1; done
+  for p in "${pids[@]}"; do kill -KILL "$p" 2>/dev/null || true; done ) & wd=$!
+
+# --- wait for all; aggregate child status: nonzero if ANY instance failed ---
+rc=0; codes=()
+for i in 0 1 2; do
+  c=0; wait "${pids[$i]}" || c=$?; codes[$i]=$c
+  if [[ $c -ne 0 ]]; then rc=$c; fi
+done
+kill -TERM "$wd" 2>/dev/null || true
+pids=()
+
+echo "rep=${REP} exit codes: inst0=${codes[0]} inst1=${codes[1]} inst2=${codes[2]}"
+exit "$rc"                             # propagate failure so `&& python3 ...` does not run on incomplete data
 ```
 ```
 ./run_seg.sh 1 && python3 seg_analyze.py 10 captures/seg1_0.json captures/seg1_1.json captures/seg1_2.json
@@ -861,7 +940,7 @@ echo "rep=${REP} exit codes: inst0=$r0 inst1=$r1 inst2=$r2"
 
 ### Observed output
 
-**Evidence A [OBSERVED]** — the canonical invariant test passes under `-race` (all 10 randomized sub-cases). Excerpt — the per-subtest step-by-step logs for `random00`..`random09` are voluminous (the full captured run is 120,732 lines) and are the **only** elision in this document, expressly permitted by the task rules; the framing and the complete PASS tail are unedited:
+**Evidence A [OBSERVED]** — the canonical invariant test passes under `-race` (all 10 randomized sub-cases). Excerpt — the per-subtest step-by-step logs for `random00`..`random09` are voluminous (the full captured run is 151,002 lines) and are the **only** elision in this document, expressly permitted by the task rules; the framing and the complete PASS tail are unedited:
 
 ```
 === RUN   TestSumRandomSegmentSequenceMatchesNoSegment
@@ -872,19 +951,20 @@ echo "rep=${REP} exit codes: inst0=$r0 inst1=$r1 inst2=$r2"
 === RUN   TestSumRandomSegmentSequenceMatchesNoSegment/random01
 ... [the voluminous per-subtest step-by-step logs for random00 through random09
     are the ONLY elision in this document, expressly permitted by the task rules
-    for these per-subtest logs; the full captured run is 120,732 lines] ...
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random02 (0.10s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random06 (0.62s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random08 (0.80s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random01 (1.31s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random04 (1.52s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random00 (1.61s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random03 (1.84s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random05 (2.00s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random09 (2.13s)
-    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random07 (2.25s)
+    for these per-subtest logs; the full captured run is 151,002 lines] ...
+--- PASS: TestSumRandomSegmentSequenceMatchesNoSegment (0.00s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random05 (0.46s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random02 (0.62s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random03 (0.94s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random08 (0.95s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random04 (1.68s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random00 (1.79s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random06 (1.87s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random07 (2.60s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random09 (2.79s)
+    --- PASS: TestSumRandomSegmentSequenceMatchesNoSegment/random01 (2.81s)
 PASS
-ok  	go.k6.io/k6/lib/executor	3.275s
+ok  	go.k6.io/k6/lib/executor	3.827s
 ```
 
 **Evidence B [OBSERVED]** — the harness per-instant timeline (unedited). The peak is at t=1000 ms: `seg=[4 3 3] sum=10 unsegmented=10 skew=1` — one instance shows 4 while the others show 3 (the ±1 skew the user saw), but the **sum is exactly 10 = the configured max**, and the summary reports `violations(sum!=unseg or sum>max)=0`:
@@ -1127,7 +1207,7 @@ ok  	go.k6.io/k6/lib/executor	30.778s
 
 ### Question
 
-Is the VU buffer — the bounded channel `ExecutionState.vus` [lib/execution.go:217] — leaking? (This thread also covers the buffer's exhaustion/retry/error path, since a "leak" would show as an unreturned VU or a surviving goroutine.)
+Is the VU buffer — the bounded channel `ExecutionState.vus` [lib/execution.go:217] — leaking? (This thread also covers the buffer's exhaustion/retry/error path, since a "leak" would show as an unreturned VU or a surviving goroutine. It additionally covers the two empty-buffer edges a waiter can hit — **receive-later** (a VU arrives before the retry budget is spent) and **cancel-before-return** (the run context is cancelled while a `GetPlannedVU` wait is in flight) — because those are exactly the paths where a VU could be "lost" or a goroutine could hang if the code were wrong.)
 
 ### Grounding (file:line)
 
@@ -1135,12 +1215,16 @@ _[INFERRED, code-grounded]_ — the buffer contract; runtime confirmation under 
 
 - The buffer is `vus = make(chan InitializedVU, maxPossibleVUs)` [lib/execution.go:217]. The ramping executor takes a VU with `GetPlannedVU(...)` [lib/execution.go:471] (via the `getVU` closure [ramping_vus.go:594]) and returns it with `ReturnVU(...)` [lib/execution.go:544] (via `returnVU` [ramping_vus.go:606]); active accounting is `ModCurrentlyActiveVUsCount` [lib/execution.go:276] (+1 at [ramping_vus.go:602], -1 at [ramping_vus.go:609]). A non-leaking run must return every VU it takes.
 - **Exhaustion/retry/error path.** `GetPlannedVU` [lib/execution.go:471] retries `for i := 1; i <= MaxRetriesGetPlannedVU` [lib/execution.go:472], each attempt waiting `case <-time.After(MaxTimeToWaitForPlannedVU)` [lib/execution.go:480] and logging `"Could not get a VU from the buffer for %s"` [lib/execution.go:481]; after `MaxRetriesGetPlannedVU = 5` [lib/execution.go:29] × `MaxTimeToWaitForPlannedVU = 400ms` [lib/execution.go:25] it returns the terminal error `"could not get a VU from the buffer in %s"` [lib/execution.go:485-486] rather than blocking forever — so exhaustion is a *bounded error*, not a leak.
+- **Receive-later / cancel-before-return edge.** `GetPlannedVU` [lib/execution.go:471] takes **no `context.Context`**, and its `select` [lib/execution.go:473-482] has exactly **two** cases — `case vu := <-es.vus:` [lib/execution.go:474] (a VU arrives) and `case <-time.After(MaxTimeToWaitForPlannedVU):` [lib/execution.go:480] (a 400 ms tick). There is **no `case <-ctx.Done():`**. _[INFERRED, code-grounded]_ therefore a *return* to the buffer is the only thing that promptly unblocks a waiting `GetPlannedVU`; an external context cancellation does **not**. In the ramping executor the `getVU` closure [ramping_vus.go:593] calls `GetPlannedVU(rs.executor.logger, false)` [ramping_vus.go:594] and, **only when that returns the terminal error**, logs `"Cannot get a VU from the buffer"` [ramping_vus.go:596] and calls `cancel()` [ramping_vus.go:597] — i.e. cancellation flows *outward from exhaustion*, never inward to abort the wait. Because `vuHandle.start()` [vu_handle.go:115] holds `vh.mutex` [vu_handle.go:116] while it calls `vh.getVU()` [vu_handle.go:128], a blocked borrow stalls the scheduled handler's step loop itself; the run therefore ends either when a VU is returned or when the bounded 5×400 ms budget is spent — never on an unbounded hang, and with no VU lost.
 
 ### How it was exercised (command)
 
-**Evidence A — goroutine-leak check around a full ramping-vus run.** A harness wraps a complete run in `goleak.VerifyNone(t)` (same detector the project calls as `goleak.Find()` [cmd/tests/tests.go:57]) and then drains the buffer to confirm every planned VU was returned; run plain and under `-race`:
+**Evidence A — goroutine-leak check around a full ramping-vus run.** A harness wraps a complete run in `goleak.VerifyNone(t)` (same detector the project calls as `goleak.Find()` [cmd/tests/tests.go:57]) and then drains the buffer to confirm every planned VU was returned. It was run twice — plain (no race detector) and under `-race` — with these two exact commands:
 ```
-CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -count=1 -timeout 60s -run '^TestBlitzyVUBufferLeak$' -v ./lib/executor/   # (also run WITHOUT -race)
+# (1) plain — no race detector:
+CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -count=1 -timeout 60s -run '^TestBlitzyVUBufferLeak$' -v ./lib/executor/
+# (2) under the race detector (adds -race):
+CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -count=1 -timeout 60s -run '^TestBlitzyVUBufferLeak$' -v ./lib/executor/
 ```
 
 **Evidence B — buffer exhaustion/retry/error path (harness).** A harness drains the buffer, then calls `GetPlannedVU` with no VU available to force the full retry/timeout/error path:
@@ -1151,6 +1235,16 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -count=1 -timeout 60s -run '^TestBlitz
 **Evidence C — canonical exhaustion tests (project's own).** The project already ships tests for the buffer's get/timeout behavior:
 ```
 CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -count=1 -timeout 60s -run '^TestExecutionStateGettingVUsWhenNonAreAvailable$|^TestExecutionStateGettingVUs$' -v ./lib/executor/
+```
+
+**Evidence D — empty-buffer *receive-later* edge (harness).** A harness empties the buffer, holds the only VU, then a second goroutine calls `GetPlannedVU` (which blocks) while the held VU is returned after a chosen delay — once *before* the first 400 ms tick (100 ms) and once *after* crossing one tick (451 ms). Wrapped in `goleak.VerifyNone(t)`; run under `-race`:
+```
+CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -count=1 -timeout 60s -run '^TestBlitzyAdhocReceiveLater$' -v ./lib/executor/
+```
+
+**Evidence E — *cancel-before-return* edge (harness driving the real `RampingVUs.Run`).** A harness drains the single planned VU *before* the run so the scheduled handler's `vh.start()` blocks in `getVU` → `GetPlannedVU`; it starts the real `RampingVUs.Run`, cancels the run context at 50 ms, and checks the run is still blocked at 250 ms. Two sub-cases: **no VU returned** (the run may end only when the retry budget is spent) and **VU returned after cancel** (the run unblocks on the VU's arrival). Wrapped in `goleak.VerifyNone(t)`; run under `-race`:
+```
+CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -count=1 -timeout 60s -run '^TestBlitzyAdhocCancelBeforeReturn$' -v ./lib/executor/
 ```
 
 ### Observed output
@@ -1220,9 +1314,40 @@ PASS
 ok  	go.k6.io/k6/lib/executor	5.026s
 ```
 
+**Evidence D [OBSERVED]** — the *receive-later* edge: a blocked `GetPlannedVU` receives the returned VU at 100 ms with **0** warnings, and at 451 ms with exactly **1** warning (one 400 ms tick crossed); no VU is lost, and `goleak.VerifyNone` reports no surviving goroutine. Stable across 3 runs (2 under `-race`, 1 plain; the 451 ms case read 452 ms once). Canonical `-race` capture (unedited):
+
+```
+=== RUN   TestBlitzyAdhocReceiveLater
+=== RUN   TestBlitzyAdhocReceiveLater/receive_before_timeout
+    blitzy_adhoc_test_bufedge_test.go:69: BLITZY-RECV-LATER: returnAfter=100ms elapsed=100ms err=<nil> warnings=0
+=== RUN   TestBlitzyAdhocReceiveLater/receive_after_one_timeout
+    blitzy_adhoc_test_bufedge_test.go:77: BLITZY-RECV-LATER: returnAfter=451ms elapsed=451ms err=<nil> warnings=1
+--- PASS: TestBlitzyAdhocReceiveLater (0.55s)
+    --- PASS: TestBlitzyAdhocReceiveLater/receive_before_timeout (0.10s)
+    --- PASS: TestBlitzyAdhocReceiveLater/receive_after_one_timeout (0.45s)
+PASS
+ok  	go.k6.io/k6/lib/executor	1.570s
+```
+
+**Evidence E [OBSERVED]** — the *cancel-before-return* edge, driving the real `RampingVUs.Run`. Cancelling the run context at 50 ms does **not** unblock the borrow — the run is **still blocked at 250 ms**. With no VU returned, the run ends only when the 5×400 ms budget is spent (`total=2.003s`), leaving `activeAfter=0`. When the VU is instead returned after cancellation (at 251 ms), the run unblocks **immediately on the VU's arrival** (`total=251ms`, not 2 s) — proving the *return*, not the cancel, is what frees the waiter. Stable across 3 runs (2 under `-race`, 1 plain: `2.004s`/`251ms`, `2.003s`/`251ms`); `goleak` clean. Canonical `-race` capture (unedited):
+
+```
+=== RUN   TestBlitzyAdhocCancelBeforeReturn
+=== RUN   TestBlitzyAdhocCancelBeforeReturn/no_return_cancel_does_not_unblock
+    blitzy_adhoc_test_bufedge_test.go:127: BLITZY-CANCEL no_return: cancelled@50ms; Run still blocked @250ms = true
+    blitzy_adhoc_test_bufedge_test.go:133: BLITZY-CANCEL no_return: Run returned err=<nil> total=2.003s activeAfter=0 (bounded by 5x400ms=2s retry budget)
+=== RUN   TestBlitzyAdhocCancelBeforeReturn/return_after_cancel_unblocks_on_vu_arrival
+    blitzy_adhoc_test_bufedge_test.go:164: BLITZY-CANCEL return_after_cancel: VU returned @251ms; Run returned err=<nil> total=251ms activeAfter=0 (unblocks promptly on VU arrival, NOT at 2s)
+--- PASS: TestBlitzyAdhocCancelBeforeReturn (2.56s)
+    --- PASS: TestBlitzyAdhocCancelBeforeReturn/no_return_cancel_does_not_unblock (2.15s)
+    --- PASS: TestBlitzyAdhocCancelBeforeReturn/return_after_cancel_unblocks_on_vu_arrival (0.40s)
+PASS
+ok  	go.k6.io/k6/lib/executor	3.571s
+```
+
 ### Verdict
 
-**No leak. [OBSERVED]** `goleak.VerifyNone` finds **no** surviving goroutine after a complete run, the buffer drains **8/8** (every planned VU returned), and `activeAfterRun=0` — stable plain and under `-race`. The exhaustion path is **bounded**: 5 retries × 400 ms produce 5 warnings and then the terminal error `"could not get a VU from the buffer in 2s"`, never an unbounded block. _[INFERRED, code-grounded]_ this holds because each `GetPlannedVU` [lib/execution.go:471] is balanced by a `ReturnVU` [lib/execution.go:544] and the retry loop [lib/execution.go:472-486] converts starvation into an error rather than a leak; the bounded channel [lib/execution.go:217] cannot grow, so there is nothing to leak.
+**No leak. [OBSERVED]** `goleak.VerifyNone` finds **no** surviving goroutine after a complete run, the buffer drains **8/8** (every planned VU returned), and `activeAfterRun=0` — stable plain and under `-race`. The exhaustion path is **bounded**: 5 retries × 400 ms produce 5 warnings and then the terminal error `"could not get a VU from the buffer in 2s"`, never an unbounded block. The two empty-buffer edges behave correctly and lose no VU: a *receive-later* borrow succeeds the instant a VU is returned (0 warnings at 100 ms; exactly 1 warning at 451 ms, `activeAfter=0`), and in the *cancel-before-return* case the run is **still blocked at 250 ms** after the context is cancelled at 50 ms — **cancellation alone does not promptly unblock a `GetPlannedVU` wait.** That wait is instead bounded two ways: it ends when a VU is returned (unblocking immediately on arrival, `total=251ms`) or when the 5×400 ms retry budget is spent (`total=2.003s`); either way `activeAfter=0` and `goleak` is clean. _[INFERRED, code-grounded]_ this holds because each `GetPlannedVU` [lib/execution.go:471] is balanced by a `ReturnVU` [lib/execution.go:544]; the `select` [lib/execution.go:473-482] offers only a receive `<-es.vus` [lib/execution.go:474] and a 400 ms-tick [lib/execution.go:480] case — no `ctx.Done()` — so `getVU` [ramping_vus.go:593-598] converts starvation into a *bounded* error plus an **outward** `cancel()` [ramping_vus.go:597] rather than an unbounded hang or a lost VU; the bounded channel [lib/execution.go:217] cannot grow, so there is nothing to leak. **Scope of this verdict:** it answers the leak/hang/lost-VU question — of which there is **no defect**. It is deliberately *not* a claim that a cancelled run aborts a mid-flight borrow instantly; by design it does not, and that bounded delay (≤ the 5×400 ms budget, or immediate on VU return) is the documented, correct behavior shown in Evidence E — not a defect.
 
 ---
 
@@ -1302,6 +1427,7 @@ Honest confirmation that each distinct thing the prompt asks for was exercised a
 | 5a | Race between the two handler goroutines | `-race`: graceful suite + integration + full package | 0 data races (all three) | **No race** |
 | 5b | VU buffer leak (bounded channel `vus`) | `goleak.VerifyNone` harness (plain + `-race`) | No surviving goroutine; 8/8 VUs returned | **No leak** |
 | 5b | Buffer exhaustion/retry/error path | `TestBlitzyVUBufferExhaustion` + canonical `TestExecutionStateGettingVUs*` | 5 warnings then bounded terminal error | **Bounded error, not a leak/hang** |
+| 5b | Empty-buffer *receive-later* + *cancel-before-return* edges | `TestBlitzyAdhocReceiveLater` + `TestBlitzyAdhocCancelBeforeReturn` (real `RampingVUs.Run`), `-race` + `goleak` | receive @100 ms/0 warn & @451 ms/1 warn; cancel@50 ms leaves run blocked @250 ms → ends on VU return (251 ms) or 2 s budget; `activeAfter=0` | **No VU lost; cancel alone doesn't unblock (bounded), by design** |
 | 5c | Simultaneous VU-state mutation | `TestVUHandleRace` (10k) + `StartStopRace` + `Simple` (3 sub-cases), `-race` | All pass; balance asserted | **Serialized; no lost update** |
 
 ## Overall verdict
@@ -1310,6 +1436,8 @@ Honest confirmation that each distinct thing the prompt asks for was exercised a
 
 - The "stuck" VUs (Thread 1), the handler "divergence" (Thread 2), and the segment "skew/overflow" (Thread 4) all stem from **active target vs. max-allowed ceiling** plus **deterministic rounding** — every VU converges to `stopped`, the ceiling deliberately lags the target during `gracefulRampDown`, and the per-segment counts always sum to (never exceed) the unsegmented maximum.
 - The Ctrl+C timing (Thread 3) stems from **run-level abort vs. executor `gracefulStop`** — Ctrl+C cancels the run context immediately (VUs stop in tens of ms), while the executor's `gracefulStop` window only governs a *natural* end.
-- The race (5a), leak (5b), and simultaneous-mutation (5c) questions are all answered **negative** by the project-native instruments: the Go race detector reports **0** races (up to the full package, `ok 30.778s`), `goleak` finds **no** surviving goroutine with the buffer fully drained, and the mutex-plus-atomic state machine serializes every concurrent mutation (10,000-cycle `TestVUHandleRace` passes under `-race`).
+- The race (5a), leak (5b), and simultaneous-mutation (5c) questions are all answered **negative** by the project-native instruments: the Go race detector reports **0** races (up to the full package, `ok 30.778s`), `goleak` finds **no** surviving goroutine with the buffer fully drained, and the mutex-plus-atomic state machine serializes every concurrent mutation (10,000-cycle `TestVUHandleRace` passes under `-race`). The VU-buffer edges confirm the same: **no VU is lost** when a borrow blocks on an empty buffer, whether it is later satisfied by a returned VU (immediately, with 0–1 warnings) or bounded by the 5×400 ms retry budget.
+
+**Scope of the "no defect" conclusion (Thread 5b buffer borrow).** One behavior is deliberately *not* instantaneous, and it is documented above as correct rather than as a defect: because `GetPlannedVU`'s `select` [lib/execution.go:473-482] has **no `ctx.Done()` case**, cancelling the run context does **not** abort a mid-flight VU borrow — the borrow ends only when a VU is returned or when the bounded 5×400 ms budget is spent (Evidence E, `total=2.003s` vs. immediate on return). This bounded delay is intentional, loses no VU, and leaves `activeAfter=0`; it is the single explicit caveat that scopes the otherwise unqualified "no concurrency defect" verdict — i.e. "no defect" means no leak, no lost VU, no unbounded hang, and no data race, **not** that cancellation instantly interrupts a VU borrow.
 
 Every runtime value above is **[OBSERVED]** from a labeled canonical command; every causal/design explanation is labeled **_[INFERRED, code-grounded]_** with a specific `file:line`. No source file under test was modified; the only artifacts created for this investigation were temporary and were removed, leaving the repository byte-for-byte unchanged apart from this document.
