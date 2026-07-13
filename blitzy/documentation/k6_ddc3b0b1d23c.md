@@ -1294,7 +1294,7 @@ Honest confirmation that each distinct thing the prompt asks for was exercised a
 | # | Requirement / named item | Exercised via (canonical) | Result | Verdict |
 |---|---|---|---|---|
 | 1 | "Stuck" VUs across all five states `stopped`/`starting`/`running`/`toGracefulStop`/`toHardStop` | `TestBlitzyStuckVUsAndRace` (×3, `-race`) + `TestBlitzyStateMachineTrace` | All 5 states reached; active count 0->6->0; balanced | **Not stuck** |
-| 2 | Scheduled vs. graceful handler count "divergence" | `TestBlitzyHandlerDivergence` (raw vs. graceful step lists) | Match on up; ceiling lags target on down (gap up to 5) by design | **Different quantities by design** |
+| 2 | Scheduled vs. graceful handler count "divergence" | `TestBlitzyHandlerDivergence` (raw vs. graceful step lists) | Match on up; ceiling lags target on down (gap up to 7) by design | **Different quantities by design** |
 | 3 | Ctrl+C timing vs. `gracefulStop`; **first** signal (graceful) | `k6 run` + single `SIGINT` ×5 (`run_ctrlc.sh`) | SIGINT->exit 33-210 ms; iteration interrupted | **Run-abort, not `gracefulStop`** |
 | 3 | Ctrl+C **second** signal (hard stop) | `k6 run` + double `SIGINT` (Run D) | teardown cut off; `"Aborting k6 in response to signal"` | **Hard stop via `onHardStop`** |
 | 3 | Executor `gracefulStop` window (natural end) | `k6 run natural_gs.js` (+ `-v`) | 6 s iteration finishes past 3 s stage; `2 complete` | **`gracefulStop` window (natural end only)** |
