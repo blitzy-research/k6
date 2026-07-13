@@ -14,7 +14,7 @@
 
 ### 1.1 Environment, provenance, and canonical build (grounds every observation)
 
-All observations were produced by a normal-user build of k6 from the checked-out source. The commands and their **complete, unelided** output:
+All observations were produced by a normal-user build of k6 from the checked-out source. Every command shown in this document is accompanied by its **complete, unelided** output — the two lengthy tracer test-suite runs in §3.3 are quoted in full (every line of both the normal and the `-race` run, including all 200 parallel `TestCancelledRequest` subtests each), and all 50 HTTP/2 console rows are shown in §3.5; no command's output is abbreviated with an ellipsis or deferred to an external file. The environment and canonical-build commands and their output:
 
 ```text
 $ git rev-parse --abbrev-ref HEAD
@@ -311,61 +311,61 @@ default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  4/4 shared iters
 ```
 (`lib/netext/httpext/tracer.go:L323-L325`.) `getConn` is set by `GetConn` (`lib/netext/httpext/tracer.go:L187-L189`) and `gotConn` by `GotConn` (`lib/netext/httpext/tracer.go:L261`). The explicit `gotConn > getConn` guard is *why* you get a clean `0`/near-zero rather than a negative or garbage value on reuse.
 
-**(c) Demonstration — observed distribution of the SAME unchanged input.** The **same unchanged script** from §3.1 was run **8 times** through a wrapper (`/tmp/obs/run_blocked.sh`, full source + SHA-256 in §7). Each `k6 run` is a fresh process, so iteration 0 is always cold (new connection) and iterations 1–3 are always warm (reused). **Every row below is emitted by the wrapper from k6's real `console.log` output — nothing is hand-entered.** Command and complete, unedited wrapper output:
+**(c) Demonstration — observed distribution of the SAME unchanged input.** The **same unchanged script** from §3.1 was run **8 times** through a wrapper (`/tmp/obs/run_blocked.sh`, full source + SHA-256 in §7). Each `k6 run` is a fresh process, so iteration 0 is always cold (new connection) and iterations 1–3 are always warm (reused). **Every row below is emitted by the wrapper from k6's real `console.log` output — nothing is hand-entered.** The wrapper is *failure-transparent* — `set -euo pipefail`, it validates the k6 binary and script, verifies the keep-alive server is actually listening on `127.0.0.1:18443`, prints each sample's HTTP `status`, and aborts with a non-zero exit if any request is refused or returns a non-`200` status, so a failed request can never be silently mislabeled as a cold/warm sample (full source + SHA-256 in §7.1). Command and complete, unedited wrapper output:
 
 ```text
 $ RUNS=8 bash /tmp/obs/run_blocked.sh
 ----- RUN 1 -----
-  iter=0 cold(new)   blocked=2.295794   connecting=0.122556 tls_handshaking=2.114937
-  iter=1 warm(reuse) blocked=0.004391   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.003018   connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.005759   connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=2.285196   connecting=0.12687  tls_handshaking=2.083318
+  iter=1 warm(reuse) status=200 blocked=0.003101   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.008967   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.003392   connecting=0        tls_handshaking=0       
 ----- RUN 2 -----
-  iter=0 cold(new)   blocked=2.254987   connecting=0.118464 tls_handshaking=2.074127
-  iter=1 warm(reuse) blocked=0.006219   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.003072   connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.006649   connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=2.389578   connecting=0.189048 tls_handshaking=2.122349
+  iter=1 warm(reuse) status=200 blocked=0.003674   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.003648   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.003235   connecting=0        tls_handshaking=0       
 ----- RUN 3 -----
-  iter=0 cold(new)   blocked=2.276487   connecting=0.149056 tls_handshaking=2.043619
-  iter=1 warm(reuse) blocked=0.005334   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.003214   connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.00367    connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=2.248628   connecting=0.113112 tls_handshaking=2.061002
+  iter=1 warm(reuse) status=200 blocked=0.003219   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.005883   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.002574   connecting=0        tls_handshaking=0       
 ----- RUN 4 -----
-  iter=0 cold(new)   blocked=2.61411    connecting=0.141779 tls_handshaking=2.384472
-  iter=1 warm(reuse) blocked=0.003635   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.003501   connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.003519   connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=3.093019   connecting=0.19476  tls_handshaking=2.793376
+  iter=1 warm(reuse) status=200 blocked=0.003979   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.002938   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.003889   connecting=0        tls_handshaking=0       
 ----- RUN 5 -----
-  iter=0 cold(new)   blocked=2.218474   connecting=0.119442 tls_handshaking=2.031886
-  iter=1 warm(reuse) blocked=0.002546   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.0028     connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.001852   connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=2.348173   connecting=0.14684  tls_handshaking=2.098085
+  iter=1 warm(reuse) status=200 blocked=0.003123   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.002938   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.004093   connecting=0        tls_handshaking=0       
 ----- RUN 6 -----
-  iter=0 cold(new)   blocked=2.325567   connecting=0.125629 tls_handshaking=2.134099
-  iter=1 warm(reuse) blocked=0.005141   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.00329    connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.005737   connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=3.03899    connecting=0.123686 tls_handshaking=2.832746
+  iter=1 warm(reuse) status=200 blocked=0.002563   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.00311    connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.003113   connecting=0        tls_handshaking=0       
 ----- RUN 7 -----
-  iter=0 cold(new)   blocked=2.267556   connecting=0.131316 tls_handshaking=2.06168 
-  iter=1 warm(reuse) blocked=0.002924   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.002684   connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.002457   connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=2.493585   connecting=0.16552  tls_handshaking=2.248549
+  iter=1 warm(reuse) status=200 blocked=0.010463   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.003182   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.004603   connecting=0        tls_handshaking=0       
 ----- RUN 8 -----
-  iter=0 cold(new)   blocked=2.850907   connecting=0.138489 tls_handshaking=2.625825
-  iter=1 warm(reuse) blocked=0.003243   connecting=0        tls_handshaking=0       
-  iter=2 warm(reuse) blocked=0.011873   connecting=0        tls_handshaking=0       
-  iter=3 warm(reuse) blocked=0.00277    connecting=0        tls_handshaking=0       
+  iter=0 cold(new)   status=200 blocked=2.245704   connecting=0.139909 tls_handshaking=2.04485 
+  iter=1 warm(reuse) status=200 blocked=0.002448   connecting=0        tls_handshaking=0       
+  iter=2 warm(reuse) status=200 blocked=0.002792   connecting=0        tls_handshaking=0       
+  iter=3 warm(reuse) status=200 blocked=0.003188   connecting=0        tls_handshaking=0       
 ```
 
 Aggregate statistics **(derived from the 32 raw rows above)** — 8 runs × 4 iterations = **32 samples** (8 cold + 24 warm):
 
 | Group | n | min (ms) | max (ms) | mean (ms) |
 |-------|---|----------|----------|-----------|
-| **COLD** (iter 0, new connection) | 8 | 2.218474 | 2.850907 | 2.387985 |
-| **WARM** (iters 1–3, reused) | 24 | 0.001852 | 0.011873 | 0.004137 |
+| **COLD** (iter 0, new connection) | 8 | 2.245704 | 3.093019 | 2.517859 |
+| **WARM** (iters 1–3, reused) | 24 | 0.002448 | 0.010463 | 0.003921 |
 
-- `mean(cold) / mean(warm) = 577.2×`. Every cold sample `> 2.0 ms`; every warm sample `< 0.02 ms`.
-- The **bimodal split is stable across all 8 runs** — cold is always in the ~2.2–2.9 ms band, warm always sub-0.02 ms. This is exactly the "sometimes big, sometimes near zero" you report.
+- `mean(cold) / mean(warm) = 642.1×`. Every cold sample `> 2.0 ms`; every warm sample `< 0.02 ms`.
+- The **bimodal split is stable across all 8 runs** — cold is always in the ~2.2–3.1 ms band, warm always sub-0.02 ms. This is exactly the "sometimes big, sometimes near zero" you report.
 - As a bonus, `connecting == 0` and `tls_handshaking == 0` held on **all 24/24 reused samples**, re-confirming Anomaly 1's stability.
 
 **On the "500 ms" magnitude:** locally the cold value is a few ms because DNS is trivial and the peer is loopback. **(inferred)** Over a real network the *same* `gotConn - getConn` formula also includes real DNS resolution, the TCP three-way handshake, and the full TLS handshake to a remote host, which routinely sums to hundreds of milliseconds. The formula is identical; only the network cost differs. So a 500 ms cold `blocked` next to a near-zero warm `blocked` is the expected, correct behaviour — not a defect.
@@ -391,7 +391,7 @@ Aggregate statistics **(derived from the 32 raw rows above)** — 8 runs × 4 it
 ```
 (`lib/netext/httpext/tracer.go:L327-L331`.) In `Done`, every field is read with `atomic.LoadInt64` (`lib/netext/httpext/tracer.go:L332-L338`). **(inferred — Go `net/http/httptrace` docs:** hook functions "may be called concurrently from different goroutines and some may be called after the request has completed or failed" — exactly what these atomics cover.)
 
-*Real cause (i) — a failure that precedes the needed timestamps.* When a request never establishes a connection (e.g. connection refused), the `GetConn`→`GotConn`→`ConnectStart/Done`→… hooks that would set the timestamps never fire, so `Done` returns a `Trail` whose fields are all zero and the response carries status `0`. `error_code 1212` is `tcpDialRefusedErrorCode` (`lib/netext/httpext/error_codes.go:L42`). Note carefully: the Windows connection-reset path only **maps an error code** — it does **not** clear any `Trail`:
+*Real cause (i) — a failure that leaves the needed timestamps unset.* When a request fails *before a connection is established* (e.g. connection refused), the early hooks **do** fire, in this exact order: `GetConn` sets `getConn` (`lib/netext/httpext/tracer.go:L187-L189`); `ConnectStart` sets `connectStart` via `CompareAndSwap` (`lib/netext/httpext/tracer.go:L197-L202`); then `ConnectDone` fires **with a non-nil `err`**, and because it stores its timestamp only inside an `if err == nil` guard, `connectDone` is **left at `0`** (`lib/netext/httpext/tracer.go:L213-L222`). The dial never completes, so `GotConn` and every later success hook (`TLSHandshakeStart`/`TLSHandshakeDone`, `WroteRequest`, `GotFirstResponseByte`) are **not** called — `gotConn`, the two `tlsHandshake*` fields, `wroteRequest`, and `gotFirstResponseByte` all stay `0`. `Done` then applies its per-phase zero-guards to these values: `Blocked` requires `gotConn != 0` (`lib/netext/httpext/tracer.go:L323-L325`) and `Connecting` requires **both** `connectStart != 0` **and** `connectDone != 0` (`lib/netext/httpext/tracer.go:L340-L342`), so even though `connectStart` was set, the still-zero `connectDone` forces `Connecting = 0`; every remaining phase guard fails the same way. The emitted `Trail` therefore has all seven fields `0` and the response carries status `0`. (This order — `GetConn` → `ConnectStart` → `ConnectDone(err)` → the round-trip returning an error, with `GotConn` never reached — is exactly what a stdlib `net/http/httptrace` trace against the same closed port shows, and it matches the tracer's own hook-ordering comments at `lib/netext/httpext/tracer.go:L186`, `L195-L196`, and `L210-L212`.) `error_code 1212` is `tcpDialRefusedErrorCode` (`lib/netext/httpext/error_codes.go:L42`). Note carefully: the Windows connection-reset path only **maps an error code** — it does **not** clear any `Trail`:
 
 ```go
 func getOSSyscallErrorCode(e *net.OpError, se *os.SyscallError) (errCode, string) {
@@ -429,7 +429,7 @@ func getOSSyscallErrorCode(e *net.OpError, se *os.SyscallError) (errCode, string
 ```
 (`lib/netext/httpext/tracer_test.go:L274-L278`; the 200-way parallel loop is at `L284-L291`.) Its value here is therefore as a **race-detector stress harness** (does the concurrent tracer trip `-race`?), not as a timing-correctness oracle.
 
-Both runs were executed through a wrapper (`/tmp/obs/run_tests.sh`, full source + SHA-256 in §7) that prints the **real** `$?` of each `go test` and the **real** `grep -c "WARNING: DATA RACE"` count. The wrapper output below is an **excerpt**, not the full listing: the 200 identical `TestCancelledRequest/group/*` `--- PASS` lines (and the `TestTracer/Test_#0..#2` subtests) are collapsed to a single clearly-marked `...` line, while every non-repetitive line — the `=== RUN`/`=== PAUSE` headers, all four top-level `--- PASS` lines, `PASS`, the `ok` banner, and the wrapper's genuine `*_EXIT`/`DATA_RACE_WARNINGS` lines — is quoted verbatim. The complete listings (829 lines for the normal run, 905 for the race run) are saved at `/tmp/obs/test_normal.raw.log` and `/tmp/obs/test_race.raw.log`:
+Both runs were executed through a wrapper (`/tmp/obs/run_tests.sh`, full source + SHA-256 in §7) that prints the **real** `$?` of each `go test` and the **real** `grep -c "WARNING: DATA RACE"` count. The **complete, unedited** wrapper output follows verbatim — every line of both runs, including all 200 parallel `TestCancelledRequest/group/*` subtests (each with its `=== RUN`/`=== PAUSE`/`=== CONT`/`--- PASS` lines), the four top-level `--- PASS` lines per run, the `PASS` and `ok` banners, and the wrapper's genuine `NORMAL_EXIT`/`RACE_EXIT`/`DATA_RACE_WARNINGS` lines. Nothing is collapsed to a `...` line or moved to an external file. The normal-run `go test` listing is **829 lines** (stable); the `-race` listing's length varies slightly run-to-run with goroutine scheduling (observed **896–908** lines across runs); this embedded capture's complete wrapper output is **1733 lines** (829 normal + 896 race + 8 wrapper scaffold lines):
 
 ```text
 $ bash /tmp/obs/run_tests.sh
@@ -443,13 +443,827 @@ $ go test -count=1 ./lib/netext/httpext/ -run "TestTracer|TestTracerError|TestTr
 === PAUSE TestTracerError
 === RUN   TestCancelledRequest
 === PAUSE TestCancelledRequest
-... (TestTracer/Test_#0..#2 subtests and 200 TestCancelledRequest/group/* subtests, each --- PASS) ...
+=== CONT  TestTracer
+=== CONT  TestTracerError
+=== CONT  TestTracerNegativeHttpSendingValues
+=== CONT  TestCancelledRequest
+=== RUN   TestTracer/Test_#0
+=== RUN   TestCancelledRequest/group
+=== PAUSE TestCancelledRequest/group
+=== CONT  TestCancelledRequest/group
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_0
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_0
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_1
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_1
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_2
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_2
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_3
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_3
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_4
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_4
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_5
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_5
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_6
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_6
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_7
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_7
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_8
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_8
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_9
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_9
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_10
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_10
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_11
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_11
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_12
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_12
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_13
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_13
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_14
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_14
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_15
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_15
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_16
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_16
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_17
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_17
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_18
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_18
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_19
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_19
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_20
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_20
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_21
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_21
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_22
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_22
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_23
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_23
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_24
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_24
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_25
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_25
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_26
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_26
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_27
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_27
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_28
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_28
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_29
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_29
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_30
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_30
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_31
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_31
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_32
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_32
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_33
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_33
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_34
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_34
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_35
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_35
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_36
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_36
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_37
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_37
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_38
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_38
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_39
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_39
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_40
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_40
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_41
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_41
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_42
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_42
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_43
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_43
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_44
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_44
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_45
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_45
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_46
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_46
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_47
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_47
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_48
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_48
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_49
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_49
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_50
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_50
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_51
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_51
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_52
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_52
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_53
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_53
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_54
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_54
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_55
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_55
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_56
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_56
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_57
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_57
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_58
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_58
+=== RUN   TestTracer/Test_#1
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_59
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_59
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_60
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_60
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_61
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_61
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_62
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_62
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_63
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_63
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_64
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_64
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_65
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_65
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_66
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_66
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_67
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_67
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_68
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_68
+=== RUN   TestTracer/Test_#2
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_69
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_69
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_70
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_70
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_71
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_71
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_72
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_72
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_73
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_73
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_74
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_74
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_75
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_75
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_76
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_76
 --- PASS: TestTracer (0.01s)
+    --- PASS: TestTracer/Test_#0 (0.00s)
+    --- PASS: TestTracer/Test_#1 (0.00s)
+    --- PASS: TestTracer/Test_#2 (0.00s)
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_77
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_77
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_78
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_78
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_79
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_79
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_80
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_80
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_81
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_81
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_82
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_82
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_83
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_83
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_84
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_84
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_85
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_85
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_86
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_86
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_87
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_87
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_88
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_88
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_89
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_89
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_90
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_90
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_91
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_91
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_92
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_92
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_93
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_93
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_94
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_94
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_95
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_95
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_96
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_96
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_97
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_97
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_98
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_98
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_99
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_99
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_100
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_100
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_101
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_101
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_102
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_102
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_103
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_103
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_104
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_104
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_105
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_105
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_106
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_106
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_107
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_107
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_108
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_108
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_109
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_109
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_110
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_110
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_111
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_111
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_112
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_112
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_113
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_113
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_114
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_114
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_115
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_115
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_116
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_116
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_117
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_117
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_118
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_118
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_119
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_119
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_120
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_120
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_121
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_121
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_122
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_122
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_123
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_123
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_124
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_124
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_125
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_125
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_126
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_126
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_127
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_127
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_128
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_128
 --- PASS: TestTracerNegativeHttpSendingValues (0.01s)
---- PASS: TestTracerError (0.06s)
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_129
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_129
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_130
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_130
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_131
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_131
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_132
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_132
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_133
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_133
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_134
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_134
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_135
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_135
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_136
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_136
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_137
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_137
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_138
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_138
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_139
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_139
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_140
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_140
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_141
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_141
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_142
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_142
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_143
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_143
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_144
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_144
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_145
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_145
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_146
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_146
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_147
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_147
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_148
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_148
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_149
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_149
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_150
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_150
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_151
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_151
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_152
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_152
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_153
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_153
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_154
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_154
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_155
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_155
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_156
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_156
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_157
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_157
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_158
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_158
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_159
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_159
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_160
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_160
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_161
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_161
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_162
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_162
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_163
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_163
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_164
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_164
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_165
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_165
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_166
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_166
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_167
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_167
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_168
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_168
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_169
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_169
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_170
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_170
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_171
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_171
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_172
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_172
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_173
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_173
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_174
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_174
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_175
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_175
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_176
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_176
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_177
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_177
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_178
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_178
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_179
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_179
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_180
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_180
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_181
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_181
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_182
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_182
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_183
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_183
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_184
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_184
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_185
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_185
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_186
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_186
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_187
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_187
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_188
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_188
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_189
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_189
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_190
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_190
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_191
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_191
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_192
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_192
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_193
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_193
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_194
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_194
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_195
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_195
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_196
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_196
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_197
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_197
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_198
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_198
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_199
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_199
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_156
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_0
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_155
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_178
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_189
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_160
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_194
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_157
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_159
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_197
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_71
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_77
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_193
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_191
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_162
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_196
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_166
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_188
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_192
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_187
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_177
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_185
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_176
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_184
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_175
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_182
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_174
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_181
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_161
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_153
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_58
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_53
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_43
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_33
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_173
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_54
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_158
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_154
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_171
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_170
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_169
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_168
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_167
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_76
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_75
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_74
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_73
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_72
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_199
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_198
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_195
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_186
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_183
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_70
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_69
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_68
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_67
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_66
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_65
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_64
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_63
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_62
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_61
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_60
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_59
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_190
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_56
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_48
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_55
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_46
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_47
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_42
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_44
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_36
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_45
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_49
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_32
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_34
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_38
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_35
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_41
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_28
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_30
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_31
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_29
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_57
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_24
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_26
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_37
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_25
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_172
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_50
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_40
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_52
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_2
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_13
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_23
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_27
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_22
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_19
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_20
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_10
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_21
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_3
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_17
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_12
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_16
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_14
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_15
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_11
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_18
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_5
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_9
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_8
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_7
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_163
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_1
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_6
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_39
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_51
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_165
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_4
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_179
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_180
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_164
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_152
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_151
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_150
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_148
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_146
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_147
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_144
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_143
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_149
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_140
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_142
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_145
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_138
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_141
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_137
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_136
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_134
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_132
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_127
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_133
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_126
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_131
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_129
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_125
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_139
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_128
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_130
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_124
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_121
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_120
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_119
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_122
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_117
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_116
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_111
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_123
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_118
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_114
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_113
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_112
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_105
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_109
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_107
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_115
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_135
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_101
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_108
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_100
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_98
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_99
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_103
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_96
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_104
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_110
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_102
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_106
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_94
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_91
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_93
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_90
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_88
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_87
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_97
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_92
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_86
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_85
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_83
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_89
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_82
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_80
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_84
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_78
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_95
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_81
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_79
+2026/07/13 22:29:53 http: TLS handshake error from 127.0.0.1:60560: remote error: tls: bad certificate
+--- PASS: TestTracerError (0.12s)
 --- PASS: TestCancelledRequest (0.00s)
+    --- PASS: TestCancelledRequest/group (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_12 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_192 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_39 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_191 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_193 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_170 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_176 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_157 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_187 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_196 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_174 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_43 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_1 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_54 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_164 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_23 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_74 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_155 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_77 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_166 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_0 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_162 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_178 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_194 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_189 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_153 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_69 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_7 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_198 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_70 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_175 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_131 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_129 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_199 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_19 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_177 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_73 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_53 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_158 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_161 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_188 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_171 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_154 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_169 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_173 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_185 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_197 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_156 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_160 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_182 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_159 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_71 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_5 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_181 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_72 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_183 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_33 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_46 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_106 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_167 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_75 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_128 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_47 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_58 (0.08s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_63 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_59 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_125 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_184 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_139 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_60 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_13 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_56 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_190 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_168 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_195 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_76 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_67 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_61 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_68 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_65 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_48 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_17 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_64 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_55 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_62 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_45 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_28 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_4 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_3 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_25 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_49 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_16 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_18 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_180 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_35 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_37 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_34 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_30 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_41 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_29 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_40 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_11 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_38 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_42 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_148 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_57 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_150 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_2 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_15 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_44 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_20 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_172 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_186 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_147 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_146 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_27 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_21 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_50 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_51 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_36 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_32 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_52 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_143 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_114 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_66 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_10 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_132 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_133 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_124 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_126 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_127 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_112 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_165 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_24 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_113 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_8 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_142 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_14 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_140 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_163 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_151 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_22 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_6 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_120 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_130 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_121 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_123 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_105 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_117 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_116 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_111 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_118 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_149 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_138 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_141 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_137 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_134 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_136 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_9 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_145 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_144 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_152 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_31 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_179 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_122 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_109 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_102 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_94 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_97 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_85 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_83 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_87 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_92 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_107 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_93 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_103 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_110 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_86 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_99 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_98 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_88 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_84 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_79 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_104 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_95 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_78 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_100 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_119 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_89 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_101 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_115 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_81 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_135 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_90 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_96 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_80 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_108 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_91 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_82 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_26 (0.07s)
 PASS
-ok  	go.k6.io/k6/lib/netext/httpext	0.180s
+ok  	go.k6.io/k6/lib/netext/httpext	0.299s
 NORMAL_EXIT=0
 
 ### RACE RUN
@@ -462,13 +1276,894 @@ $ CGO_ENABLED=1 go test -race -count=1 ./lib/netext/httpext/ -run "TestTracer|Te
 === PAUSE TestTracerError
 === RUN   TestCancelledRequest
 === PAUSE TestCancelledRequest
-... (same subtests, each --- PASS; interleaved with benign "http: TLS handshake error ... use of closed network connection" server logs from the cancelled requests) ...
---- PASS: TestTracer (0.03s)
+=== CONT  TestTracer
+=== CONT  TestCancelledRequest
+=== CONT  TestTracerNegativeHttpSendingValues
+=== CONT  TestTracerError
+=== RUN   TestCancelledRequest/group
+=== PAUSE TestCancelledRequest/group
+=== CONT  TestCancelledRequest/group
+=== RUN   TestTracer/Test_#0
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_0
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_0
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_1
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_1
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_2
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_2
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_3
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_3
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_4
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_4
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_5
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_5
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_6
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_6
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_7
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_7
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_8
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_8
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_9
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_9
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_10
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_10
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_11
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_11
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_12
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_12
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_13
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_13
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_14
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_14
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_15
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_15
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_16
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_16
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_17
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_17
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_18
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_18
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_19
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_19
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_20
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_20
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_21
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_21
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_22
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_22
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_23
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_23
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_24
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_24
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_25
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_25
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_26
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_26
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_27
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_27
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_28
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_28
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_29
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_29
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_30
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_30
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_31
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_31
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_32
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_32
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_33
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_33
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_34
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_34
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_35
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_35
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_36
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_36
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_37
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_37
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_38
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_38
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_39
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_39
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_40
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_40
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_41
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_41
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_42
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_42
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_43
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_43
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_44
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_44
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_45
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_45
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_46
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_46
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_47
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_47
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_48
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_48
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_49
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_49
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_50
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_50
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_51
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_51
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_52
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_52
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_53
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_53
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_54
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_54
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_55
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_55
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_56
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_56
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_57
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_57
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_58
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_58
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_59
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_59
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_60
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_60
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_61
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_61
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_62
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_62
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_63
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_63
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_64
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_64
+=== RUN   TestTracer/Test_#1
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_65
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_65
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_66
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_66
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_67
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_67
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_68
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_68
+=== RUN   TestTracer/Test_#2
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_69
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_69
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_70
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_70
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_71
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_71
+--- PASS: TestTracer (0.02s)
+    --- PASS: TestTracer/Test_#0 (0.02s)
+    --- PASS: TestTracer/Test_#1 (0.00s)
+    --- PASS: TestTracer/Test_#2 (0.00s)
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_72
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_72
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_73
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_73
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_74
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_74
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_75
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_75
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_76
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_76
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_77
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_77
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_78
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_78
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_79
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_79
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_80
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_80
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_81
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_81
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_82
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_82
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_83
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_83
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_84
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_84
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_85
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_85
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_86
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_86
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_87
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_87
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_88
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_88
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_89
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_89
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_90
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_90
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_91
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_91
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_92
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_92
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_93
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_93
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_94
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_94
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_95
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_95
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_96
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_96
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_97
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_97
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_98
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_98
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_99
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_99
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_100
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_100
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_101
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_101
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_102
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_102
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_103
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_103
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_104
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_104
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_105
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_105
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_106
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_106
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_107
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_107
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_108
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_108
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_109
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_109
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_110
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_110
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_111
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_111
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_112
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_112
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_113
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_113
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_114
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_114
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_115
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_115
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_116
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_116
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_117
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_117
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_118
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_118
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_119
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_119
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_120
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_120
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_121
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_121
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_122
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_122
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_123
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_123
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_124
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_124
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_125
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_125
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_126
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_126
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_127
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_127
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_128
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_128
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_129
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_129
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_130
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_130
 --- PASS: TestTracerNegativeHttpSendingValues (0.04s)
---- PASS: TestTracerError (1.50s)
---- PASS: TestCancelledRequest (0.42s)
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_131
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_131
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_132
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_132
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_133
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_133
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_134
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_134
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_135
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_135
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_136
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_136
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_137
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_137
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_138
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_138
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_139
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_139
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_140
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_140
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_141
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_141
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_142
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_142
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_143
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_143
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_144
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_144
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_145
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_145
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_146
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_146
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_147
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_147
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_148
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_148
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_149
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_149
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_150
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_150
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_151
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_151
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_152
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_152
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_153
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_153
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_154
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_154
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_155
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_155
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_156
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_156
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_157
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_157
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_158
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_158
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_159
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_159
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_160
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_160
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_161
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_161
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_162
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_162
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_163
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_163
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_164
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_164
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_165
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_165
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_166
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_166
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_167
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_167
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_168
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_168
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_169
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_169
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_170
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_170
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_171
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_171
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_172
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_172
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_173
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_173
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_174
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_174
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_175
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_175
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_176
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_176
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_177
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_177
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_178
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_178
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_179
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_179
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_180
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_180
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_181
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_181
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_182
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_182
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_183
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_183
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_184
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_184
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_185
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_185
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_186
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_186
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_187
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_187
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_188
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_188
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_189
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_189
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_190
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_190
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_191
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_191
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_192
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_192
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_193
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_193
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_194
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_194
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_195
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_195
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_196
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_196
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_197
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_197
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_198
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_198
+=== RUN   TestCancelledRequest/group/TestCancelledRequest_199
+=== PAUSE TestCancelledRequest/group/TestCancelledRequest_199
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_193
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_187
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_185
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_136
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_163
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_141
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_169
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_140
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_120
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_15
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_147
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_94
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_27
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_67
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_164
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_105
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_175
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_116
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_148
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_129
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_98
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_88
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_47
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_78
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_93
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_192
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_195
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_191
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_190
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_188
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_189
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_184
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_186
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_183
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_182
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_180
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_179
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_199
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_178
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_177
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_181
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_197
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_194
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_157
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_198
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_158
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_117
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_153
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_155
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_151
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_139
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_156
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_0
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_137
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_173
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_171
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_109
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_145
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_112
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_108
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_144
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_87
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_125
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_106
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_121
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_104
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_29
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_43
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_26
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_7
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_149
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_115
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_50
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_154
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_103
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_174
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_152
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_176
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_150
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_32
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_118
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_92
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_165
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_113
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_90
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_146
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_170
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_89
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_110
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_107
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_196
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_86
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_114
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_119
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_111
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_134
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_126
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_130
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_142
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_143
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_135
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_131
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_138
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_42
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_123
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_133
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_83
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_122
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_132
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_128
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_82
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_124
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_64
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_69
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_167
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_166
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_62
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_168
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_172
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_95
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_96
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_59
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_77
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_60
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_81
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_58
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_80
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_99
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_79
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_57
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_75
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_97
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_55
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_102
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_84
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_54
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_20
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_10
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_53
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_39
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_52
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_23
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_40
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_51
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_38
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_14
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_12
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_25
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_37
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_11
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_24
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_41
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_36
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_13
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_30
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_22
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_35
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_46
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_49
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_31
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_72
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_160
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_61
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_56
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_74
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_34
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_73
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_33
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_48
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_4
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_66
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_71
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_6
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_127
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_9
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_3
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_68
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_2
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_5
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_1
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_8
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_65
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_44
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_63
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_28
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_21
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_45
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_162
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_161
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_159
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_100
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_16
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_18
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_85
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_17
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_19
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_76
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_70
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_91
+=== CONT  TestCancelledRequest/group/TestCancelledRequest_101
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41036: write tcp 127.0.0.1:41151->127.0.0.1:41036: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40966: write tcp 127.0.0.1:41151->127.0.0.1:40966: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40738: write tcp 127.0.0.1:41151->127.0.0.1:40738: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41080: read tcp 127.0.0.1:41151->127.0.0.1:41080: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40448: read tcp 127.0.0.1:41151->127.0.0.1:40448: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40402: read tcp 127.0.0.1:41151->127.0.0.1:40402: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40804: write tcp 127.0.0.1:41151->127.0.0.1:40804: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40226: write tcp 127.0.0.1:41151->127.0.0.1:40226: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40620: write tcp 127.0.0.1:41151->127.0.0.1:40620: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40740: write tcp 127.0.0.1:41151->127.0.0.1:40740: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40606: write tcp 127.0.0.1:41151->127.0.0.1:40606: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40996: write tcp 127.0.0.1:41151->127.0.0.1:40996: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40736: write tcp 127.0.0.1:41151->127.0.0.1:40736: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40910: write tcp 127.0.0.1:41151->127.0.0.1:40910: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40882: write tcp 127.0.0.1:41151->127.0.0.1:40882: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40786: write tcp 127.0.0.1:41151->127.0.0.1:40786: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40858: write tcp 127.0.0.1:41151->127.0.0.1:40858: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40822: write tcp 127.0.0.1:41151->127.0.0.1:40822: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41040: write tcp 127.0.0.1:41151->127.0.0.1:41040: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41226: write tcp 127.0.0.1:41151->127.0.0.1:41226: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41022: write tcp 127.0.0.1:41151->127.0.0.1:41022: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41316: write tcp 127.0.0.1:41151->127.0.0.1:41316: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41084: write tcp 127.0.0.1:41151->127.0.0.1:41084: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40768: write tcp 127.0.0.1:41151->127.0.0.1:40768: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40780: write tcp 127.0.0.1:41151->127.0.0.1:40780: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41344: write tcp 127.0.0.1:41151->127.0.0.1:41344: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41100: write tcp 127.0.0.1:41151->127.0.0.1:41100: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40646: write tcp 127.0.0.1:41151->127.0.0.1:40646: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40328: write tcp 127.0.0.1:41151->127.0.0.1:40328: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41144: write tcp 127.0.0.1:41151->127.0.0.1:41144: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40848: write tcp 127.0.0.1:41151->127.0.0.1:40848: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41332: write tcp 127.0.0.1:41151->127.0.0.1:41332: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40808: write tcp 127.0.0.1:41151->127.0.0.1:40808: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41200: write tcp 127.0.0.1:41151->127.0.0.1:41200: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41096: write tcp 127.0.0.1:41151->127.0.0.1:41096: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41318: write tcp 127.0.0.1:41151->127.0.0.1:41318: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40504: write tcp 127.0.0.1:41151->127.0.0.1:40504: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41120: write tcp 127.0.0.1:41151->127.0.0.1:41120: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40814: write tcp 127.0.0.1:41151->127.0.0.1:40814: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40690: write tcp 127.0.0.1:41151->127.0.0.1:40690: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41188: write tcp 127.0.0.1:41151->127.0.0.1:41188: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40212: write tcp 127.0.0.1:41151->127.0.0.1:40212: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40442: write tcp 127.0.0.1:41151->127.0.0.1:40442: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41300: write tcp 127.0.0.1:41151->127.0.0.1:41300: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40310: write tcp 127.0.0.1:41151->127.0.0.1:40310: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40992: write tcp 127.0.0.1:41151->127.0.0.1:40992: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41028: write tcp 127.0.0.1:41151->127.0.0.1:41028: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41258: write tcp 127.0.0.1:41151->127.0.0.1:41258: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41108: write tcp 127.0.0.1:41151->127.0.0.1:41108: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:37160: remote error: tls: bad certificate
+--- PASS: TestTracerError (1.54s)
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41010: write tcp 127.0.0.1:41151->127.0.0.1:41010: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40896: write tcp 127.0.0.1:41151->127.0.0.1:40896: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41284: write tcp 127.0.0.1:41151->127.0.0.1:41284: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41134: write tcp 127.0.0.1:41151->127.0.0.1:41134: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41176: write tcp 127.0.0.1:41151->127.0.0.1:41176: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41056: write tcp 127.0.0.1:41151->127.0.0.1:41056: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40728: write tcp 127.0.0.1:41151->127.0.0.1:40728: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41072: write tcp 127.0.0.1:41151->127.0.0.1:41072: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41270: write tcp 127.0.0.1:41151->127.0.0.1:41270: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41014: write tcp 127.0.0.1:41151->127.0.0.1:41014: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41162: write tcp 127.0.0.1:41151->127.0.0.1:41162: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41248: write tcp 127.0.0.1:41151->127.0.0.1:41248: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41212: write tcp 127.0.0.1:41151->127.0.0.1:41212: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41348: write tcp 127.0.0.1:41151->127.0.0.1:41348: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41152: write tcp 127.0.0.1:41151->127.0.0.1:41152: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40922: write tcp 127.0.0.1:41151->127.0.0.1:40922: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:40954: write tcp 127.0.0.1:41151->127.0.0.1:40954: use of closed network connection
+2026/07/13 22:29:56 http: TLS handshake error from 127.0.0.1:41266: write tcp 127.0.0.1:41151->127.0.0.1:41266: use of closed network connection
+--- PASS: TestCancelledRequest (0.37s)
+    --- PASS: TestCancelledRequest/group (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_141 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_148 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_105 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_192 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_67 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_27 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_15 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_136 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_195 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_169 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_180 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_164 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_183 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_98 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_182 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_94 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_191 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_78 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_47 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_181 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_179 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_193 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_140 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_129 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_197 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_116 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_178 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_120 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_155 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_147 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_88 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_188 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_163 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_190 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_117 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_157 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_151 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_185 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_106 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_199 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_186 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_194 (0.08s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_7 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_145 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_108 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_87 (0.01s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_149 (0.02s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_137 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_109 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_93 (0.07s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_144 (0.03s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_171 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_26 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_115 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_50 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_104 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_43 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_112 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_125 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_177 (0.14s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_175 (0.15s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_184 (0.14s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_156 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_114 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_0 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_153 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_196 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_139 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_107 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_198 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_158 (0.11s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_187 (0.18s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_189 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_174 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_176 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_32 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_150 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_118 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_146 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_110 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_90 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_152 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_92 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_121 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_29 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_165 (0.15s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_154 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_103 (0.35s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_173 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_89 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_170 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_86 (0.06s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_113 (0.00s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_133 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_42 (0.09s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_138 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_135 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_131 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_142 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_126 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_130 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_143 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_83 (0.14s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_122 (0.14s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_132 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_123 (0.14s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_134 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_124 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_69 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_59 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_172 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_96 (0.05s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_167 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_166 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_168 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_64 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_82 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_62 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_128 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_119 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_111 (0.04s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_95 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_60 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_99 (0.07s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_81 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_80 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_79 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_57 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_58 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_97 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_75 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_55 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_102 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_84 (0.10s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_20 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_10 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_54 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_53 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_52 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_39 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_23 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_40 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_51 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_38 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_12 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_11 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_25 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_37 (0.16s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_14 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_24 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_41 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_36 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_13 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_30 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_22 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_35 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_46 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_49 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_31 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_72 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_160 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_56 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_74 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_34 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_73 (0.20s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_33 (0.26s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_48 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_4 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_66 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_127 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_71 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_9 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_3 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_6 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_68 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_61 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_2 (0.30s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_1 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_28 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_100 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_63 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_65 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_45 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_21 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_85 (0.24s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_159 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_44 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_17 (0.24s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_19 (0.24s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_16 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_161 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_76 (0.28s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_162 (0.25s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_18 (0.24s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_70 (0.28s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_91 (0.29s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_77 (0.45s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_101 (0.29s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_8 (0.34s)
+        --- PASS: TestCancelledRequest/group/TestCancelledRequest_5 (0.45s)
 PASS
-ok  	go.k6.io/k6/lib/netext/httpext	3.302s
+ok  	go.k6.io/k6/lib/netext/httpext	2.598s
 RACE_EXIT=0
 DATA_RACE_WARNINGS=0
 ```
@@ -711,27 +2406,71 @@ $ K6_NO_USAGE_REPORT=true ./k6 run /tmp/obs/script_h2.js
      scenarios: (100.00%) 1 scenario, 50 max VUs, 10m30s max duration (incl. graceful stop):
               * default: 50 iterations shared among 50 VUs (maxDuration: 10m0s, gracefulStop: 30s)
 
-time="2026-07-13T17:27:30Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.23131,\"tls_handshaking\":6.04388,\"blocked\":8.095646,\"waiting\":7.129171}" source=console
-time="2026-07-13T17:27:30Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.163585,\"tls_handshaking\":6.307273,\"blocked\":6.614521,\"waiting\":8.60138}" source=console
-time="2026-07-13T17:27:30Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":2.035289,\"tls_handshaking\":6.016815,\"blocked\":8.1293,\"waiting\":8.147222}" source=console
-time="2026-07-13T17:27:30Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.509165,\"tls_handshaking\":5.837088,\"blocked\":7.457123,\"waiting\":6.965674}" source=console
-time="2026-07-13T17:27:30Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":3.651048,\"tls_handshaking\":6.84869,\"blocked\":10.614353,\"waiting\":6.051396}" source=console
-... (45 further HTTP/2.0 console rows omitted here; all 50 are proto:"HTTP/2.0" / status:200, each with a distinct non-zero connecting and tls_handshaking — full 50-row capture: /tmp/obs/h2.log) ...
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.790467,\"tls_handshaking\":4.579378,\"blocked\":6.464882,\"waiting\":9.245493}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.152022,\"tls_handshaking\":10.848648,\"blocked\":11.076371,\"waiting\":6.179862}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":4.800279,\"tls_handshaking\":7.830803,\"blocked\":12.696483,\"waiting\":5.679485}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.619784,\"tls_handshaking\":9.633198,\"blocked\":12.528312,\"waiting\":5.845562}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.782427,\"tls_handshaking\":4.845908,\"blocked\":6.902727,\"waiting\":11.667084}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":4.70588,\"tls_handshaking\":7.841166,\"blocked\":12.62011,\"waiting\":5.997424}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.098536,\"tls_handshaking\":4.506734,\"blocked\":4.927055,\"waiting\":11.679733}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.156793,\"tls_handshaking\":6.764853,\"blocked\":7.024474,\"waiting\":12.951624}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.249215,\"tls_handshaking\":8.190068,\"blocked\":10.349049,\"waiting\":6.923207}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":2.237977,\"tls_handshaking\":10.480498,\"blocked\":12.813928,\"waiting\":7.060139}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.624651,\"tls_handshaking\":10.364509,\"blocked\":12.276943,\"waiting\":16.887799}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.52536,\"tls_handshaking\":10.509848,\"blocked\":12.121164,\"waiting\":16.810934}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.834914,\"tls_handshaking\":7.763734,\"blocked\":9.66302,\"waiting\":22.046876}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.10515,\"tls_handshaking\":11.415903,\"blocked\":13.217301,\"waiting\":15.595529}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.80626,\"tls_handshaking\":15.070697,\"blocked\":16.945536,\"waiting\":16.009006}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.094809,\"tls_handshaking\":9.566494,\"blocked\":14.334859,\"waiting\":18.651735}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.330489,\"tls_handshaking\":7.285066,\"blocked\":7.989143,\"waiting\":21.737834}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.095967,\"tls_handshaking\":11.229479,\"blocked\":11.398428,\"waiting\":15.919307}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.133033,\"tls_handshaking\":15.991981,\"blocked\":16.456438,\"waiting\":14.480915}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.286346,\"tls_handshaking\":16.33066,\"blocked\":16.728869,\"waiting\":14.483116}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.216486,\"tls_handshaking\":14.124681,\"blocked\":16.195842,\"waiting\":17.318244}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.43351,\"tls_handshaking\":15.98619,\"blocked\":16.62754,\"waiting\":14.563705}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.084735,\"tls_handshaking\":11.453417,\"blocked\":13.227931,\"waiting\":15.795541}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.06385,\"tls_handshaking\":6.998525,\"blocked\":7.134738,\"waiting\":22.116414}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":2.216714,\"tls_handshaking\":13.845577,\"blocked\":16.182185,\"waiting\":15.456752}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.072594,\"tls_handshaking\":11.151539,\"blocked\":11.314441,\"waiting\":17.056029}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.219548,\"tls_handshaking\":9.530611,\"blocked\":9.823217,\"waiting\":23.926164}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.890567,\"tls_handshaking\":7.94558,\"blocked\":9.92099,\"waiting\":21.952053}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.148363,\"tls_handshaking\":8.446705,\"blocked\":8.672934,\"waiting\":23.153449}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.468278,\"tls_handshaking\":15.705511,\"blocked\":18.484873,\"waiting\":13.274395}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.175344,\"tls_handshaking\":15.695942,\"blocked\":15.962059,\"waiting\":15.944266}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.637712,\"tls_handshaking\":16.078826,\"blocked\":17.645582,\"waiting\":12.9916}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.218722,\"tls_handshaking\":14.738736,\"blocked\":15.401842,\"waiting\":14.298124}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.411728,\"tls_handshaking\":14.758994,\"blocked\":16.287448,\"waiting\":12.694544}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.15269,\"tls_handshaking\":18.634853,\"blocked\":18.907279,\"waiting\":15.476742}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.421708,\"tls_handshaking\":16.041604,\"blocked\":17.558061,\"waiting\":16.551672}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.110109,\"tls_handshaking\":15.773143,\"blocked\":15.998539,\"waiting\":16.544976}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.321307,\"tls_handshaking\":16.152248,\"blocked\":16.595653,\"waiting\":14.164821}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.82925,\"tls_handshaking\":14.878261,\"blocked\":16.825849,\"waiting\":16.777772}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.769888,\"tls_handshaking\":15.286045,\"blocked\":17.204974,\"waiting\":21.874502}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.817367,\"tls_handshaking\":31.106232,\"blocked\":33.214399,\"waiting\":5.79248}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.123396,\"tls_handshaking\":31.768144,\"blocked\":32.024555,\"waiting\":39.942864}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.109072,\"tls_handshaking\":7.30926,\"blocked\":7.681236,\"waiting\":23.590045}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.085094,\"tls_handshaking\":18.761793,\"blocked\":21.604369,\"waiting\":17.372501}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.466428,\"tls_handshaking\":29.865989,\"blocked\":31.50483,\"waiting\":40.209142}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":1.999733,\"tls_handshaking\":18.175012,\"blocked\":20.265058,\"waiting\":18.848091}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.083875,\"tls_handshaking\":10.925294,\"blocked\":11.067133,\"waiting\":18.017629}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.157873,\"tls_handshaking\":18.19228,\"blocked\":21.043963,\"waiting\":53.662968}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.093939,\"tls_handshaking\":16.673364,\"blocked\":16.832238,\"waiting\":53.568077}" source=console
+time="2026-07-13T22:35:48Z" level=info msg="{\"proto\":\"HTTP/2.0\",\"status\":200,\"connecting\":0.09133,\"tls_handshaking\":28.795123,\"blocked\":34.607342,\"waiting\":35.597071}" source=console
 
-     data_received..................: 81 kB 1.2 MB/s
-     data_sent......................: 26 kB 386 kB/s
-     http_req_blocked...............: avg=13.86ms  min=6.36ms  med=12.16ms max=57.02ms  p(90)=17.89ms  p(95)=18.41ms 
-     http_req_connecting............: avg=1.28ms   min=64.75µs med=1.41ms  max=3.96ms   p(90)=2ms      p(95)=2.97ms  
-     http_req_duration..............: avg=13.03ms  min=5.68ms  med=7.57ms  max=46.06ms  p(90)=40.08ms  p(95)=40.62ms 
-       { expected_response:true }...: avg=13.03ms  min=5.68ms  med=7.57ms  max=46.06ms  p(90)=40.08ms  p(95)=40.62ms 
+     data_received..................: 81 kB 1.1 MB/s
+     data_sent......................: 26 kB 339 kB/s
+     http_req_blocked...............: avg=15.08ms  min=4.92ms  med=14.86ms  max=34.6ms  p(90)=21.1ms   p(95)=31.79ms 
+     http_req_connecting............: avg=906.43µs min=63.85µs med=267.78µs max=4.8ms   p(90)=1.9ms    p(95)=2.22ms  
+     http_req_duration..............: avg=18.94ms  min=5.79ms  med=16.9ms   max=53.9ms  p(90)=30.15ms  p(95)=41.07ms 
+       { expected_response:true }...: avg=18.94ms  min=5.79ms  med=16.9ms   max=53.9ms  p(90)=30.15ms  p(95)=41.07ms 
      http_req_failed................: 0.00% 0 out of 50
-     http_req_receiving.............: avg=57.91µs  min=16.04µs med=31.23µs max=863.69µs p(90)=58.16µs  p(95)=124.8µs 
-     http_req_sending...............: avg=863.93µs min=44.61µs med=72.94µs max=39.2ms   p(90)=111.34µs p(95)=148.69µs
-     http_req_tls_handshaking.......: avg=12.11ms  min=4.62ms  med=10.26ms max=56.82ms  p(90)=16.58ms  p(95)=17.08ms 
-     http_req_waiting...............: avg=12.11ms  min=5.6ms   med=7.24ms  max=41.17ms  p(90)=39.8ms   p(95)=40.23ms 
-     http_reqs......................: 50    745.889945/s
-     iteration_duration.............: avg=28.19ms  min=14.73ms med=20.64ms max=66.53ms  p(90)=58.9ms   p(95)=60.3ms  
-     iterations.....................: 50    745.889945/s
+     http_req_receiving.............: avg=665.6µs  min=27.16µs med=77.7µs   max=5.37ms  p(90)=2.11ms   p(95)=2.33ms  
+     http_req_sending...............: avg=192µs    min=41.98µs med=75.62µs  max=5.73ms  p(90)=115.73µs p(95)=126.41µs
+     http_req_tls_handshaking.......: avg=13.51ms  min=4.5ms   med=12.64ms  max=31.76ms p(90)=18.64ms  p(95)=29.38ms 
+     http_req_waiting...............: avg=18.08ms  min=5.67ms  med=15.97ms  max=53.66ms p(90)=25.09ms  p(95)=40.08ms 
+     http_reqs......................: 50    655.475197/s
+     iteration_duration.............: avg=39.97ms  min=16.3ms  med=33.38ms  max=76ms    p(90)=74.85ms  p(95)=75.36ms 
+     iterations.....................: 50    655.475197/s
 
 
 running (00m00.1s), 00/50 VUs, 50 complete and 0 interrupted iterations
@@ -944,8 +2683,8 @@ ed7741067ad636900ae1dcddefc3370f9f315f9d8614a8a5e025fc1006a16aaa  script_timeout
 864e733f17b4810421385687abba388289dee2e2f0a73aea33841e93e87fa19c  script_scale.js
 2bfe9ec9efa7b35199f5b52ac666c3dcf9cfc9ca695c864909f29da7a5ee0f38  script_h2.js
 f84f944c53d8ca6fbba242aea67fdfedc34dee006481d9a7b7448fcdb91ce125  script_h2_reuse.js
-a93d8a787db7fb6f0befefd2fcf2aa275e2284f0c60a91558635617577ced5fb  run_blocked.sh
-cc31a79f94e24261346cc5ba2364eba9b2b489cf757167869b9ace2a1ea35846  run_tests.sh
+2fe4504e5149a36037f55c028e056b8dc0b349372880343d660ba7fc016c8c68  run_blocked.sh
+8bb33fdad89dbd458d5131ca639c8128ea4edc899a4744e5cf62eeac807b60f4  run_tests.sh
 ```
 
 **`go.mod`**
@@ -1212,26 +2951,56 @@ export default function () {
 ```bash
 #!/usr/bin/env bash
 # Runs the SAME unchanged script.js N times through the compiled k6 binary and
-# prints, per run, the per-iteration blocked/connecting/tls_handshaking values
-# parsed from k6's console.log lines. Every printed row is emitted BY THIS
-# SCRIPT from the real k6 output (nothing hand-entered).
-set -u
+# prints, per run, the per-iteration status/blocked/connecting/tls_handshaking
+# values parsed from k6's console.log lines. Every printed row is emitted BY
+# THIS SCRIPT from the real k6 output (nothing hand-entered). The wrapper is
+# failure-transparent: `set -euo pipefail` plus explicit checks make it exit
+# non-zero on any missing prerequisite, an invalid RUNS, a k6 run failure, or
+# any parsed row whose HTTP status is not 200 -- so a failed/refused request can
+# never be silently mislabeled as a valid cold/warm reuse sample.
+set -euo pipefail
+
 K6="${K6:-/tmp/blitzy/k6/blitzy-33959ffe-5247-4d91-b493-c741bbdb5309_6fd566/k6}"
 SCRIPT="${SCRIPT:-/tmp/obs/script.js}"
 RUNS="${RUNS:-8}"
+
+# Prerequisite and argument validation.
+[ -x "$K6" ]     || { echo "FATAL: k6 binary not found/executable at: $K6" >&2; exit 2; }
+[ -r "$SCRIPT" ] || { echo "FATAL: script not found/readable at: $SCRIPT" >&2; exit 2; }
+[[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: RUNS must be a positive integer, got: '$RUNS'" >&2; exit 2; }
+# script.js targets the keep-alive server on :18443; require it to be listening
+# so a connection-refused failure cannot masquerade as a valid sample.
+(exec 3<>/dev/tcp/127.0.0.1/18443) 2>/dev/null || { echo "FATAL: keep-alive server not listening on 127.0.0.1:18443" >&2; exit 2; }
+
 for run in $(seq 1 "$RUNS"); do
-  out="$(K6_NO_USAGE_REPORT=true "$K6" run "$SCRIPT" 2>&1)"
+  if ! out="$(K6_NO_USAGE_REPORT=true "$K6" run "$SCRIPT" 2>&1)"; then
+    echo "FATAL: k6 run failed on run $run" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
   echo "----- RUN $run -----"
+  # Parser prints one row per console.log JSON line INCLUDING status, and exits
+  # non-zero if no row parsed or if ANY row's status != 200. set -o pipefail
+  # then propagates that non-zero out of the pipeline and aborts the wrapper.
   printf '%s\n' "$out" | python3 -c '
 import sys, re, json
+n = 0; bad = 0
 for line in sys.stdin:
     m = re.search(r"msg=\"(\{.*\})\"\s", line)
     if not m:
         continue
     d = json.loads(m.group(1).replace("\\\"", "\""))
+    n += 1
+    status = d.get("status")
+    if status != 200:
+        bad += 1
     tag = "cold(new)" if d["iter"] == 0 else "warm(reuse)"
-    print("  iter=%d %-11s blocked=%-10s connecting=%-8s tls_handshaking=%-8s"
-          % (d["iter"], tag, d["blocked"], d["connecting"], d["tls_handshaking"]))
+    print("  iter=%d %-11s status=%-3s blocked=%-10s connecting=%-8s tls_handshaking=%-8s"
+          % (d["iter"], tag, status, d["blocked"], d["connecting"], d["tls_handshaking"]))
+if n == 0:
+    sys.stderr.write("FATAL: no k6 console rows parsed\n"); sys.exit(3)
+if bad:
+    sys.stderr.write("FATAL: %d non-200 row(s) in success campaign\n" % bad); sys.exit(4)
 '
 done
 ```
@@ -1244,26 +3013,47 @@ done
 # printing the REAL exit code of each `go test` invocation and the REAL count of
 # "WARNING: DATA RACE" banners grepped from the race run's own output. The
 # EXIT/COUNT lines below are emitted by this wrapper from $? and grep -c, so they
-# are genuine, not hand-entered.
-set -u
+# are genuine, not hand-entered. The wrapper is failure-transparent: `set -euo
+# pipefail` plus explicit checks validate the toolchain and repository, and the
+# wrapper exits non-zero if either run fails or any data race is seen -- so a
+# broken build or a real race can never be reported as a pass.
+set -euo pipefail
+
 REPO="${REPO:-/tmp/blitzy/k6/blitzy-33959ffe-5247-4d91-b493-c741bbdb5309_6fd566}"
-cd "$REPO"
+NORMAL_LOG="${NORMAL_LOG:-/tmp/obs/test_normal.raw.log}"
+RACE_LOG="${RACE_LOG:-/tmp/obs/test_race.raw.log}"
 TESTS='TestTracer|TestTracerError|TestTracerNegativeHttpSendingValues|TestCancelledRequest'
+
+# Prerequisite validation.
+command -v go >/dev/null 2>&1 || { echo "FATAL: go toolchain not on PATH" >&2; exit 2; }
+[ -d "$REPO/lib/netext/httpext" ] || { echo "FATAL: httpext package not found under REPO=$REPO" >&2; exit 2; }
+cd "$REPO"
 
 echo "### NORMAL RUN"
 echo "\$ go test -count=1 ./lib/netext/httpext/ -run \"$TESTS\" -v"
-go test -count=1 ./lib/netext/httpext/ -run "$TESTS" -v 2>&1 | tee /tmp/obs/test_normal.raw.log
+set +e
+go test -count=1 ./lib/netext/httpext/ -run "$TESTS" -v 2>&1 | tee "$NORMAL_LOG"
 NORMAL_EXIT=${PIPESTATUS[0]}
+set -e
 echo "NORMAL_EXIT=$NORMAL_EXIT"
 
 echo ""
 echo "### RACE RUN"
 echo "\$ CGO_ENABLED=1 go test -race -count=1 ./lib/netext/httpext/ -run \"$TESTS\" -v"
-CGO_ENABLED=1 go test -race -count=1 ./lib/netext/httpext/ -run "$TESTS" -v 2>&1 | tee /tmp/obs/test_race.raw.log
+set +e
+CGO_ENABLED=1 go test -race -count=1 ./lib/netext/httpext/ -run "$TESTS" -v 2>&1 | tee "$RACE_LOG"
 RACE_EXIT=${PIPESTATUS[0]}
-DATA_RACE_WARNINGS=$(grep -c 'WARNING: DATA RACE' /tmp/obs/test_race.raw.log)
+set -e
+DATA_RACE_WARNINGS=$(grep -c 'WARNING: DATA RACE' "$RACE_LOG" || true)
 echo "RACE_EXIT=$RACE_EXIT"
 echo "DATA_RACE_WARNINGS=$DATA_RACE_WARNINGS"
+
+# Failure propagation: exit non-zero if either run failed or any data race was
+# detected, so the wrapper's own exit status cannot report a pass on failure.
+if [ "$NORMAL_EXIT" -ne 0 ] || [ "$RACE_EXIT" -ne 0 ] || [ "$DATA_RACE_WARNINGS" -ne 0 ]; then
+  echo "FATAL: test failure or data race (NORMAL_EXIT=$NORMAL_EXIT RACE_EXIT=$RACE_EXIT DATA_RACE_WARNINGS=$DATA_RACE_WARNINGS)" >&2
+  exit 1
+fi
 ```
 
 ### 7.2 Server lifecycle (start, readiness, explicit-PID teardown)
@@ -1292,8 +3082,9 @@ $ kill -TERM 105589   # then wait until kill -0 fails
 PID 105589 terminated
 $ kill -TERM 109712   # then wait until kill -0 fails
 PID 109712 terminated
-$ (ss -ltnp 2>/dev/null || netstat -ltnp) | grep -E ':18443|:18444' || echo "both 18443 and 18444 FREE"
-both 18443 and 18444 FREE
+$ for p in 18443 18444; do (echo >/dev/tcp/127.0.0.1/$p) 2>/dev/null && echo "port $p STILL LISTENING" || echo "port $p FREE"; done
+port 18443 FREE
+port 18444 FREE
 ```
 
 ### 7.3 Repository-integrity and final-cleanup evidence
