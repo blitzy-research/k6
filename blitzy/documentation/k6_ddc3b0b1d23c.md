@@ -7,7 +7,7 @@ This document answers three onboarding questions about how k6 tracks metrics dur
 **Evidence conventions used throughout:**
 
 - A fenced block introduced by a `$ <command>` line contains the **complete, unedited** output of that command.
-- Where a block shows only part of a longer output (one failing test out of many, or a filtered slice of a JSON stream), it is **explicitly labelled as an excerpt** and is preceded by the **exact extraction command** (`grep`/`sed`) used to produce it. The complete raw logs are retained outside the repository checkout under `/tmp/k6_investigation/`.
+- Where a block shows only part of a longer output (one failing test out of many, or a filtered slice of a JSON stream), it is **explicitly labelled as an excerpt** and is preceded by the **exact extraction command** (`grep`/`sed`) used to produce it. During the investigation the complete raw logs were captured outside the repository checkout under `/tmp/k6_investigation/`; the outputs relevant to each claim were extracted into this document, and the raw logs themselves were then removed (see [Read-only compliance](#methodology)).
 - Statements that could not be directly observed and are reasoned from the source are **explicitly prefixed with `(inferred)`**.
 - No file in the repository was modified to produce this document; see [Methodology](#methodology) and [Caveats](#caveats-and-boundaries).
 
@@ -20,10 +20,20 @@ All observations were produced with the project's **canonical** commands and def
 $ go build
 ```
 
-The resulting binary reports this version banner (the `version` sub-command):
+The resulting binary reports its version banner via the `version` sub-command. Built from the **source under investigation** — the branch's base commit `ddc3b0b1d2` — it prints:
 ```text
+$ ./k6 version
 k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
+
+The `commit/…` field is **not** hard-coded: it is the abbreviated git `HEAD` revision (the first 10 characters of `vcs.revision`) that the Go toolchain stamps into the binary at build time via `debug.ReadBuildInfo()`, with a `-dirty` suffix appended only when the working tree is modified — see `FullVersion()` at [lib/consts/consts.go:L16-L53], the 10-character truncation at [lib/consts/consts.go:L30-L35], and the `-dirty` suffix at [lib/consts/consts.go:L48-L50]. The banner shown above is therefore **anchored to the fixed base commit `ddc3b0b1d2`** — the commit this branch (`k6_ddc3b0b1d23c`) is named after, and the commit every `file:line` citation in this document was verified against — so it does not drift as this answer document is committed. It is reproducible by building that exact commit (`git checkout ddc3b0b1d2 && go build && ./k6 version`).
+
+Because the answer document is itself committed on top of that base, a canonical `go build` in the delivered branch checkout stamps the **current branch `HEAD`** instead of the base commit. For example, while this document was being written the working tree carried the uncommitted edit, and the same command reported:
+```text
+$ ./k6 version
+k6 v0.55.0 (commit/d9f7d83278-dirty, go1.23.12, linux/amd64)
+```
+Here `d9f7d83278` is the abbreviated branch `HEAD` (the base commit plus the answer-document commits) and `-dirty` reflects the pending edit; both clear to a plain `commit/<HEAD-10>` once the tree is committed and clean. Only the `commit/…` field tracks `HEAD` — the semantic version (`v0.55.0`), the Go version (`go1.23.12`), and the platform (`linux/amd64`) are unaffected, and no answer-document commit modifies any cited k6 source file.
 
 **Test suite** (the `tests` make target, [Makefile:L28-L29]) — this exact invocation is the health baseline for Question 1:
 ```text
@@ -41,11 +51,11 @@ $ go version
 go version go1.23.12 linux/amd64
 ```
 
-**Read-only compliance.** The repository was not modified to gather any of this evidence. The minimal test script, the JSON output, and every captured log live **outside** the checkout, under `/tmp/k6_investigation/`, and are removed after use. The working tree was confirmed clean before and after with `git status --porcelain` (empty output = clean); the read-only confirmation for the `k6 run --out json` step is shown inline in [§3.3](#33-corroborating-the-count-with-the-json-output).
+**Read-only compliance.** The repository was not modified to gather any of this evidence. The minimal test script, the JSON output, and every captured log were kept **outside** the checkout, under `/tmp/k6_investigation/`, and were removed after the relevant outputs had been extracted into this document. No cited k6 source file was changed: `git status --porcelain` reports only this answer document (`blitzy/documentation/k6_ddc3b0b1d23c.md`) as modified, and shows a fully clean tree once it is committed; the read-only confirmation for the `k6 run --out json` step is shown inline in [§3.3](#33-corroborating-the-count-with-the-json-output).
 
 ## Question 1 — Project health: how many tests pass vs. fail, and are any skipped or broken?
 
-**Short answer.** Under the canonical `go test -race -timeout 210s ./...` invocation on `linux/amd64`, the suite **does not fully pass**: it exits non-zero, with a small, **non-deterministic** set of packages failing on timing/TLS/OCSP/network-sensitive assertions. Across repeated cold runs the totals are stable in a narrow band — **82 packages total, 28 of which contain no tests, and typically 46–48 passing (`ok`) with 6–8 failing (`FAIL`)**; because the exact failing count is timing-sensitive under `-race` it widens to **45–48 `ok` / 6–9 `FAIL`** across environments (the `82`/`28` invariants never change). A small **stable core** — `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `lib/executor` — fails in essentially every cold run. One test is **skipped at runtime** in this environment (`TestTC39`); several other skips are Windows-only guards that do not fire on Linux. No test is "broken" in the sense of failing to compile — every package builds; the failures are runtime assertion/timing failures. The evidence follows.
+**Short answer.** Under the canonical `go test -race -timeout 210s ./...` invocation on `linux/amd64`, the suite **does not fully pass**: it exits non-zero, with a small, **non-deterministic** set of packages failing on timing/TLS/OCSP/network-sensitive assertions. Across six repeated cold runs the totals are stable in a narrow band — **82 packages total, 28 of which contain no tests (so 54 contain tests), with 45–47 passing (`ok`) and 7–9 failing (`FAIL`)** (most commonly **46 `ok` / 8 `FAIL`**; the `82`/`28`/`54` invariants never change). A small **stable core** — `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `js/modules/k6/timers`, `lib/executor` — fails in every cold run. One test is **skipped at runtime** in this environment (`TestTC39`); several other skips are Windows-only guards that do not fire on Linux. No test is "broken" in the sense of failing to compile — every package builds; the failures are runtime assertion/timing failures. The evidence follows.
 
 ### 1.1 Suite scope (how many tests there are)
 
@@ -82,48 +92,94 @@ $ go clean -testcache
 $ time go test -race -timeout 210s ./...
 ```
 
+Six complete cold runs were captured in this session (raw logs under `/tmp/k6_investigation/run1.log` … `run6.log`). Each run's package outcomes were tallied directly from its own log with:
+
+```text
+$ ok=$(grep -cE '^ok\s+go\.k6\.io' runN.log)
+$ fail=$(grep -cE '^FAIL\s+go\.k6\.io' runN.log)
+$ notest=$(grep -cE 'no test files' runN.log)
+```
+
 Observed results (each row is one complete cold run; `total = ok + FAIL + no-test`):
 
-| Run | Cache | Wall time | `ok` | `FAIL` | `no test files` | total |
-|-----|-------|-----------|------|--------|-----------------|-------|
-| A   | cleared | 85.6s | 46 | 8 | 28 | 82 |
-| B   | cleared | 83.1s | 48 | 6 | 28 | 82 |
-| C   | cleared | 83.6s | 46 | 8 | 28 | 82 |
-| D   | cleared | 83.1s | 46 | 8 | 28 | 82 |
+| Run | Cache | Wall time | `ok` | `FAIL` | `no test files` | total | exit |
+|-----|-------|-----------|------|--------|-----------------|-------|------|
+| 1   | cleared | 88.2s | 46 | 8 | 28 | 82 | 1 |
+| 2   | cleared | 84.7s | 47 | 7 | 28 | 82 | 1 |
+| 3   | cleared | 84.4s | 46 | 8 | 28 | 82 | 1 |
+| 4   | cleared | 85.7s | 46 | 8 | 28 | 82 | 1 |
+| 5   | cleared | 83.9s | 45 | 9 | 28 | 82 | 1 |
+| 6   | cleared | 85.4s | 46 | 8 | 28 | 82 | 1 |
 
-The counts are **stable within a narrow band and the invariants hold in every run**: `no test files` is always **28** and the package total is always **82**; passing packages range over **{46, 47, 48}** and failing packages over **{6, 7, 8}** (`ok` and `FAIL` move together against the fixed 28 no-test packages). Four additional earlier cold runs fall in the same band, and a cache-warm run completes faster (~69s) with counts in the same band. Six further cold runs re-confirmed the band — their per-run `ok`/`FAIL` were `46/8`, `46/8`, `48/6`, `47/7`, `47/7`, `46/8` (each ~82–85s wall; `no test files` = 28 and total = 82 in every one). The suite's overall exit status is **non-zero (`exit=1`)** whenever any package fails.
+The counts are **stable within a narrow band and the invariants hold in every run**. Across all six runs `no test files` is always **28**, the package total is always **82**, and the tested-package count (`ok + FAIL`) is always **54** — so passing packages range over **{45, 46, 47}** and failing packages over **{7, 8, 9}**, moving together against the fixed 28 no-test packages. The most common split was **46 `ok` / 8 `FAIL`** (runs 1, 3, 4, 6 — four of the six); the extremes observed were **47/7** (run 2) and **45/9** (run 5). Wall time ranged **83.9s–88.2s**. The suite's overall exit status is **non-zero (`exit=1`) in every run**, because at least one package fails every time.
 
-The exact number of failing packages is **environment-sensitive under the `-race` detector**: the failures are timing-tail flakes (see [§1.4](#14-which-packages-fail-and-why)), so which of them happen to trip in a given cold run shifts with machine load. Combining the **six unloaded** cold runs above with **four further** cold runs of the *same* canonical command under deliberate CPU contention (a busier-machine condition) — **ten** in total — the split ranged over `ok` **45–48** / `FAIL` **6–9**. The six unloaded runs all stayed within `ok` 46–48 / `FAIL` 6–8; the CPU-contention runs pushed one extra timing-sensitive package into the failing set — for example `js` and `cloudapi` (`cloudapi` failing on `TestStreamLogsToLogger/Success`) — yielding `FAIL` **9** / `ok` **45** in **2 of 4** loaded runs. The robust band to expect is therefore **`ok` 45–48 / `FAIL` 6–9**, with the invariants (`28` no-test, `82` total) unaffected in every one of the ten runs — the stable characteristic is the mid-40s-`ok` / single-digit-`FAIL` split against the fixed 28 no-test packages, not any single exact pair.
+The *exact* number of failing packages is **environment-sensitive under the `-race` detector**: the failing packages are dominated by timing-tail flakes (see [§1.4](#14-which-packages-fail-and-why)), so which of them happen to trip in a given cold run shifts by ±1–2 packages with machine scheduling. Across these six runs a **stable core of five packages failed in all six** (`execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `js/modules/k6/timers`, `lib/executor`); three more failed in five of the six (`js/eventloop`, `js`, `cmd/tests`); and two more failed only occasionally (`lib` in two of six, `lib/netext/httpext` in one of six) — the full per-package frequency is tabulated in [§1.4](#14-which-packages-fail-and-why). The robust band to expect from this environment is therefore **`ok` 45–47 / `FAIL` 7–9**, with the invariants (`28` no-test, `82` total, `54` tested, `exit=1`) holding in every run — the stable characteristic is the mid-40s-`ok` / single-digit-`FAIL` split against the fixed 28 no-test packages, not any single exact pair.
 
 ### 1.3 Complete per-package result listing
 
-The following is the **complete** list of the 82 per-package status lines from cold run A (46 `ok`, 8 `FAIL`, 28 `? … no test files`). It is an **excerpt only in that the interleaved failure detail was filtered out** — the raw log is retained at `/tmp/k6_investigation/timed/full_A.log`. Extracted with the exact command shown, which selects only the three status markers `go test` prints:
+The following is the **complete** list of the 82 per-package status lines from cold run 1 (46 `ok`, 8 `FAIL`, 28 `? … no test files`; the raw log was captured at `/tmp/k6_investigation/run1.log`). It is an **excerpt only in that the interleaved failure detail was filtered out**. Extracted with the exact command shown — which selects only the three status markers `go test` prints, then sorts by package path for readability:
 
 Extraction command:
 ```text
-$ grep -E '^(ok |FAIL|\?)[[:space:]]+go\.k6\.io/k6' /tmp/k6_investigation/timed/full_A.log
+$ grep -E '^(ok |FAIL|\?)[[:space:]]+go\.k6\.io/k6' /tmp/k6_investigation/run1.log | sort -t$'\t' -k2
 ```
 
 Complete 82-line output (tabs are `go test`'s own column separators):
 ```text
 ?   	go.k6.io/k6	[no test files]
-ok  	go.k6.io/k6/api	1.595s
+ok  	go.k6.io/k6/api	1.498s
+ok  	go.k6.io/k6/api/v1	1.532s
 ?   	go.k6.io/k6/api/v1/client	[no test files]
+ok  	go.k6.io/k6/cloudapi	1.528s
+ok  	go.k6.io/k6/cloudapi/insights	1.235s
 ?   	go.k6.io/k6/cloudapi/insights/proto	[no test files]
 ?   	go.k6.io/k6/cloudapi/insights/proto/v1/common	[no test files]
 ?   	go.k6.io/k6/cloudapi/insights/proto/v1/ingester	[no test files]
 ?   	go.k6.io/k6/cloudapi/insights/proto/v1/k6	[no test files]
 ?   	go.k6.io/k6/cloudapi/insights/proto/v1/trace	[no test files]
+ok  	go.k6.io/k6/cmd	6.449s
 ?   	go.k6.io/k6/cmd/state	[no test files]
+ok  	go.k6.io/k6/cmd/tests	19.774s
 ?   	go.k6.io/k6/cmd/tests/events	[no test files]
+ok  	go.k6.io/k6/errext	1.221s
 ?   	go.k6.io/k6/errext/exitcodes	[no test files]
+ok  	go.k6.io/k6/event	1.624s
+FAIL	go.k6.io/k6/execution	10.235s
 ?   	go.k6.io/k6/execution/local	[no test files]
 ?   	go.k6.io/k6/ext	[no test files]
+FAIL	go.k6.io/k6/js	15.308s
+ok  	go.k6.io/k6/js/common	1.288s
+ok  	go.k6.io/k6/js/compiler	2.086s
+FAIL	go.k6.io/k6/js/eventloop	1.682s
 ?   	go.k6.io/k6/js/modules	[no test files]
+ok  	go.k6.io/k6/js/modules/k6	4.337s
+ok  	go.k6.io/k6/js/modules/k6/crypto	2.182s
+ok  	go.k6.io/k6/js/modules/k6/crypto/x509	1.921s
+ok  	go.k6.io/k6/js/modules/k6/data	10.402s
+ok  	go.k6.io/k6/js/modules/k6/encoding	1.885s
+ok  	go.k6.io/k6/js/modules/k6/execution	1.821s
 ?   	go.k6.io/k6/js/modules/k6/experimental	[no test files]
+ok  	go.k6.io/k6/js/modules/k6/experimental/csv	2.082s
+ok  	go.k6.io/k6/js/modules/k6/experimental/fs	2.020s
+ok  	go.k6.io/k6/js/modules/k6/experimental/streams	1.320s
+FAIL	go.k6.io/k6/js/modules/k6/grpc	64.962s
+ok  	go.k6.io/k6/js/modules/k6/html	3.920s
 ?   	go.k6.io/k6/js/modules/k6/html/gen	[no test files]
+FAIL	go.k6.io/k6/js/modules/k6/http	12.510s
+ok  	go.k6.io/k6/js/modules/k6/metrics	2.384s
+FAIL	go.k6.io/k6/js/modules/k6/timers	9.661s
+ok  	go.k6.io/k6/js/modules/k6/ws	5.895s
 ?   	go.k6.io/k6/js/modulestest	[no test files]
+ok  	go.k6.io/k6/js/promises	1.382s
+ok  	go.k6.io/k6/js/tc39	1.421s
+FAIL	go.k6.io/k6/lib	1.519s
 ?   	go.k6.io/k6/lib/consts	[no test files]
+FAIL	go.k6.io/k6/lib/executor	32.235s
+ok  	go.k6.io/k6/lib/fsext	1.219s
+ok  	go.k6.io/k6/lib/netext	2.580s
+ok  	go.k6.io/k6/lib/netext/grpcext	1.520s
+ok  	go.k6.io/k6/lib/netext/httpext	8.363s
+ok  	go.k6.io/k6/lib/strvals	1.218s
 ?   	go.k6.io/k6/lib/testutils	[no test files]
 ?   	go.k6.io/k6/lib/testutils/grpcservice	[no test files]
 ?   	go.k6.io/k6/lib/testutils/httpmultibin	[no test files]
@@ -133,117 +189,79 @@ ok  	go.k6.io/k6/api	1.595s
 ?   	go.k6.io/k6/lib/testutils/minirunner	[no test files]
 ?   	go.k6.io/k6/lib/testutils/mockoutput	[no test files]
 ?   	go.k6.io/k6/lib/testutils/mockresolver	[no test files]
+ok  	go.k6.io/k6/lib/trace	1.422s
+ok  	go.k6.io/k6/lib/types	1.585s
+ok  	go.k6.io/k6/loader	3.999s
+ok  	go.k6.io/k6/log	1.381s
+ok  	go.k6.io/k6/metrics	1.719s
+ok  	go.k6.io/k6/metrics/engine	1.683s
+ok  	go.k6.io/k6/output	3.219s
+ok  	go.k6.io/k6/output/cloud	1.919s
+ok  	go.k6.io/k6/output/cloud/expv2	2.922s
+ok  	go.k6.io/k6/output/cloud/expv2/integration	4.798s
 ?   	go.k6.io/k6/output/cloud/expv2/pbcloud	[no test files]
+ok  	go.k6.io/k6/output/cloud/insights	1.518s
+ok  	go.k6.io/k6/output/csv	1.581s
+ok  	go.k6.io/k6/output/influxdb	1.699s
+ok  	go.k6.io/k6/output/json	1.760s
+ok  	go.k6.io/k6/ui	1.362s
 ?   	go.k6.io/k6/ui/console	[no test files]
-ok  	go.k6.io/k6/api/v1	1.734s
-ok  	go.k6.io/k6/cloudapi	1.700s
-ok  	go.k6.io/k6/cloudapi/insights	1.335s
-ok  	go.k6.io/k6/cmd	10.318s
-FAIL	go.k6.io/k6/cmd/tests	19.297s
-ok  	go.k6.io/k6/errext	1.201s
-ok  	go.k6.io/k6/event	1.499s
-FAIL	go.k6.io/k6/execution	10.944s
-FAIL	go.k6.io/k6/js	12.830s
-ok  	go.k6.io/k6/js/common	1.601s
-ok  	go.k6.io/k6/js/compiler	1.901s
-ok  	go.k6.io/k6/js/eventloop	3.299s
-ok  	go.k6.io/k6/js/modules/k6	4.692s
-ok  	go.k6.io/k6/js/modules/k6/crypto	2.000s
-ok  	go.k6.io/k6/js/modules/k6/crypto/x509	1.902s
-ok  	go.k6.io/k6/js/modules/k6/data	11.349s
-ok  	go.k6.io/k6/js/modules/k6/encoding	1.303s
-ok  	go.k6.io/k6/js/modules/k6/execution	1.900s
-ok  	go.k6.io/k6/js/modules/k6/experimental/csv	1.899s
-ok  	go.k6.io/k6/js/modules/k6/experimental/fs	1.899s
-ok  	go.k6.io/k6/js/modules/k6/experimental/streams	1.302s
-FAIL	go.k6.io/k6/js/modules/k6/grpc	65.033s
-ok  	go.k6.io/k6/js/modules/k6/html	3.836s
-FAIL	go.k6.io/k6/js/modules/k6/http	13.466s
-ok  	go.k6.io/k6/js/modules/k6/metrics	2.598s
-FAIL	go.k6.io/k6/js/modules/k6/timers	10.580s
-ok  	go.k6.io/k6/js/modules/k6/ws	5.900s
-ok  	go.k6.io/k6/js/promises	1.500s
-ok  	go.k6.io/k6/js/tc39	1.497s
-FAIL	go.k6.io/k6/lib	1.703s
-FAIL	go.k6.io/k6/lib/executor	31.214s
-ok  	go.k6.io/k6/lib/fsext	1.301s
-ok  	go.k6.io/k6/lib/netext	2.401s
-ok  	go.k6.io/k6/lib/netext/grpcext	1.697s
-ok  	go.k6.io/k6/lib/netext/httpext	8.966s
-ok  	go.k6.io/k6/lib/strvals	1.201s
-ok  	go.k6.io/k6/lib/trace	1.335s
-ok  	go.k6.io/k6/lib/types	1.602s
-ok  	go.k6.io/k6/loader	4.463s
-ok  	go.k6.io/k6/log	1.498s
-ok  	go.k6.io/k6/metrics	1.603s
-ok  	go.k6.io/k6/metrics/engine	1.536s
-ok  	go.k6.io/k6/output	3.299s
-ok  	go.k6.io/k6/output/cloud	1.897s
-ok  	go.k6.io/k6/output/cloud/expv2	2.897s
-ok  	go.k6.io/k6/output/cloud/expv2/integration	6.000s
-ok  	go.k6.io/k6/output/cloud/insights	1.535s
-ok  	go.k6.io/k6/output/csv	1.600s
-ok  	go.k6.io/k6/output/influxdb	1.698s
-ok  	go.k6.io/k6/output/json	1.596s
-ok  	go.k6.io/k6/ui	1.298s
-ok  	go.k6.io/k6/ui/pb	1.496s
-ok  	go.k6.io/k6/usage	1.200s
+ok  	go.k6.io/k6/ui/pb	1.361s
+ok  	go.k6.io/k6/usage	1.262s
 ```
 
 ### 1.4 Which packages fail, and why
 
-Aggregating the `FAIL` lines across **eight** independent cold runs (`go clean -testcache` before each) gives failure frequency per package. The extraction command and its complete output:
+Aggregating the `FAIL` lines across the **six** independent cold runs of [§1.2](#12-passfail-counts-and-their-stability-across-runs) (`go clean -testcache` before each) gives the failure frequency per package. The extraction command and its complete output:
 
 ```text
-$ for lg in run1 run3 run4 run5 timed/full_A timed/full_B timed/full_C timed/full_D; do \
-    grep -E '^FAIL' /tmp/k6_investigation/$lg.log | awk '{print $2}'; done \
+$ for i in 1 2 3 4 5 6; do \
+    grep -E '^FAIL\s+go\.k6\.io' /tmp/k6_investigation/run$i.log | awk '{print $2}'; done \
   | sed 's#go.k6.io/k6/##' | sort | uniq -c | sort -rn
-      8 lib/executor
-      8 js/modules/k6/http
-      8 js/modules/k6/grpc
-      8 execution
-      7 js/eventloop
-      7 js
-      6 cmd/tests
-      3 js/modules/k6/timers
-      2 lib/netext/httpext
-      1 output/cloud/expv2
-      1 lib
+      6 lib/executor
+      6 js/modules/k6/timers
+      6 js/modules/k6/http
+      6 js/modules/k6/grpc
+      6 execution
+      5 js/eventloop
+      5 js
+      5 cmd/tests
+      2 lib
+      1 lib/netext/httpext
 ```
 
 This yields a clear structure:
 
-- **Stable core — fails in _every_ cold run (8/8):** `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `lib/executor`.
-- **Frequent flaky (7/8):** `js/eventloop`, `js`.
-- **Intermittent (6/8):** `cmd/tests`.
-- **Rare flaky:** `js/modules/k6/timers` (3/8), `lib/netext/httpext` (2/8), `output/cloud/expv2` (1/8), `lib` (1/8).
+- **Stable core — fails in _every_ cold run (6/6):** `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `js/modules/k6/timers`, `lib/executor`.
+- **Frequent flaky (5/6):** `js/eventloop`, `js`, `cmd/tests`.
+- **Rare flaky:** `lib` (2/6), `lib/netext/httpext` (1/6).
 
-_These per-package frequencies are environment-specific and should be read as indicative, not fixed._ They are the tallies from the eight cold runs above; because the failures are `-race` timing-tail flakes, the set of packages that trips in any given run shifts with machine load. Re-running the suite six more times here reproduced the same overall band but somewhat different exact frequencies — e.g. `execution` failed in 5 of those 6 runs rather than in every one, while the top-level `lib` package again flaked exactly once (on `TestVUStateTagsSafeConcurrent`, discussed in the closing note of this section). Only the invariants (28 no-test, 82 total) and the broad split between the *stable core* and the *rare tail* are dependable across environments.
+_These per-package frequencies are environment-specific and should be read as indicative, not fixed._ They are the tallies from the six cold runs above; because the failures are `-race` timing-tail flakes, the set of packages that trips in any given run shifts by ±1–2 with machine scheduling. In these six runs the five stable-core packages failed every time; `js/eventloop`, `js`, and `cmd/tests` failed in five of the six; the top-level `lib` package flaked in two of the six (on `TestVUStateTagsSafeConcurrent`, discussed in the closing note of this section); and `lib/netext/httpext` flaked in exactly one. Only the invariants (28 no-test, 82 total, 54 tested, `exit=1`) and the broad split between the *stable core* and the *rare tail* are dependable across environments.
 
 Representative genuine failure detail for each package follows. Every block is a **labelled excerpt** of that package's failure output, preceded by the extraction command used to pull it from the retained raw log. Interpretation is outside the fences so the quoted output is verbatim.
 
-**`js/modules/k6/grpc` (stable core, 8/8)** — extraction command:
+**`js/modules/k6/grpc` (stable core, 6/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestClient_TlsParameters\/ConnectTls /,/x509/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
-    --- FAIL: TestClient_TlsParameters/ConnectTls (62.11s)
+    --- FAIL: TestClient_TlsParameters/ConnectTls (64.00s)
         helpers_test.go:19: 
             	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/js/modules/k6/grpc/helpers_test.go:19
             	            				/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/js/modules/k6/grpc/client_test.go:1287
             	Error:      	Received unexpected error:
             	            	GoError: context deadline exceeded: connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority (possibly because of \"crypto/rsa: verification error\" while trying to verify candidate authority certificate \"Acme Co\")" at reflect.methodValueCall (native)
 ```
-This is a TLS trust failure in a gRPC-over-TLS test: the client rejects the server's self-signed certificate (`x509: certificate signed by unknown authority … "Acme Co"`) and the connection times out. Its subtests run ~62s, making `grpc` the slowest failing package.
+This is a TLS trust failure in a gRPC-over-TLS test: the client rejects the server's self-signed certificate (`x509: certificate signed by unknown authority … "Acme Co"`) and the connection times out. Its subtests run ~64s, making `grpc` the slowest failing package.
 
-**`js/modules/k6/http` (stable core, 8/8)** — extraction command:
+**`js/modules/k6/http` (stable core, 6/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestRequestAndBatchTLS\/ocsp_stapled_good/,/Test:/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
-    --- FAIL: TestRequestAndBatchTLS/ocsp_stapled_good (3.06s)
+    --- FAIL: TestRequestAndBatchTLS/ocsp_stapled_good (2.61s)
         request_test.go:2208: 
             	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/js/modules/k6/http/request_test.go:2208
             	Error:      	Received unexpected error:
@@ -252,13 +270,13 @@ $ sed -n '/--- FAIL: TestRequestAndBatchTLS\/ocsp_stapled_good/,/Test:/p' \
 ```
 An OCSP-stapling assertion fails (`wrong ocsp stapled response status: unknown`). This test file also contains a Windows-only `t.Skip` guard at [js/modules/k6/http/request_test.go:L2195] that does **not** fire on Linux, so the test runs (and fails) here.
 
-**`lib/executor` (stable core, 8/8)** — extraction command:
+**`lib/executor` (stable core, 6/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestConstantArrivalRateRunCorrectTiming\/segment_0/,/Messages:/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
-    --- FAIL: TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_ (2.06s)
+    --- FAIL: TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_ (2.04s)
         constant_arrival_rate_test.go:185: 
             	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/lib/executor/constant_arrival_rate_test.go:185
             	            				/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/lib/executor/common_test.go:20
@@ -266,90 +284,90 @@ $ sed -n '/--- FAIL: TestConstantArrivalRateRunCorrectTiming\/segment_0/,/Messag
             	            				/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/lib/executor/helpers.go:108
             	            				/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/lib/executor/ramping_arrival_rate.go:546
             	            				/usr/local/go/src/runtime/asm_amd64.s:1700
-            	Error:      	Max difference between 2026-07-13 17:12:32.378575298 +0000 UTC m=+0.318257289 and 2026-07-13 17:12:32.455022019 +0000 UTC m=+0.394704025 allowed is 24ms, but difference was -76.446736ms
+            	Error:      	Max difference between 2026-07-13 21:55:44.259204556 +0000 UTC m=+0.340806520 and 2026-07-13 21:55:44.317095715 +0000 UTC m=+0.398697710 allowed is 24ms, but difference was -57.89119ms
             	Test:       	TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_
-            	Messages:   	3 expectedTime 120ms
+            	Messages:   	5 expectedTime 240ms
 ```
-A **timing-tolerance** assertion: the arrival-rate executor was expected to hit a scheduled time within a 24ms window but missed it by ~76ms under the `-race` detector's overhead — the characteristic shape of the suite's flakiness.
+A **timing-tolerance** assertion: the arrival-rate executor was expected to hit a scheduled time within a 24ms window but missed it by ~58ms under the `-race` detector's overhead — the characteristic shape of the suite's flakiness.
 
-**`execution` (stable core, 8/8)** — extraction command:
+**`execution` (stable core, 6/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestExecutionInfoVUSharing/,/Test:/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
---- FAIL: TestExecutionInfoVUSharing (4.46s)
+--- FAIL: TestExecutionInfoVUSharing (4.56s)
     scheduler_ext_exec_test.go:131: 
         	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/execution/scheduler_ext_exec_test.go:131
         	Error:      	Not equal: 
         	            	expected: 0x9
-        	            	actual  : 0x8
+        	            	actual  : 0xa
         	Test:       	TestExecutionInfoVUSharing
 ```
-A concurrency/VU-sharing count assertion (`expected: 0x9, actual: 0x8`) — an off-by-one that surfaces under race-detector timing.
+A concurrency/VU-sharing count assertion (`expected: 0x9, actual: 0xa`) — an off-by-one that surfaces under race-detector timing.
 
-**`js/eventloop` (frequent flaky, 7/8)** — extraction command:
+**`js/eventloop` (frequent flaky, 5/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestEventLoopAllCallbacksGetCalled/,/Test:/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
---- FAIL: TestEventLoopAllCallbacksGetCalled (1.04s)
+--- FAIL: TestEventLoopAllCallbacksGetCalled (0.63s)
     eventloop_test.go:120: 
         	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/js/eventloop/eventloop_test.go:120
-        	Error:      	"50ms" is not greater than "99.673773ms"
+        	Error:      	"50ms" is not greater than "133.088439ms"
         	Test:       	TestEventLoopAllCallbacksGetCalled
 ```
-Another timing assertion (`"50ms" is not greater than "99.673773ms"`).
+Another timing assertion (`"50ms" is not greater than "133.088439ms"`).
 
-**`js` (frequent flaky, 7/8)** — extraction command:
+**`js` (frequent flaky, 5/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestVURunInterrupt\/Source/,/Test:/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
-    --- FAIL: TestVURunInterrupt/Source (0.20s)
+    --- FAIL: TestVURunInterrupt/Source (0.44s)
         runner_test.go:659: 
             	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/js/runner_test.go:659
             	Error:      	Received unexpected error:
-            	            	context deadline exceeded at file:///script.js:2:3(2)
+            	            	context deadline exceeded at file:///script.js:1:1(0)
             	Test:       	TestVURunInterrupt/Source
 ```
 The observed `js`-package failure is **`TestVURunInterrupt/Source`** ([js/runner_test.go:L659]) — a deadline-exceeded assertion. (This corrects a natural misattribution: `TestEventSystemError`, which exercises an aborting run, lives in the **`cmd/tests`** package at [cmd/tests/cmd_run_test.go:L2074] with its abort subtest at L2083, **not** in `js`; it did not fail in any run here.)
 
-**`js/modules/k6/timers` (rare flaky, 3/8)** — extraction command:
+**`js/modules/k6/timers` (stable core, 6/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestSetIntervalOrder/,/Test:/p' \
     /tmp/k6_investigation/run1.log
 ```
 ```text
---- FAIL: TestSetIntervalOrder (3.94s)
+--- FAIL: TestSetIntervalOrder (2.90s)
     timers_test.go:138: 
         	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/js/modules/k6/timers/timers_test.go:138
         	Error:      	"4" is not greater than or equal to "5"
         	Test:       	TestSetIntervalOrder
 ```
-Callback-ordering timing assertion (`"4" is not greater than or equal to "5"`); the sibling `TestSetTimeoutOrder` at [js/modules/k6/timers/timers_test.go:L104] fails the same way.
+Callback-count timing assertion (`"4" is not greater than or equal to "5"`) at [js/modules/k6/timers/timers_test.go:L138]; the sibling `TestSetTimeoutOrder` at [js/modules/k6/timers/timers_test.go:L104] fails with a related callback-**ordering** mismatch (a `Not equal` on the expected sequence, where the last few callbacks fire out of order).
 
-**`cmd/tests` (intermittent, 6/8)** — extraction command:
+**`cmd/tests` (frequent flaky, 5/6)** — extraction command:
 ```text
 $ sed -n '/--- FAIL: TestSetupTimeout/,/setupTimeout/p' \
-    /tmp/k6_investigation/timed/full_A.log
+    /tmp/k6_investigation/run3.log
 ```
 ```text
---- FAIL: TestSetupTimeout (5.89s)
+--- FAIL: TestSetupTimeout (5.49s)
     cmd_run_test.go:2366: 
         	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/cmd/tests/cmd_run_test.go:2366
-        	Error:      	"5.694720664s" is not less than "5s"
+        	Error:      	"5.300613018s" is not less than "5s"
         	Test:       	TestSetupTimeout
         	Messages:   	expected less time to have passed because setupTimeout 
 ```
-A setup-timeout timing assertion (`"5.694720664s" is not less than "5s"`). Separately, the `cmd/tests` harness emits genuine benign log noise such as this client/server cipher mismatch in a TLS fixture — captured verbatim:
+A setup-timeout timing assertion (`"5.300613018s" is not less than "5s"`). Separately, the `cmd/tests` harness emits genuine benign log noise such as this client/server cipher mismatch in a TLS fixture — captured verbatim from the same log:
 
 ```text
-2026/07/13 17:12:40 http: TLS handshake error from 127.0.0.1:53738: tls: no cipher suite supported by both client and server
+2026/07/13 21:58:41 http: TLS handshake error from 127.0.0.1:46456: tls: no cipher suite supported by both client and server
 ```
-_(inferred)_ The consistent theme is **environmental timing sensitivity** (the `-race` detector inflates latencies) together with **TLS/OCSP test fixtures** — not logic regressions in the metric-tracking code that this document otherwise concerns. The two rarest flakies were `output/cloud/expv2` (`TestFlushMaxSeriesInBatch`, [output/cloud/expv2/flush_test.go:L295]) and the top-level `lib` package. The latter is a rare **concurrency** flake — observed here failing in just **1 of 6** additional cold runs — on **`TestVUStateTagsSafeConcurrent`** ([lib/state_test.go:L25], `package lib`), whose two goroutines race on `Modify`/`GetCurrentValues` under the `-race` detector; the observed assertions failed at `state_test.go:53–58` (`Should be true`; `expected "0", actual ""`). Note that the similarly-named **`TestActiveVUsCount`** is **not** a top-level `lib` test: it belongs to the `cmd/tests` integration-harness package ([cmd/tests/cmd_run_test.go:L1438], `package tests`) and flakes there — observed failing in 4 of the 6 cold runs, each time counted under the `cmd/tests` package result (its `--- FAIL` output prints a running k6 scenario, not a `lib` unit assertion), never under top-level `lib`.
+_(inferred)_ The consistent theme is **environmental timing sensitivity** (the `-race` detector inflates latencies) together with **TLS/OCSP test fixtures** — not logic regressions in the metric-tracking code that this document otherwise concerns. The two rarest flakies were the top-level `lib` package (**2 of 6** runs) and `lib/netext/httpext` (**1 of 6**). The `lib` flake is a **concurrency** race on **`TestVUStateTagsSafeConcurrent`** ([lib/state_test.go:L25], `package lib`), whose two goroutines race on `Modify`/`GetCurrentValues` under the `-race` detector; the observed assertions failed at `state_test.go:53–54` (`Should be true`; then `Not equal: expected "0", actual ""`). The `lib/netext/httpext` flake was **`TestMakeRequestRPSLimit`** ([lib/netext/httpext/request_test.go:L541], declared at L496) — an `assert.NotEmpty` that failed with `Should NOT be empty, but was 0`. Note that the similarly-named **`TestActiveVUsCount`** is **not** a top-level `lib` test: it belongs to the `cmd/tests` integration-harness package ([cmd/tests/cmd_run_test.go:L1438], `package tests`) and flakes there — observed failing in **3 of the 6** cold runs (runs 4, 5, 6), each time counted under the `cmd/tests` package result (its `--- FAIL` output prints a running k6 scenario, not a `lib` unit assertion), never under top-level `lib`.
 
 ### 1.5 Skipped or broken tests
 
@@ -421,7 +439,7 @@ _(inferred)_ Because of this harness, a `cmd/tests` failure can manifest as a pa
 
 ### 1.7 Direct answer to Question 1
 
-- **Pass vs. fail:** Not a clean pass. Per cold run: **46–48 packages `ok`, 6–8 `FAIL`, 28 with no tests**, out of **82** total; the process exits non-zero. The exact `FAIL` count is environment-sensitive under `-race` — it can reach **9** (`ok` **45**) on a busier machine (see [§1.2](#12-passfail-counts-and-their-stability-across-runs)) — while the 28 no-test and 82 total are invariant. The most consistent failures (the *stable core*) are `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, and `lib/executor`; the rest are flaky.
+- **Pass vs. fail:** Not a clean pass. Across six cold runs the split was **45–47 packages `ok`, 7–9 `FAIL`, 28 with no tests**, out of **82** total (of which **54** contain tests); the process exits non-zero (`exit=1`) every time. The exact `FAIL` count is environment-sensitive under `-race` — it moved between **7 and 9** across the six runs (most commonly **8**; see [§1.2](#12-passfail-counts-and-their-stability-across-runs)) — while the 28 no-test, 54 tested, and 82 total are invariant. The most consistent failures (the *stable core*, failing in every run) are `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `js/modules/k6/timers`, and `lib/executor`; the rest are flaky.
 - **Skipped:** One test is **observed skipping at runtime** here — `TestTC39` ([js/tc39/tc39_test.go:L807], reason: the `test262` corpus is absent). Three further `t.Skip` guards exist but are **Windows-only** and do not fire on Linux. Non-verbose `go test` hides skips.
 - **Broken:** _(inferred)_ None in the compile sense — all 82 packages build. The failing packages are flaky on **timing / TLS / OCSP / concurrency** assertions under the `-race` detector, not the metric-tracking code that Questions 2–3 concern.
 
@@ -436,7 +454,7 @@ The number on the `iterations` line of the end-of-test summary is a **built-in C
 - The metric name constant `IterationsName = "iterations"` is at [metrics/builtin.go:L8].
 - `RegisterBuiltinMetrics` ([metrics/builtin.go:L78]) constructs it as a `Counter` at [metrics/builtin.go:L82]: `Iterations: registry.MustNewMetric(IterationsName, Counter)`.
 
-It is **emitted once per completed iteration** by the JS runtime. The following is the **complete** `iterationSamples` function ([js/runner.go:L879]) — the second sample carries the `Iterations` metric ([js/runner.go:L894]) with a literal `Value: 1` ([js/runner.go:L899]):
+It is emitted by the JS runtime **once per invocation of the default function that the runtime classifies as a _full_ (non-cancelled) iteration at its sampling point** — which is *not* the same as "once per iteration that finishes running" (the divergence is demonstrated below). Concretely, `runFn` derives a local `isFullIteration` flag from a `select` on the VU context — `case <-ctx.Done(): isFullIteration = false` / `default: isFullIteration = true` ([js/runner.go:L845-L850]) — and pushes the iteration samples **only when `isFullIteration && isDefault`** holds ([js/runner.go:L870-L871]); `RunOnce` ([js/runner.go:L724]) calls `runFn` with `isDefault = true` ([js/runner.go:L773]). The following is the **complete** `iterationSamples` function ([js/runner.go:L879]) — the second sample carries the `Iterations` metric ([js/runner.go:L894]) with a literal `Value: 1` ([js/runner.go:L899]):
 
 ```go
 func iterationSamples(
@@ -464,7 +482,40 @@ func iterationSamples(
 	})
 }
 ```
-These samples are pushed onto the per-VU sample channel inside `runFn` (`u.state.Samples <- …`, around [js/runner.go:L870-L871]); from there they travel to the metric sinks (traced end-to-end in [Question 3](#question-3--trace-the-data-flow-for-one-metric-from-test-start-to-output)). The `Counter` sink sums the `Value: 1`s, so five completed iterations produce `iterations = 5` in the summary — corroborated in [§3.2](#32-the-end-of-test-summary-the-observed-metric) and [§3.3](#33-corroborating-the-count-with-the-json-output).
+These samples are pushed onto the per-VU sample channel inside `runFn` (`u.state.Samples <- …`, at [js/runner.go:L870-L871]); from there they travel to the metric sinks (traced end-to-end in [Question 3](#question-3--trace-the-data-flow-for-one-metric-from-test-start-to-output)). The `Counter` sink sums the `Value: 1`s, so five **full** iterations produce `iterations = 5` in the summary — corroborated in [§3.2](#32-the-end-of-test-summary-the-observed-metric) and [§3.3](#33-corroborating-the-count-with-the-json-output).
+
+**Emission vs. executor accounting — an observed divergence.** Because emission is gated on `isFullIteration` (the VU-context state at the L845 sampling point) rather than on "the iteration ran to the end," the `iterations` **metric** can diverge from the executor's **full/interrupted accounting** (Mechanism B, [§2.2](#22-iteration-counting-mechanism-b--executionstate-counters-uiinformation-and-the-separate-executor-local-budgets)). Four canonical `k6 run` conditions make this concrete — each script declares `iterations: 5, vus: 1`; the complete outputs were captured under `/tmp/k6_investigation/runlogs/`:
+
+1. **Normal completion** (`$ ./k6 run normal.js`, exit **0**) — every iteration runs, ctx is never done at L845, so all five samples emit and the executor counts five full. Metric and accounting **agree**:
+```text
+     iterations...........: 5   7072.145788/s
+running (00m00.0s), 0/1 VUs, 5 complete and 0 interrupted iterations
+```
+
+2. **`exec.test.abort()` on the first iteration** (`$ ./k6 run abort.js`, exit **108**) — the abort raises an `InterruptError`, but at the L845 sampling point the VU context is **not yet** cancelled, so `isFullIteration` is `true` and the metric **is emitted** (`iterations = 1`); meanwhile the executor routes the `InterruptError` through `handleInterrupt` and counts the iteration **interrupted** ([lib/executor/helpers.go:L120-L123]). The metric and the accounting **disagree** — `iterations = 1` yet `0 complete and 1 interrupted`:
+```text
+     iterations...........: 1   6086.205008/s
+running (00m00.0s), 0/1 VUs, 0 complete and 1 interrupted iterations
+time="2026-07-13T22:24:41Z" level=error msg="test aborted: aborting on purpose at default (file:///tmp/k6_investigation/scripts/abort.js:4:18(6))"
+```
+
+3. **`SIGINT` during an iteration** (`$ ./k6 run siginterrupt.js` then `kill -INT`, exit **105**) — the interrupt cancels the VU context, so at L845 `ctx.Done()` fires, `isFullIteration` is `false`, and the gate at L870-L871 **suppresses** the sample: the summary has **no `iterations` line at all**. The executor's own `case <-ctx.Done()` branch counts the iteration interrupted ([lib/executor/helpers.go:L114-L116], whose comment reads *"Don't log errors or emit iterations metrics from cancelled iterations"*):
+```text
+     data_received...: 0 B 0 B/s
+     data_sent.......: 0 B 0 B/s
+     vus.............: 1   min=1 max=1
+     vus_max.........: 1   min=1 max=1
+running (00m03.0s), 0/1 VUs, 0 complete and 1 interrupted iterations
+time="2026-07-13T22:25:13Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+```
+
+4. **An ordinary uncaught JS error** (`$ ./k6 run throw.js`, exit **0**) — a `throw` that is *not* an `InterruptError`: ctx is not done, so `isFullIteration` is `true` and the metric emits; the executor logs the stacktrace and **falls through to `AddFullIterations`** ([lib/executor/helpers.go:L137]). Metric and accounting **agree** (all five full) even though every iteration threw (five `level=error … Error: boom` stacktraces precede the summary):
+```text
+     iterations...........: 5   15036.96085/s
+running (00m00.0s), 0/1 VUs, 5 complete and 0 interrupted iterations
+```
+
+In short: the `iterations` metric counts invocations the JS runtime classified as *full* at emission time, whereas the executor's full/interrupted split (Mechanism B) is decided independently in `getIterationRunner`. They coincide for clean runs and ordinary errors, but **`test.abort()` emits the metric yet is counted interrupted**, and **`SIGINT` suppresses the metric entirely**.
 
 ### 2.2 Iteration counting, Mechanism B — `ExecutionState` counters (UI/information) and the separate executor-local budgets
 
@@ -712,21 +763,21 @@ $ # (empty output above == clean working tree; nothing was written inside the re
 
 Each hop names the **call/transfer site** (not merely a declaration), with its `file:line`:
 
-1. **Run wiring.** `cmdRun.run` ([cmd/run.go:L59]) creates the buffered samples channel ([cmd/run.go:L227]) and starts the output manager on it with `outputManager.Start(samples)` ([cmd/run.go:L228]).
+1. **Run wiring & output registration.** `cmdRun.run` ([cmd/run.go:L59]) constructs the metrics engine with `engine.NewMetricsEngine(...)` ([cmd/run.go:L170]), obtains its ingester via `metricsEngine.CreateIngester()` ([cmd/run.go:L187]) and **appends it to the output list** (`outputs = append(outputs, metricsIngester)`, [cmd/run.go:L188]), builds the output manager with `output.NewManager(outputs, …)` ([cmd/run.go:L220]), creates the buffered samples channel ([cmd/run.go:L227]), and starts the manager on it with `outputManager.Start(samples)` ([cmd/run.go:L228]). The ingester is therefore registered as one of the outputs the manager will feed.
 2. **Scheduler launch.** It then calls `execScheduler.Run(globalCtx, runCtx, samples)` ([cmd/run.go:L397]).
 3. **Scheduler → executor.** `Scheduler.Run` ([execution/scheduler.go:L419]) spawns each executor with `go e.runExecutor(...)` ([execution/scheduler.go:L500]), which invokes `executor.Run(runCtx, engineOut)` ([execution/scheduler.go:L369]) — `engineOut` is the samples channel handed down from step 1.
 4. **Executor → VU.** The executor's per-iteration runner is the `getIterationRunner` closure ([lib/executor/helpers.go:L104]); it calls `vu.RunOnce()` ([lib/executor/helpers.go:L108]).
 5. **VU iteration → samples.** `ActiveVU.RunOnce` ([js/runner.go:L724]) calls `u.runFn(ctx, true, …)` ([js/runner.go:L773]); `runFn` ([js/runner.go:L817]) builds the per-iteration samples via `iterationSamples` ([js/runner.go:L879]), which includes the `Iterations` metric ([js/runner.go:L894]) with `Value: 1` ([js/runner.go:L899]).
 6. **Channel send.** `runFn` sends the samples onto the per-VU channel (`u.state.Samples <- …`, [js/runner.go:L870-L871]) — an **asynchronous hand-off**; the buffered `iterations` sample now travels independently of the VU.
-7. **Manager dispatch.** The `Manager.Start` loop ([output/manager.go:L42]) reads the channel and, on its 50 ms ticker (**plus a final flush when the channel closes**, [output/manager.go:L65-L67]), calls `out.AddMetricSamples(...)` on each output ([output/manager.go:L52]).
-8. **Ingester → sink.** One output is the `OutputIngester`; its `flushMetrics` (50 ms cadence, [metrics/engine/ingester.go:L12]) marks the metric observed ([metrics/engine/engine.go:L108]) and executes `m.Sink.Add(sample)` ([metrics/engine/ingester.go:L90]) — the `iterations` `CounterSink` now holds the summed value.
+7. **Manager receive + dispatch (two separate actions).** The `Manager.Start` loop ([output/manager.go:L42]) runs a `select` that **continuously receives** each sample container from the channel and appends it to an in-memory buffer (`case sampleContainer, ok := <-samplesChan`, [output/manager.go:L64]); **separately**, on its **50 ms ticker** (`case <-ticker.C`, [output/manager.go:L70]) it flushes the buffer by calling `out.AddMetricSamples(...)` on each registered output (`sendToOutputs`, [output/manager.go:L50-L52,L71]). A final flush also fires when the channel closes ([output/manager.go:L65-L67]). Receiving is thus **continuous**; only the **dispatch to outputs** is batched at 50 ms.
+8. **Ingester → sink.** One of those registered outputs is the `OutputIngester`; its `flushMetrics` (50 ms cadence, [metrics/engine/ingester.go:L12]) marks the metric observed at the **call site** `oi.metricsEngine.markObserved(m)` ([metrics/engine/ingester.go:L89] — whose definition is [metrics/engine/engine.go:L108]) and then executes `m.Sink.Add(sample)` ([metrics/engine/ingester.go:L90]) — the `iterations` `CounterSink` now holds the summed value.
 9. **Summary read.** At end of test, `js/summary.go` reads that sink via `getMetricValues(m.Sink, …)` ([js/summary.go:L84]) → `sink.Format(t)` ([js/summary.go:L35]), rendering `iterations....: 5`.
 
-_(inferred)_ The two 50 ms cadences (manager dispatch and ingester flush) are independent timers, and threshold recomputation runs on its own separate `2 * time.Second` timer ([metrics/engine/engine.go:L21]); a sample therefore experiences up to a couple of ~50 ms buffering hops before landing in its sink, with final flushes guaranteeing delivery at shutdown.
+_(Method note.)_ The **ordering** of these hops is **source-traced** — read directly from the call sites cited above under the read-only constraint (no instrumentation was added to the source), not timing-observed — whereas the **endpoints** are **observed**: the emitted `Value: 1` and the final `iterations....: 5` in the summary ([§3.2](#32-the-end-of-test-summary-the-observed-metric)) and the five JSON points ([§3.3](#33-corroborating-the-count-with-the-json-output)). _(inferred)_ The two 50 ms cadences (manager dispatch and ingester flush) are independent timers, and threshold recomputation runs on its own separate `2 * time.Second` timer ([metrics/engine/engine.go:L21]); a sample therefore experiences up to a couple of ~50 ms buffering hops before landing in its sink, with final flushes guaranteeing delivery at shutdown.
 
 ### 3.5 Sequence diagram
 
-Solid arrows (`->>`) are synchronous calls; **open-arrow (`-)`) arrows mark asynchronous hand-offs** (the channel send and the buffered channel read). The final interaction is the summary **reading** the sink (`Format`), with the sink returning values — the sink never initiates rendering.
+Solid arrows (`->>`) are synchronous calls; **open-arrow (`-)`) arrows mark asynchronous hand-offs** (the goroutine spawn of each executor, the VU's channel send, and the manager's continuous channel receive). The manager's **receive** (continuous) and its **dispatch** to outputs (batched every 50 ms) are shown as distinct steps. The final interaction is the summary **reading** the sink (`Format`), with the sink returning values — the sink never initiates rendering.
 
 ```mermaid
 sequenceDiagram
@@ -740,24 +791,27 @@ sequenceDiagram
     participant Sink as metrics/sink.go (CounterSink)
     participant Sum as js/summary.go
 
+    CLI->>CLI: NewMetricsEngine [L170]; CreateIngester + append to outputs [L187-L188]; NewManager [L220]
     CLI->>OM: outputManager.Start(samples) [L228]
     CLI->>Sched: execScheduler.Run(globalCtx, runCtx, samples) [L397]
-    Sched->>Exec: go runExecutor -> executor.Run(runCtx, engineOut) [L500 / L369]
+    Sched-)Exec: go runExecutor -> executor.Run(runCtx, engineOut) [L500 / L369] (async goroutine)
     Exec->>VU: vu.RunOnce() [helpers L108 -> runner L724]
-    VU->>VU: runFn -> iterationSamples (Iterations, Value:1) [L773/L879/L899]
+    VU->>VU: runFn -> iterationSamples (Iterations, Value:1) when isFullIteration && isDefault [L773/L845-L850/L870-L871/L879/L899]
     VU-)Chan: u.state.Samples <- samples [L871] (async send)
-    Chan-)OM: buffered read on 50ms ticker (+ final close-flush) [L42/L52/L65]
-    OM->>Ing: out.AddMetricSamples(...) [L52]
-    Ing->>Sink: flushMetrics -> m.Sink.Add(sample) (50ms flush) [L90]
+    Chan-)OM: continuous receive into buffer [L64] (async)
+    OM->>Ing: every 50ms tick: sendToOutputs -> out.AddMetricSamples(buffer) [L70-L71 / L50-L52] (+ final close-flush [L65-L67])
+    Ing->>Sink: flushMetrics -> markObserved [L89] + m.Sink.Add(sample) [L90] (50ms flush)
     Sum->>Sink: getMetricValues(m.Sink, ...) -> sink.Format(t) [L84/L35]
     Sink-->>Sum: map values (iterations = 5)
-    Note over OM,Ing: Manager dispatch (50ms) and Ingester flush (50ms) are independent timers
+    Note over OM,Ing: Manager receive is continuous; dispatch (50ms) and Ingester flush (50ms) are independent timers
     Note over Ing,Sink: MetricsEngine thresholds recompute on a separate 2s timer [engine L21]
 ```
 
 ### 3.6 Tying the trace back to the observed output
 
 The single metric traced above is exactly the one observed: the `Value: 1` built in at [js/runner.go:L899], summed in the `CounterSink` via [metrics/engine/ingester.go:L90], and read by [js/summary.go:L84], is what appears as `iterations....: 5` in [§3.2](#32-the-end-of-test-summary-the-observed-metric) and as the five `"value":1` JSON points in [§3.3](#33-corroborating-the-count-with-the-json-output).
+
+The count is exactly **5** because — and only because — each of the five iterations satisfied the emission gate `isFullIteration && isDefault` at the sampling point [js/runner.go:L845-L850, L870-L871]: every iteration reached the `default:` branch of the context-cancellation `select` (so `isFullIteration == true`) and was the default-function pass (`isDefault == true`), so each pushed one `Iterations` sample. This is *not* the same predicate as "the executor recorded a full iteration": as the observed divergence in [§2.1](#21-iteration-counting-mechanism-a--the-iterations-counter-metric-summary-visible) shows (abort emits `iterations: 1` while the executor books `0 complete and 1 interrupted`; an OS-signal interrupt suppresses the `iterations` line entirely while the executor books `1 interrupted`), the summary's `iterations` value is driven by this VU-side sampling gate, not by the `ExecutionState` full/interrupted tallies. For this clean run the two views coincide at 5; under abort or interrupt they would not.
 
 ## Caveats and boundaries
 
@@ -767,13 +821,13 @@ The single metric traced above is exactly the one observed: the `Value: 1` built
   - `test-tip` ([.github/workflows/test.yml:L48]) — **Go tip** ([.github/workflows/test.yml:L58-L63]) — runs `go test … -timeout 800s ./...` ([.github/workflows/test.yml:L83]).
   - `test-current-cov` ([.github/workflows/test.yml:L85]) — Go **1.23.x** ([.github/workflows/test.yml:L89]) — does **not** run a single `./...`; it loops **per package** with coverage: `go test … -timeout 800s --coverpkg="$list" -coverprofile=… $pkg` ([.github/workflows/test.yml:L118]).
   Note CI uses `-timeout 800s` whereas the local `tests` target uses `-timeout 210s`. _(inferred)_ The per-package coverage job and the more generous CI timeout make CI less prone to the timing flakiness seen locally, but the flaky tests are the same code.
-- **Result caching.** `go test` caches passing package results; a cache-warm run is faster but yields counts in the same band. Cold runs (`go clean -testcache`) were used for the health figures.
-- **Timing sensitivity.** _(inferred)_ The failing packages fail predominantly on wall-clock / TLS / OCSP / concurrency assertions amplified by the `-race` detector; they are largely unrelated to the metric-tracking code that Questions 2–3 describe. Because these are timing-tail flakes, the **exact count** of failing packages in any single cold run is environment-sensitive (this part is *observed*, not inferred): re-running the same canonical command under CPU contention here caused one additional timing-sensitive package to trip, pushing `FAIL` to 9 / `ok` to 45 in 2 of 4 loaded runs, while the invariants (28 no-test, 82 total) never change — see [§1.2](#12-passfail-counts-and-their-stability-across-runs).
-- **Read-only compliance.** The only file created or modified in the repository is this document. The minimal script, the JSON output, and all logs live under `/tmp/k6_investigation/` (outside the checkout) and are removed after use; `git status --porcelain` was verified empty.
+- **Result caching.** `go test` caches only *passing* package results, so failing packages are re-run on every invocation regardless of cache state; _(inferred)_ a warm cache therefore cannot mask the failing set. All health figures in §1.2–§1.4 were taken from **cold** runs (`go clean -testcache` before each) to force genuine re-execution of every package.
+- **Timing sensitivity.** _(inferred)_ The failing packages fail predominantly on wall-clock / TLS / OCSP / concurrency assertions amplified by the `-race` detector; they are largely unrelated to the metric-tracking code that Questions 2–3 describe. Because these are timing-tail flakes, the **exact count** of failing packages in any single cold run is environment-sensitive (this part is *observed*, not inferred): across the six cold runs the count moved between `FAIL` **7 and 9** (`ok` **47 down to 45**) as flaky packages tripped in and out, while the invariants (28 no-test, 54 tested, 82 total, `exit=1`) never change — see [§1.2](#12-passfail-counts-and-their-stability-across-runs).
+- **Read-only compliance.** The only file created or modified in the repository is this document. The minimal script, the JSON output, and all logs were kept under `/tmp/k6_investigation/` (outside the checkout) and were removed after the relevant outputs had been extracted into this document; `git status --porcelain` was verified to show only this document.
 
 ## Coverage pass (every named item addressed)
 
-- **Q1** — pass/fail counts (46–48 ok / 6–8 FAIL per cold run — tail environment-sensitive to 45 ok / 9 FAIL under heavier `-race` load — with 28 no-test / 82 total invariant, stable across cold runs); the exact `go test -race -timeout 210s ./...` command; the complete 82-line listing; the per-package failure breakdown with genuine excerpts; **skipped** (observed `TestTC39` + Windows-only guards) with `file:line`; **broken** (none in the compile sense); build-tag exclusions with `file:line`.
+- **Q1** — pass/fail counts (**45–47 ok / 7–9 FAIL** per cold run, most commonly **46/8**, with **28 no-test / 54 tested / 82 total** invariant and `exit=1`, stable across six cold runs); the exact `go test -race -timeout 210s ./...` command; the complete 82-line listing; the per-package failure breakdown with genuine excerpts; **skipped** (observed `TestTC39` + Windows-only guards) with `file:line`; **broken** (none in the compile sense); build-tag exclusions with `file:line`.
 - **Q2** — Mechanism A (`iterations` Counter metric: [metrics/builtin.go:L82], emitted [js/runner.go:L899]); Mechanism B (`ExecutionState` UI/info counters + executor-local budgets); the performance-data pipeline naming `metrics/`, `metrics/engine/`, `output/`, `js/runner.go`, `js/summary.go`; error accounting; `PushIfNotDone` semantics; all seven executors.
 - **Q3** — minimal script via `k6 run`; observed summary; JSON corroboration with extraction command; the ordered call chain with call-site `file:line`; the corrected sequence diagram; the tie-back to observed output.
 
@@ -782,6 +836,7 @@ The single metric traced above is exactly the one observed: the `Value: 1` built
 | Area | File:line | What it anchors |
 |------|-----------|-----------------|
 | Build/test | Makefile:L7-L8, L28-L29 | `go build`; `go test -race -timeout 210s ./...` |
+| Version banner | lib/consts/consts.go:L16-L53, L30-L35 | `FullVersion()` stamps `commit/<HEAD-10>` from `vcs.revision` |
 | CI | .github/workflows/test.yml:L13,L17,L46,L48,L58-L63,L83,L85,L89,L118 | three test jobs |
 | Iterations metric | metrics/builtin.go:L8,L78,L82 | `IterationsName`, `RegisterBuiltinMetrics`, `Iterations` Counter |
 | Emission | js/runner.go:L879,L894,L899,L870-L871 | `iterationSamples`, `Iterations`, `Value:1`, channel send |
