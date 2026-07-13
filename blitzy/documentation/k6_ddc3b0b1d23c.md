@@ -2,8 +2,10 @@
 
 > **Scope of this document.** This is an investigative, evidence-grounded answer to eight questions about how the [`grafana/k6`](https://github.com/grafana/k6) load-testing tool behaves when a user writes and runs a script. Every behavioral claim below was produced by **actually building and running k6 from this checkout** and capturing the **complete, unedited** output. Each claim is tied either to that captured output or to a `file:line` reference in the source tree. Statements that could **not** be directly observed are explicitly labelled **[INFERRED]**; everything else is **[OBSERVED]**.
 >
-> **Source under test:** `grafana/k6`, branch `k6_ddc3b0b1d23c`, HEAD `ddc3b0b1d`.  
-> **Binary under test:** `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)` (built from this checkout — see the build recipe below).  
+> **Source under test:** `grafana/k6`, branch `k6_ddc3b0b1d23c`; the source commit **at observation time** was `ddc3b0b1d` (full SHA `ddc3b0b1d23c128e34e2792fc9075f9126e32375`).
+>
+> **Binary under test:** `k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)`, built from that source commit (build recipe and commit-stamp reproducibility note in §0 below).
+>
 > **Read-only guarantee:** No repository file was modified. All temporary scripts, output files, and the built binary were created **outside** the repository (under `/tmp`) and deleted after the investigation; the only durable change is this document.
 
 ---
@@ -31,8 +33,17 @@ k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 ```
 
 - The version string `0.55.0` is the compile-time constant `Version` at `lib/consts/consts.go:12` (`const Version = "0.55.0"`).
-- The `commit/ddc3b0b1d2` fragment is assembled by `FullVersion()` (declared at `lib/consts/consts.go:16`), whose final `return` formats `"%s (commit/%s, %s)"` at `lib/consts/consts.go:52` and takes the first `commitLen := 10` characters of the VCS revision (`lib/consts/consts.go:31`). HEAD is `ddc3b0b1d`; the stamped 10-char revision renders as `ddc3b0b1d2`. **[OBSERVED]**
+- The `commit/ddc3b0b1d2` fragment is assembled by `FullVersion()` (declared at `lib/consts/consts.go:16`), whose final `return` formats `"%s (commit/%s, %s)"` at `lib/consts/consts.go:52` and takes the first `commitLen := 10` characters of the **live** VCS revision (`vcs.revision`, read via `debug.ReadBuildInfo()`; `lib/consts/consts.go:31`). The source commit at observation time was `ddc3b0b1d`, so its stamped 10-char revision renders as `ddc3b0b1d2`. **[OBSERVED]**
 - Entry point: `main.go:8-9` is `func main() { cmd.Execute() }`, importing `go.k6.io/k6/cmd` at `main.go:5`. **[OBSERVED]**
+
+**Reproducing the commit stamp (and why a build of the delivered checkout differs).** Because `FullVersion()` embeds the **live** `HEAD` of whatever checkout is built (the first 10 characters of `vcs.revision`, `lib/consts/consts.go:31`), the `commit/…` fragment is a function of the current git `HEAD`, not a fixed literal. The canonical `commit/ddc3b0b1d2` shown above was produced from the **source commit under test** (`ddc3b0b1d`). Building instead from the **delivered checkout** — which necessarily carries this documentation commit *on top of* the source commit — stamps that later `HEAD`; the integrated checkout observed here reported `k6 v0.55.0 (commit/b000496a59, go1.23.12, linux/amd64)`. That is expected, not a discrepancy: the version string always reflects the built checkout's `HEAD`. To reproduce the canonical `commit/ddc3b0b1d2` stamp exactly, build from a **detached checkout of the source commit** in a real clone. (Go's VCS stamping needs a real `.git` **directory**, so a linked `git worktree` — whose `.git` is only a pointer file — does **not** stamp the commit; use a clone + `checkout`.) **[OBSERVED, exit 0]** (`<local-k6-checkout>` = the path to your local k6 repository):
+
+```console
+$ git clone <local-k6-checkout> /tmp/k6src && cd /tmp/k6src && git checkout ddc3b0b1d
+$ CGO_ENABLED=0 GOFLAGS=-mod=vendor go build -o /tmp/k6src/k6 .
+$ /tmp/k6src/k6 version
+k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
+```
 
 Unless stated otherwise, every command below was run as `/tmp/k6bin/k6 ...` from the repository root. Reproducibility caveat: because the example endpoint issues an HTTP **redirect**, one iteration can produce **two** HTTP requests (`http_reqs=2`); numeric timing values naturally vary run-to-run, but metric names, units, and structure are stable.
 
@@ -55,12 +66,12 @@ export default function () {
 - The `import ... from 'k6/http'` line resolves against k6's **built-in** module registry, not npm — `k6/http` is registered in `js/jsmodules.go:61`.
 - The **default export** is the unit of work. k6 runs the exported function named `default` (`lib/consts/js.go` `DefaultFn = "default"`); a VU repeats it once per iteration via `(*ActiveVU).RunOnce()` in `js/runner.go`. **[OBSERVED via the run in §3]**
 
-**Scaffolding a new script (authoring aid).** The `k6 new` subcommand writes a starter script; its command is declared at `cmd/new.go:151` (`Use: "new"`, and `Short: "Create and initialize a new k6 script"` at `cmd/new.go:152`) and the default output filename is `defaultNewScriptName = "script.js"` (`cmd/new.go:15`).
+**Scaffolding a new script (authoring aid).** The `k6 new` subcommand writes a starter script; its command is declared at `cmd/new.go:151` (`Use: "new"`, and `Short: "Create and initialize a new k6 script"` at `cmd/new.go:152`) and the default output filename is `defaultNewScriptName = "script.js"` (`cmd/new.go:15`). **`k6 new` writes into the current working directory** — its `Long` help states it "will create a minimal k6 script in the current directory" (`cmd/new.go:141-157`) — so, to honour the read-only-repository rule, the command below is **confined to a scratch directory outside the repository** via a subshell `cd`. (Equivalently, pass an explicit path such as `k6 new /tmp/k6work/script.js`.) Do **not** run a bare `k6 new` from the repository root, or it would create `script.js` inside the repo.
 
-**Exact command (OBSERVED, exit 0), run in an empty directory outside the repository:**
+**Exact command (OBSERVED, exit 0), confined to a scratch directory outside the repository:**
 
 ```bash
-/tmp/k6bin/k6 new
+(cd /tmp/k6work && /tmp/k6bin/k6 new)
 ```
 
 **Complete, unedited output:**
@@ -69,7 +80,7 @@ export default function () {
 Initialized a new k6 test script in script.js. You can now execute it by running `k6 run script.js`.
 ```
 
-The generated `script.js` follows exactly the convention described above — it opens with the built-in module imports, exports an `options` object, and `export default`s the iteration function (generated template, **OBSERVED**, head shown):
+The `script.js` is created under `/tmp/k6work` (not in the repository) and is removed during cleanup (`rm -f /tmp/k6work/script.js`), so the working tree stays unchanged. The generated `script.js` follows exactly the convention described above — it opens with the built-in module imports, exports an `options` object, and `export default`s the iteration function (generated template, **OBSERVED**, head shown):
 
 ```javascript
 import http from 'k6/http';
@@ -109,7 +120,7 @@ k6 run examples/http_get.js
 3. **A live progress line** that updates while the test runs.
 4. **An end-of-test summary** — the aggregated metrics block.
 
-All four are visible in the default captured run in §3. Two flags change which surfaces appear: `--quiet` suppresses both the banner (`printBanner` returns early on `gs.Flags.Quiet` at `cmd/ui.go:59-61`) and the progress line (`printBar` returns early at `cmd/ui.go:71-72`), and `--no-summary` removes surface 4. Mapping each surface to the code that emits it:
+All four are visible in the default captured run in §3. Two flags change which surfaces appear. `--quiet` suppresses **three of the four surfaces** — (1) the banner, because `printBanner` returns early on `gs.Flags.Quiet` (`cmd/ui.go:59-61`); (2) the **execution-description block**, because `printExecutionDescription` routes its entire buffer to `gs.Logger.Debug(...)` instead of stdout when `gs.Flags.Quiet` is set (`cmd/ui.go:160-164`); and (3) the progress line, because `printBar` returns early on `gs.Flags.Quiet` (`cmd/ui.go:71-72`). Only surface 4, the **end-of-test summary**, still prints under `--quiet`. Separately, `--no-summary` removes surface 4. The observed default-vs-`--quiet` comparison below (§2, OBSERVED) confirms exactly those three surfaces disappear while the summary remains. Mapping each surface to the code that emits it:
 
 | # | Surface | Emitted by | Evidence |
 |---|---------|-----------|----------|
@@ -120,7 +131,61 @@ All four are visible in the default captured run in §3. Two flags change which 
 
 In the default (non-`--quiet`) mode, the banner is printed even when the run **fails** — see the validation runs in §8, which show the same five banner lines before the error message. **[OBSERVED]**
 
-**Coverage:** banner ✔ (`lib/consts/consts.go:56`); execution description ✔ (`cmd/ui.go:100`); progress ✔ (`cmd/ui.go:70` + `ui/pb/progressbar.go`); summary ✔ (`cmd/run.go:195` → `js/summary.js`); default-vs-`--quiet`/`--no-summary` distinction ✔ (`cmd/ui.go:59-61,71-72`).
+**Observed `--quiet` behaviour (default vs `--quiet`, same script).** To show precisely which surfaces `--quiet` removes, the same minimal no-op script `/tmp/k6work/minimal.js` (`export default function () {}`) was run twice. Under the default configuration all four surfaces appear; under `--quiet` **only surface ❹ (the end-of-test summary) remains** — surfaces ❶ (banner), ❷ (execution description), and ❸ (progress) are all gone.
+
+Command (default), OBSERVED, exit 0:
+
+```bash
+/tmp/k6bin/k6 run /tmp/k6work/minimal.js
+```
+
+Complete, unedited output — banner ❶, execution description ❷, progress ❸, and summary ❹ all present:
+
+```
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /tmp/k6work/minimal.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations for each of 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=2.93µs min=2.93µs med=2.93µs max=2.93µs p(90)=2.93µs p(95)=2.93µs
+     iterations...........: 1   9903.441446/s
+
+
+running (00m00.0s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  1/1 iters, 1 per VU
+```
+
+Command (`--quiet`), OBSERVED, exit 0:
+
+```bash
+/tmp/k6bin/k6 run --quiet /tmp/k6work/minimal.js
+```
+
+Complete, unedited output — **only surface ❹ (the summary) is emitted**; the banner, execution description, and progress line are all suppressed:
+
+```
+
+     data_received........: 0 B 0 B/s
+     data_sent............: 0 B 0 B/s
+     iteration_duration...: avg=3.16µs min=3.16µs med=3.16µs max=3.16µs p(90)=3.16µs p(95)=3.16µs
+     iterations...........: 1   9324.096262/s
+```
+
+(The `iteration_duration` and `iterations`-per-second figures are run-specific and differ between the two captures and between runs; the invariant being demonstrated is *which surfaces appear*, not their timing. In this non-TTY capture the final progress snapshot ❸ is flushed to stdout just after the summary; in an interactive terminal the progress bar updates live during the run and the summary prints last — the ordering is a capture artefact, the surface set is not.)
+
+**Coverage:** banner ✔ (`lib/consts/consts.go:56`); execution description ✔ (`cmd/ui.go:100`); progress ✔ (`cmd/ui.go:70` + `ui/pb/progressbar.go`); summary ✔ (`cmd/run.go:195` → `js/summary.js`); default-vs-`--quiet`/`--no-summary` distinction ✔, with the observed two-run comparison confirming `--quiet` suppresses **three** surfaces — banner (`cmd/ui.go:59-61`), execution description (`cmd/ui.go:160-164`), progress (`cmd/ui.go:71-72`) — and keeps only the summary.
 
 ---
 
@@ -357,7 +422,22 @@ default ✓ [ 100% ] 1 VUs  00m00.2s/10m0s  1/1 iters, 1 per VU
 }
 ```
 
-**Scope of the `proto` tag (important — not every Point carries it).** That opt-in run produced **22** data `Point` samples in total. Of these, **18 are HTTP-trail Points** and each was tagged `"proto":"HTTP/2.0"` — i.e. the requests negotiated **HTTP/2**. The remaining **4 Points are non-HTTP** and carry **no** `proto` tag: they are the two I/O counters (`data_sent`, `data_received`, emitted by `(*Dialer).IOSamples` at `js/runner.go:868`) and the two iteration metrics (`iteration_duration`, `iterations`, emitted by `iterationSamples` at `js/runner.go:871,879-901`). So the correct characterization is **18 protocol-bearing HTTP Points out of 22 total Points**, verified with `grep '"type":"Point"' /tmp/k6work/ext/out.json | grep -c '"proto"'` → `18`. **[OBSERVED]** The `proto` value comes from the response's `Proto` field (`lib/netext/httpext/transport.go:118`); the default set of system tags is listed by `--help` as `proto,subproto,status,method,url,name,group,check,error,error_code,tls_version,scenario,service,expected_response` (see §5).
+**Scope of the `proto` tag (important — not every Point carries it).** That opt-in run produced **22** data `Point` samples in total. Of these, **18 are HTTP-trail Points** and each was tagged `"proto":"HTTP/2.0"` — i.e. the requests negotiated **HTTP/2**. The remaining **4 Points are non-HTTP** and carry **no** `proto` tag: they are the two I/O counters (`data_sent`, `data_received`, emitted by `(*Dialer).IOSamples` at `js/runner.go:868`) and the two iteration metrics (`iteration_duration`, `iterations`, emitted by `iterationSamples` at `js/runner.go:871,879-901`). So the correct characterization is **18 protocol-bearing HTTP Points out of 22 total Points**, verified by the captured commands below — the total Point count, the count carrying `"proto"`, and the metric names of the Points that do **not** carry it (**OBSERVED**):
+
+```console
+$ grep '"type":"Point"' /tmp/k6work/ext/out.json | wc -l
+22
+$ grep '"type":"Point"' /tmp/k6work/ext/out.json | grep -c '"proto"'
+18
+$ # the Points WITHOUT a proto tag, by metric name:
+$ grep '"type":"Point"' /tmp/k6work/ext/out.json | grep -v '"proto"' | sed -E 's/.*"metric":"([^"]+)".*/\1/' | sort | uniq -c
+      1 data_received
+      1 data_sent
+      1 iteration_duration
+      1 iterations
+```
+
+The four non-`proto` Points are therefore exactly the two I/O counters (`data_sent`, `data_received`) and the two iteration metrics (`iteration_duration`, `iterations`), one sample each — confirming **18 protocol-bearing HTTP Points out of 22 total**. The `proto` value comes from the response's `Proto` field (`lib/netext/httpext/transport.go:118`); the default set of system tags is listed by `--help` as `proto,subproto,status,method,url,name,group,check,error,error_code,tls_version,scenario,service,expected_response` (see §5).
 
 **Coverage:** metrics catalog + types + value-units ✔ (`metrics/builtin.go:78`, `metrics/value_type.go:6-9`); auto-scaled units + forced unit ✔ (`js/summary.js`); protocol modules + per-request `proto` tag ✔ (`js/jsmodules.go:57-63`; tagging at `lib/netext/httpext/transport.go:118`; `/tmp/k6work/ext/out.json`).
 
@@ -546,7 +626,7 @@ default ✓ [ 100% ] 2 VUs  00m00.0s/10m0s  5/5 shared iters
 
 The env vars took effect: **2 max VUs**, **5 iterations shared among 2 VUs**, final `iterations=5`. (Note `min=621ns` — a `ns`-unit reading, further confirming §4b auto-scaling.) **[OBSERVED]**
 
-**Runtime/logging env vars.** Beyond option vars, k6 resolves several runtime `K6_*` variables in `getFlags` at `cmd/state/state.go`: `K6_CONFIG` (`:163`), `K6_LOG_OUTPUT` (`:166`), `K6_LOG_FORMAT` (`:169`), `K6_NO_COLOR` (`:172`, also handled at `:90`), and `K6_PROFILING_ENABLED` (`:180`). For example, `K6_NO_COLOR=true` is honored and the run completes normally (**OBSERVED, exit 0** — note the `$ ... ; echo "exit=$?"` wrapper and the trailing `exit=0`):
+**Runtime/logging env vars.** Beyond option vars, k6 resolves several runtime `K6_*` variables in `getFlags` at `cmd/state/state.go`: `K6_CONFIG` (`:163`), `K6_LOG_OUTPUT` (`:166`), `K6_LOG_FORMAT` (`:169`), `K6_NO_COLOR` (`:172`, also handled at `:90`), and `K6_PROFILING_ENABLED` (`:180`). For example, `K6_NO_COLOR=true` is honored and the run completes normally. The transcript immediately below is captured with stdout **redirected to a file (non-TTY)**, which proves the variable is accepted and the run exits 0 — but in a non-TTY k6 emits **no colour regardless of this variable**, because colour output is gated on a real terminal: `stdoutTTY`/`stderrTTY` are computed at `cmd/state/state.go:68-69`, and a `TERM=dumb` environment (or any non-terminal stdout) forces them false at `:67`. So this non-TTY transcript cannot, by itself, demonstrate *colour removal*; the **causal** PTY comparison that follows it does. (**OBSERVED, exit 0** — note the `$ ... ; echo "exit=$?"` wrapper and the trailing `exit=0`):
 
 ```console
 $ K6_NO_COLOR=true /tmp/k6bin/k6 run /tmp/k6work/minimal.js ; echo "exit=$?"
@@ -576,9 +656,39 @@ default ✓ [ 100% ] 1 VUs  00m00.0s/10m0s  1/1 iters, 1 per VU
 exit=0
 ```
 
-Option env vars such as `K6_VUS`, `K6_ITERATIONS`, `K6_DURATION`, `K6_STAGES` map to the corresponding run flags. **[OBSERVED for `K6_VUS`/`K6_ITERATIONS` above; the others INFERRED from the documented `K6_` convention]**
+**Causal colour-removal proof (PTY).** To show that `K6_NO_COLOR` actually *removes colour* (not merely that the run exits 0), the same `minimal.js` was run twice under a real pseudo-terminal with `TERM=xterm-256color`, so k6 detects a TTY and colourises by default (`cmd/state/state.go:67-68`). The logger's colour is disabled when `!stderrTTY || noColorsSet || env["K6_NO_COLOR"] != ""` (`cmd/state/state.go:90`), and `K6_NO_COLOR` also sets `result.NoColor = true` (`cmd/state/state.go:172-173`); the banner colour itself comes from `getBanner` → `color.RGB(0xFF, 0x67, 0x1d).Add(color.Bold)` (`cmd/ui.go:53-54`). The raw PTY bytes were captured and the ANSI **SGR** colour sequences (`ESC[…m`) counted.
 
-**Coverage:** no k6-specific config required (zero-config run) ✔; five-source precedence `defaults < config file < script options < environment < CLI` ✔ (`cmd/config.go:180-204`); `K6_*` option vars (`K6_VUS`/`K6_ITERATIONS`) ✔; runtime vars `K6_CONFIG`/`K6_LOG_OUTPUT`/`K6_LOG_FORMAT`/`K6_NO_COLOR`/`K6_PROFILING_ENABLED` ✔ (`cmd/state/state.go:163-180`, with observed `K6_NO_COLOR` transcript).
+Top banner line, raw PTY bytes (Python `repr`, escapes visible) — default (colour on) vs `K6_NO_COLOR=true` (colour off), **OBSERVED**:
+
+```text
+$ default (colour on):     b'\x1b[38;2;255;103;29;1m         /\\      Grafana   /\xe2\x80\xbe\xe2\x80\xbe/  \x1b[0K'
+$ K6_NO_COLOR=true:        b'         /\\      Grafana   /\xe2\x80\xbe\xe2\x80\xbe/  \x1b[0K'
+```
+
+Whole-run ANSI SGR tally over the raw PTY capture, **OBSERVED**:
+
+```text
+default (colour on)  : exit=0   SGR (ESC[...m) sequences = 46   banner truecolour ESC[38;2;255;103;29;1m present = 1
+K6_NO_COLOR=true     : exit=0   SGR (ESC[...m) sequences = 0   banner truecolour ESC[38;2;255;103;29;1m present = 0
+```
+
+The default run prefixes the banner with `ESC[38;2;255;103;29;1m` — a 24-bit foreground colour **RGB (255,103,29) = 0xFF671D** plus bold, exactly matching `color.RGB(0xFF, 0x67, 0x1d).Add(color.Bold)` at `cmd/ui.go:54` — and contains **46** SGR (`ESC[…m`) sequences in total. Under `K6_NO_COLOR=true` that truecolour escape and **all 46** SGR sequences disappear (SGR count = 0). The no-colour output still contains non-colour cursor controls such as `ESC[0K` (erase-to-end-of-line) because it is still a PTY — only the **colour** SGR codes are stripped. This is the causal evidence the non-TTY transcript above could not, by itself, provide. **[OBSERVED]**
+
+Option env vars such as `K6_VUS`, `K6_ITERATIONS`, `K6_DURATION`, and `K6_STAGES` map to the corresponding run flags, and **all four were exercised directly**. `K6_VUS`/`K6_ITERATIONS` were shown in the transcript above; `K6_DURATION` and `K6_STAGES` are shown below — each **changes the scenario/executor line** of the execution description, confirming the variable took effect (contrast the baseline `* default: 1 iterations for each of 1 VUs` from the zero-config run). **[OBSERVED]**
+
+```console
+$ K6_DURATION=1s /tmp/k6bin/k6 run /tmp/k6work/minimal.js   # scenarios + executor line:
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 31s max duration (incl. graceful stop):
+              * default: 1 looping VUs for 1s (gracefulStop: 30s)
+
+$ K6_STAGES=1s:2,1s:0 /tmp/k6bin/k6 run /tmp/k6work/minimal.js   # scenarios + executor line:
+     scenarios: (100.00%) 1 scenario, 2 max VUs, 32s max duration (incl. graceful stop):
+              * default: Up to 2 looping VUs for 2s over 2 stages (gracefulRampDown: 30s, gracefulStop: 30s)
+```
+
+`K6_DURATION=1s` switches the default scenario to the **constant-VUs (looping)** executor (`* default: 1 looping VUs for 1s`), and `K6_STAGES=1s:2,1s:0` switches it to the **ramping-VUs** executor with two stages (`* default: Up to 2 looping VUs for 2s over 2 stages`); the `max duration` and `max VUs` figures update accordingly (31s / 1 VU and 32s / 2 VUs respectively). **[OBSERVED]**
+
+**Coverage:** no k6-specific config required (zero-config run) ✔; five-source precedence `defaults < config file < script options < environment < CLI` ✔ (`cmd/config.go:180-204`); `K6_*` option vars (`K6_VUS`/`K6_ITERATIONS`) ✔; runtime vars `K6_CONFIG`/`K6_LOG_OUTPUT`/`K6_LOG_FORMAT`/`K6_NO_COLOR`/`K6_PROFILING_ENABLED` ✔ (`cmd/state/state.go:163-180`, with an observed non-TTY `K6_NO_COLOR` transcript **and** a causal PTY colour-vs-no-colour SGR comparison, 46→0 SGR sequences); option vars `K6_DURATION`/`K6_STAGES` ✔ (observed switching the scenario/executor line).
 
 ---
 
@@ -676,12 +786,15 @@ summary.json
 
 The execution description now reports the backend as `output: json (/tmp/k6work/ext/out.json)`, and the final `ls -A` shows **two files were created** — `out.json` and `summary.json`.
 
-- `out.json` — newline-delimited JSON. It is **35 lines total = 13 `"Metric"` definition records + 22 `"Point"` sample records**, verified with:
+- `out.json` — newline-delimited JSON. It is **35 lines total = 13 `"Metric"` definition records + 22 `"Point"` sample records**, verified by the following commands together with their **captured stdout** (**OBSERVED**):
 
-```bash
-wc -l /tmp/k6work/ext/out.json                          # 35
-grep -c '"type":"Metric"' /tmp/k6work/ext/out.json      # 13
-grep -c '"type":"Point"'  /tmp/k6work/ext/out.json      # 22
+```console
+$ wc -l < /tmp/k6work/ext/out.json
+35
+$ grep -c '"type":"Metric"' /tmp/k6work/ext/out.json
+13
+$ grep -c '"type":"Point"'  /tmp/k6work/ext/out.json
+22
 ```
 
 The records are **interleaved**, not grouped: the JSON backend's `flushMetrics` loop (`output/json/json.go:124-137`) writes each metric's `Metric` definition (via `handleMetric`, which de-duplicates through its `seenMetrics` guard at `output/json/json.go:149-153`) *immediately before* that metric's first `Point`. The real head of the stream shows this `Metric` → `Point` → `Metric` → `Point` ordering (**OBSERVED**, first 6 lines of `/tmp/k6work/ext/out.json`):
@@ -806,9 +919,41 @@ The file is written by the JSON output backend, wired in `cmd/outputs.go` (`json
 }
 ```
 
+**A user-defined `handleSummary()` can emit arbitrary files (OBSERVED).** Instead of (or in addition to) `--summary-export`, a script may export a `handleSummary(data)` function. k6 looks it up by the exported name `handleSummary` (`HandleSummaryFn = "handleSummary"`, `lib/consts/js.go:9`), retrieves it with `vu.getExported(consts.HandleSummaryFn)` and requires it to be callable via `sobek.AssertFunction` (`js/runner.go:377,379`; a non-function is rejected at `:381`). Its **return value is an object whose keys are output paths**: `HandleSummary` is invoked at `cmd/run.go:195`, and `handleSummaryResult` (`cmd/run.go:508`) iterates the returned keys (`cmd/run.go:523`), opening each non-`stdout`/`stderr` path with `fs.OpenFile(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_TRUNC, 0o666)` (`cmd/run.go:518`) and writing its content. The script below returns one such key — an absolute `/tmp` path — so k6 writes exactly that file:
+
+```javascript
+import http from 'k6/http';
+export default function () {
+  http.get('https://test-api.k6.io/');
+}
+export function handleSummary(data) {
+  return {
+    '/tmp/k6work/ext/custom-summary.json': JSON.stringify({
+      iterations: data.metrics.iterations.values.count,
+      http_reqs: data.metrics.http_reqs.values.count,
+    }) + '\n',
+  };
+}
+```
+
+Running it creates that file where none existed before, with exit 0 — **OBSERVED**:
+
+```console
+$ ls -A /tmp/k6work/ext/custom-summary.json    # before
+ls: cannot access '/tmp/k6work/ext/custom-summary.json': No such file or directory
+$ /tmp/k6bin/k6 run /tmp/k6work/summary_custom.js ; echo "exit=$?"
+exit=0
+$ ls -A /tmp/k6work/ext/custom-summary.json    # after
+/tmp/k6work/ext/custom-summary.json
+$ cat /tmp/k6work/ext/custom-summary.json
+{"iterations":1,"http_reqs":2}
+```
+
+The returned key `/tmp/k6work/ext/custom-summary.json` became the file, containing `{"iterations":1,"http_reqs":2}` (the `http_reqs=2` reflects the redirect described in §3). This confirms that `handleSummary()` writes **arbitrary** files by returning a path→content map, distinct from the fixed `--summary-export` file. (The custom file is removed during cleanup.) **[OBSERVED]**
+
 Other `--out` backends (CSV, InfluxDB) are wired alongside JSON in `cmd/outputs.go` (`csv.New` `:48`, `influxdb.New` `:49`). One nuance about the multiplexing `output.Manager` (`output/manager.go`, constructed at `cmd/run.go:220`): its output list is **not** empty on a default run. `createOutputs()` (`cmd/run.go:163`) contributes **no external backend** unless `--out` is passed, but `cmd/run.go:168` still appends the internal `GroupSummary` output, and — because the end-of-test summary and thresholds are enabled by default — `cmd/run.go:188` appends an internal metrics ingester too. So the Manager always receives those **internal** outputs; what makes a default run create **no external file** is simply that `createOutputs()` added no external backend, not that the Manager list is empty. **[OBSERVED default + INFERRED for CSV/InfluxDB, which were not exercised]**
 
-**Coverage:** default writes nothing ✔ (dir unchanged, `output: -`); `--out json=` file ✔; `--summary-export` file ✔ (`cmd/run.go:508`); `handleSummary()` acknowledged ✔; backends in `cmd/outputs.go`.
+**Coverage:** default writes nothing ✔ (dir unchanged, `output: -`); `--out json=` file ✔; `--summary-export` file ✔ (`cmd/run.go:508`); `handleSummary()` **observed** ✔ (custom file emitted; `lib/consts/js.go:9`, `js/runner.go:377,379`, `cmd/run.go:195,508,518`); backends in `cmd/outputs.go`.
 
 ---
 
@@ -895,10 +1040,10 @@ The `hint="script exception"` and **exit 107** correspond to `ScriptException Ex
 | 4b | Output units (auto-scaled) | §4b | `js/summary.js` (`:134-136`,`:170-181`,`:197-198`); `--summary-time-unit=ms` run |
 | 4c | Protocols | §4c | modules `js/jsmodules.go:57-63`; tagging `lib/netext/httpext/transport.go:118`; 18 of 22 `out.json` Points carry `"proto":"HTTP/2.0"` |
 | 5 | The execution command | §5 | `cmd/run.go:462,491,492,499`; full `k6 run --help` |
-| 6 | Config / env vars | §6 | zero-config run; five-source precedence `cmd/config.go:180-204`; `K6_ITERATIONS`/`K6_VUS`/`K6_NO_COLOR` runs; `cmd/state/state.go:163-180` |
-| 7 | External file generation | §7 | default writes nothing; `--out json=` + `--summary-export`; `cmd/run.go:508`, `cmd/outputs.go:46-49` |
+| 6 | Config / env vars | §6 | zero-config run; five-source precedence `cmd/config.go:180-204`; `K6_ITERATIONS`/`K6_VUS`/`K6_DURATION`/`K6_STAGES` runs; non-TTY `K6_NO_COLOR` + causal PTY colour(46 SGR)-vs-no-colour(0 SGR) comparison; `cmd/state/state.go:67-68,90,163-180` |
+| 7 | External file generation | §7 | default writes nothing; `--out json=` + `--summary-export`; observed `handleSummary()` custom file; `cmd/run.go:195,508,518`, `js/runner.go:377,379`, `lib/consts/js.go:9`, `cmd/outputs.go:46-49` |
 | 8 | Script validation logic | §8 | empty/non-function/syntax runs; `js/bundle.go:238`; `errext/exitcodes/codes.go:48` |
 
-**Observed vs inferred summary.** Directly observed: the version string and banner; all four output surfaces; the full metrics block; metric types and value-types (via `out.json`); unit auto-scaling across `ns`/`µs`/`ms`/`s` plus the `--summary-time-unit=ms` override; the interleaved `Metric`/`Point` ordering in `out.json`; the per-request protocol tag `"proto":"HTTP/2.0"` on 18 of 22 Points; all `k6 run --help` flags and the `--summary-mode` absence; the zero-config, `K6_ITERATIONS`/`K6_VUS`, and `K6_NO_COLOR` runs; default-writes-nothing plus the two opt-in files (`out.json`, `summary.json`); and all three validation exit codes (255/255/107). Inferred (and labelled inline where used): the exact ≥1-second gauge-emission cadence for `vus`/`vus_max`, and the CSV/InfluxDB output backends (acknowledged but not exercised, consistent with the HTTP-only scope).
+**Observed vs inferred summary.** Directly observed: the version string and banner; all four output surfaces; the full metrics block; metric types and value-types (via `out.json`); unit auto-scaling across `ns`/`µs`/`ms`/`s` plus the `--summary-time-unit=ms` override; the interleaved `Metric`/`Point` ordering in `out.json`; the per-request protocol tag `"proto":"HTTP/2.0"` on 18 of 22 Points; all `k6 run --help` flags and the `--summary-mode` absence; the zero-config, `K6_ITERATIONS`/`K6_VUS`, `K6_DURATION`, and `K6_STAGES` runs (the last two observed switching the scenario/executor line), and the `K6_NO_COLOR` behaviour both as a non-TTY transcript and as a causal PTY colour-vs-no-colour SGR comparison (46→0 SGR sequences); the `--quiet` two-run comparison (three surfaces suppressed, summary kept); default-writes-nothing plus the two opt-in files (`out.json`, `summary.json`) and the observed `handleSummary()` custom-file emission; the `out.json` record counts (35 lines = 13 Metric + 22 Point) and the proto split (18 of 22 Points) shown as captured command output; and all three validation exit codes (255/255/107). Inferred (and labelled inline where used): the exact ≥1-second gauge-emission cadence for `vus`/`vus_max`, and the CSV/InfluxDB output backends (acknowledged but not exercised, consistent with the HTTP-only scope).
 
 **Repository integrity.** No **existing** repository file was modified; the only change to the working tree is the addition of this single document (`blitzy/documentation/k6_ddc3b0b1d23c.md`). Every investigation artifact — the built k6 binary, all observation scripts, and all opt-in output files — lived **outside** the checkout under `/tmp` (`/tmp/k6bin`, `/tmp/k6work`), so no build or run ever wrote into the repository, and those artifacts are deleted before completion. A final `git status --porcelain` therefore shows exactly one added file (this document) and no modification to any tracked source file.
