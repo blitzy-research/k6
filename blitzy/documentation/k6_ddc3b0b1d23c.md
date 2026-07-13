@@ -76,10 +76,13 @@ $ git status --porcelain
 
 The banner is emitted by `debug.ReadBuildInfo()` reading `vcs.revision` (first 10 hex chars) at `lib/consts/consts.go:19-52`. **Observed:** `k6_canonical version` prints `k6_canonical v0.55.0 (commit/ddc3b0b1d2, go1.21.13, linux/amd64)`; `go version` prints `go version go1.21.13 linux/amd64`; `git status --porcelain` is empty before and after building. The `git log` shows `HEAD` is `ec4344835 docs: add k6 runtime-investigation Q&A answer document` on top of base `ddc3b0b1d Update comment`.
 
+_Transcript provenance (self-reference note)._ This foundation transcript is the **authoring-time snapshot**, captured when `HEAD` was `ec4344835`. Committing — and later re-committing — this Markdown document advances `HEAD` by **one markdown-only commit each time** (e.g. to `0ad99e99c`, and to a further commit when this revision lands); every such commit changes exactly **one** file (this document) and **no** Go code, so a binary rebuilt from any of these HEADs is runtime-identical (verifiable with `git diff <base>..HEAD --stat`, which lists only the deliverable). All experiments below therefore use the `k6_canonical` binary built from the **immutable base commit** `ddc3b0b1d23c` (banner `commit/ddc3b0b1d2`), which never advances. Consequently the HEAD-build hash and `sha256` recorded above are point-in-time values for the authoring commit, **not** claims about the final committed HEAD — a committed document can never embed its own final commit hash.
+
 ### Methodology and safety
 
 - **Run-first.** Each answer was produced by building/running the relevant path and capturing the real stdout/stderr, REST JSON, peak-RSS numbers, or decoded payload bytes; prose came afterward.
 - **Two-run stability.** Every magnitude/timing value (Q1 interrupted count, Q2 message count, Q3 drop counts, Q4 RSS curves, Q5 name set) was confirmed across at least two runs; Q2’s timing-dependent count was run three times and the distribution reported.
+- **Run-varying fields are labeled, not reproduced.** A few incidental fields are inherently run-to-run variable and are **not** part of the reproduced magnitudes: per-second throughput **rates** in summaries (e.g. `48.099874/s`); the `Content-Length` of a REST JSON body that embeds a computed rate float (e.g. `169` vs `170`, differing only by the rate’s digit count); the exact progress-snapshot line rendered at the precise instant of interrupt; and the byte length/`sha256` of a remote-write payload carrying `Math.random()`-derived trend samples. For these, the **stable** quantity (the count, the metric value, the decoded name set) is what is confirmed across runs; a variable field may be shown in full for one run and elided as `...` for the others.
 - **Canonical entry points only.** Values come from `k6 run`, `k6 stats`, and the real REST API (`GET /v1/metrics…`) — never a debug hook, mock, or synthetic bypass. The Q2 gRPC server and Q5 remote-write receiver are standard harnesses (a faithful build of the shipped `grpcservice` server, and a minimal capture endpoint), not behavioral substitutes for k6.
 - **Safety (finding #12 / S1–S3).** Every harness used `set -euo pipefail`; evidence directories were mode-`0700`; listeners bound to loopback only (`127.0.0.1`); **unique** ports were chosen per run via `shuf -i 20000-39999 -n1` (the concrete port appears in each log, e.g. `39652`, `27640`, `38022`); helper processes were tracked by owned PID with `kill -0` verification and shut down via `trap … EXIT`; readiness was established by bounded TCP-connect polling (not fixed sleeps); the Q5 receiver bounded each request body with `io.LimitReader(r.Body, 10<<20)`.
 - **Observed vs inferred.** Runtime-produced facts are labeled **Observed**; anything read from source and not executed is labeled **Source-inferred**.
@@ -450,7 +453,7 @@ exit=105
 
 ### gRPC server harness (built, started, PID-owned, shut down)
 
-A faithful plaintext server registering the **shipped** `go.k6.io/k6/lib/testutils/grpcservice` `FeatureExplorer` service (the same server-streaming `ListFeatures` RPC used by `examples/grpc_server`), dropping only the unused TLS/testdata branch so it builds against the vendored `google.golang.org/grpc v1.67.1`. Source `/tmp/k6_evidence/q2/q2server_main.go`:
+A faithful plaintext server registering the **shipped** `go.k6.io/k6/lib/testutils/grpcservice` `FeatureExplorer` service (the same server-streaming `ListFeatures` RPC used by `examples/grpc_server`), dropping only the unused TLS/testdata branch so it builds within the root module against the vendored `google.golang.org/grpc v1.67.1`. (Precise justification: the shipped `examples/grpc_server` is a *separate nested Go module* with its own `go.mod`, so it cannot be built as a vendor-mode subpackage of the root module; it *does* build offline and link the same `grpc v1.67.1` when run from the repo root via the AAP's documented `go run -mod=mod examples/grpc_server/main.go`, but `-mod=mod` can rewrite that nested module's `go.mod`/`go.sum`, so to honor the read-only constraint we register the identical `grpcservice.FeatureExplorer` service in a harness that builds inside the root module's vendored tree. Either way k6 — the system under test — is exercised canonically; the gRPC server is only a test fixture.) Source `/tmp/k6_evidence/q2/q2server_main.go`:
 
 ```go
 // Command q2harness is a minimal, faithful plaintext gRPC server that registers the
@@ -557,7 +560,7 @@ GRPC_ADDR=127.0.0.1:$PORT /tmp/k6bin/k6_canonical run \
     /tmp/k6_evidence/q2/q2_count.js   # cwd = /tmp/k6_evidence/q2 so route_guide.proto resolves
 ```
 
-**Complete output — tail** (`/tmp/k6_evidence/q2/count.log`; the 100 `DATA n` console lines run 1→100 above the tail, confirmed by `grep -c "msg=DATA" count.log` = 100):
+**Complete output — tail** (`/tmp/k6_evidence/q2/count.log`; the 100 `DATA n` console lines run 1→100 above the tail, confirmed by `grep -c 'msg="DATA' count.log` = 100 — the baseline script logs `console.log('DATA ' + n)`, so logrus quotes the value as `msg="DATA n"` (the space forces the quotes) and the grep pattern includes that opening quote):
 
 ```
 time="2026-07-13T19:17:32Z" level=info msg="DATA 99" source=console
@@ -682,7 +685,7 @@ time="2026-07-13T19:18:23Z" level=error msg="test run was aborted because k6 rec
 
 **Active-interruption proof (Observed).** The `DATA` messages are still arriving (file lines 54–151) when `Stopping k6 in response to signal… sig=interrupt` fires (line 152). k6 then logs, per stream, `stream is cancelled/finished error="canceled by client (k6)" streamMethod=/main.FeatureExplorer/ListFeatures` and `stream /main.FeatureExplorer/ListFeatures is closing`, and the five `STREAM_END` console lines appear **after** the `Stopping` line — i.e. the streams closed because the VU context was cancelled (`ctx.Done()` path), not because the server finished sending. The summary then shows `grpc_streams: 5`, `grpc_streams_msgs_sent: 5`, `grpc_streams_msgs_received: 95`, and `0 complete and 5 interrupted iterations`; k6 ends with `test run was aborted because k6 received a 'interrupt' signal`.
 
-**Distribution across three unchanged runs (Observed, timing-dependent value confirmed stable):**
+**Distribution across three unchanged runs (Observed, timing-dependent value confirmed stable)** — the reproduced magnitude is the message **count** (`95`), shown in full for all three runs; the trailing per-second **rate** is a run-varying, non-essential field, so it is shown for run 1 (`48.099874/s`) and elided as `...` for runs 2–3:
 
 ```bash
 $ for f in interrupt_run1.log interrupt_run2.log interrupt_run3.log; do \
@@ -931,9 +934,9 @@ $ cat /tmp/k6_evidence/q3/arrival_final2.json
 
 ### Root cause (`path:line`)
 
-- `metrics/builtin.go:10` `DroppedIterationsName = "dropped_iterations"`; `metrics/builtin.go:44` the field; `metrics/builtin.go:84` registers it via `registry.MustNewMetric(DroppedIterationsName, metrics.Counter)`.
+- `metrics/builtin.go:10` `DroppedIterationsName = "dropped_iterations"`; `metrics/builtin.go:44` the field; `metrics/builtin.go:84` registers it via `registry.MustNewMetric(DroppedIterationsName, Counter)` (unqualified `Counter` — `builtin.go` is itself in package `metrics`).
 - **Primary drop site (test end):** `lib/executor/shared_iterations.go:217-229` — a `defer` that, after `activeVUs.Wait()`, checks `lib/executor/shared_iterations.go:219` `if attemptedIters < totalIters` and pushes `lib/executor/shared_iterations.go:222` the `DroppedIterations` metric with `lib/executor/shared_iterations.go:225` `Value: float64(totalIters - attemptedIters)`. Because it fires at the end, `--linger` is required to query it live.
-- **Secondary drop site (during run):** `lib/executor/constant_arrival_rate.go:324` `droppedIterationMetric`; `:332` `if !vusPool.TryRunIteration()`; `:341` the metric; `:345` `Value: 1` — accrues per dropped iteration as the run proceeds. Analogous per-VU / ramping sites exist at `lib/executor/per_vu_iterations.go:202` and `lib/executor/ramping_arrival_rate.go:472`.
+- **Secondary drop site (during run):** `lib/executor/constant_arrival_rate.go:324` `droppedIterationMetric`; `:332` `if vusPool.TryRunIteration() { continue }` (the drop path is the **false** branch — reached when no free VU is available); `:341` the `Metric: droppedIterationMetric` field; `:345` `Value: 1` — accrues per dropped iteration as the run proceeds. Analogous per-VU / ramping sites exist at `lib/executor/per_vu_iterations.go:202` and `lib/executor/ramping_arrival_rate.go:472`.
 - **REST API path:** `api/v1/routes.go:23` registers `"/v1/metrics"` → `:28` `handleGetMetrics`; `api/v1/routes.go:31` `"/v1/metrics/"` → `:37` extracts the id → `:38` `handleGetMetric` (handlers in `api/v1/metric_routes.go`). The JSON shape: `api/v1/metric.go:69` `Sample map[string]float64 `json:"sample"``, filled at `api/v1/metric.go:80` `Sample: m.Sink.Format(t)`; for a counter `metrics/sink.go:64` `CounterSink.Format` returns `metrics/sink.go:66` `"count": c.Value` (and `:67` `"rate"`). The JSON:API envelope: `api/v1/metric_jsonapi.go:11` `Data []metricData` (list) vs `:15` `Data metricData` (single), `:18` `metricData`, `:21` `Attributes Metric`.
 - **Bind & flags:** `cmd/state/state.go:150` defaults the API to `Address: "localhost:6565"`; `cmd/config.go:32` defines the `--linger`/`-l` flag; `cmd/stats.go` `RunE func(_ *cobra.Command, _ []string)` ignores positional args (findings #5, #17).
 
@@ -1075,7 +1078,40 @@ Minor (reclaiming a frame) page faults: 45626
 Exit status: 0
 ```
 
-**Resource disclosure (Observed).** All 16 runs exited `0`; none was OOM-killed. Peak usage was the naive 200-VU run at ~16.8 GB, comfortably within the host’s available memory (~3.7 TiB), so the high-memory naive runs completed rather than aborting.
+**Resource disclosure (Observed).** All 16 runs exited `0`; none was OOM-killed. Peak usage was the naive 200-VU run at ~16.8 GB, comfortably within **both** the binding process cgroup limit (`/sys/fs/cgroup/…/memory.max` = `103079215104` bytes = **96 GiB**, observed) and the host’s available memory (~3.7 TiB), so the high-memory naive runs completed rather than aborting.
+
+### Supplementary control measurements (no-data baseline + `VmHWM` corroboration)
+
+To isolate ordinary per-VU runtime overhead from dataset duplication, and to corroborate the `/usr/bin/time -v` figures with the kernel's own peak-RSS counter, two additional controls were captured with the canonical binary (`k6 v0.55.0 (commit/0ad99e99c6, go1.21.13, linux/amd64)` — the HEAD build, runtime-identical to `k6_canonical` because the doc commit adds no Go code). Each configuration ran twice at 5 s; for every run the process **peak** `VmHWM` was sampled from `/proc/<pid>/status` while the run was in flight, alongside the `/usr/bin/time -v` "Maximum resident set size" from the same run.
+
+**(1) No-data baseline** — a control script that loads **no** dataset (`export default () => { sleep(1); }`), measuring only the per-VU sobek runtime. **(2) `SharedArray`** — the same `q4_shared.js`, with `VmHWM` sampled alongside `time -v` (`/tmp/k6_evidence/q4/rss_supp.tsv`):
+
+```
+variant   vus  run  exit  VmHWM_MB  time_maxrss_MB
+baseline    1    1    0     38.6         32.0
+baseline    1    2    0     38.6         33.0
+baseline   50    1    0     44.0         33.0
+baseline   50    2    0     44.0         32.0
+baseline  100    1    0     48.9         33.0
+baseline  100    2    0     49.3         36.0
+baseline  200    1    0     57.6         34.0
+baseline  200    2    0     59.0         38.0
+shared      1    1    0    200.9        190.0
+shared      1    2    0    189.4        176.0
+shared     50    1    0    202.5        192.0
+shared     50    2    0    188.6        174.5
+shared    100    1    0    188.6        176.0
+shared    100    2    0    188.2        174.0
+shared    200    1    0    190.7        177.6
+shared    200    2    0    188.9        174.0
+```
+
+**Observed (control):**
+- The **no-data baseline** grows at ~**0.10 MB/VU** (`VmHWM` 38.6 MB @1 VU -> 58.3 MB @200 VU) — this is generic sobek per-VU overhead, present in every executor regardless of data loading.
+- The **`SharedArray`** `VmHWM` stays **flat** (~188–203 MB; slope ~= **0 MB/VU**) over 1->200 VUs. Subtracting the baseline, the **dataset contribution** (`shared − baseline`) is ~131–157 MB and does **not** grow with VU count — so the small residual rise in the raw shared table is generic per-VU overhead, **not** dataset copying.
+- `VmHWM` and `/usr/bin/time -v` agree within **~6–7%** at the ~180 MB shared scale (both confirm the flat curve). At the much smaller baseline scale GNU `time` **under-reports** (`maxrss` ~32–38 MB vs `VmHWM` 38.6–58.3 MB) — a known `ru_maxrss` limitation for threaded Go processes — which is why `VmHWM` is used as the primary peak-RSS counter; because the shared-vs-naive contrast spans two orders of magnitude, the conclusion is unaffected by either method.
+- All 16 control runs exited `0`; peak control usage (~200 MB) is far below the 96 GiB cgroup limit.
+
 
 ### Direct answer
 
@@ -1378,7 +1414,7 @@ req_005.snappy  bytes=370  sha256=b7026ff10cb0afc5419bb179a6d6c03b2d26c0b5f8fee0
 req_006.snappy  bytes=258  sha256=9bb918a9239409aeb8135f17638ebb301efe3b3c538d6a2e184a918a6751ff7f
 ```
 
-These lengths and hashes **exactly match** the `raw_bytes=`/`sha256=` values the decoder computed internally (below), so the decoded names are proven against the exact emitted bytes.
+These lengths and hashes **exactly match** the `raw_bytes=`/`sha256=` values the decoder computed internally (below), so the decoded names are proven against the exact emitted bytes. (Note: the specific per-body **lengths** and **SHA-256** values above are per-capture provenance for *this* run — the payload carries trend samples derived from `Math.random()` and its per-flush batching varies run-to-run, so a fresh capture yields different bytes/hashes. What is **deterministic and reproducible** is the decoded `__name__` set, which is identical across runs, as shown next; the SHA-256 identity is used only to prove each decode was performed against the exact bytes k6 emitted, not to assert byte-for-byte reproducibility of the payload.)
 
 ### Decoded wire labels — run 1 (complete)
 
@@ -1629,7 +1665,7 @@ $ git diff --stat HEAD -- . ':(exclude)blitzy/documentation/k6_ddc3b0b1d23c.md' 
 ###### END ######
 ```
 
-**Observed:** all five `/tmp` directories and the three generator scripts were removed (each `rm` `exit=0`, and the AFTER check reports `removed:` for every path); no `q2harness`/`q5recv`/`q5decode`/`k6_canonical` process remained (`ps … | wc -l` = `0`); no loopback listener remained on the harness port range (`ss … | wc -l` = `0`); the recorded Q2 server PID (`136685`) was already dead. `git status --porcelain` shows the **single** entry ` M blitzy/documentation/k6_ddc3b0b1d23c.md`, and the exclude-scoped `git diff` is empty — proving **no source file was modified**. The cleanup capture log itself is removed as the final action after this section is embedded, leaving `/tmp` free of investigation artifacts. This document is then committed as the sole repository change.
+**Observed:** all five `/tmp` directories and the three generator scripts were removed (each `rm` `exit=0`, and the AFTER check reports `removed:` for every path); no `q2harness`/`q5recv`/`q5decode`/`k6_canonical` process remained (`ps … | wc -l` = `0`); no loopback listener remained on the harness port range (`ss … | wc -l` = `0`); the recorded Q2 server PID (`136685`) was already dead. `git status --porcelain` shows the **single** entry ` M blitzy/documentation/k6_ddc3b0b1d23c.md`, and the exclude-scoped `git diff` is empty — proving **no source file was modified**. The cleanup capture log itself is removed as the final action after this section is embedded, leaving `/tmp` free of investigation artifacts. This document is then committed as the sole repository change. _(The ` M blitzy/documentation/k6_ddc3b0b1d23c.md` line above is a **pre-commit** capture, taken while the document was still an unstaged modification; once it is committed as described, a reader inspecting the committed tree sees an **empty** `git status --porcelain` with the deliverable tracked at `HEAD`. The read-only-source guarantee — exactly one file differing from base, no Go/manifest/vendor change — holds identically in both the pre-commit and committed states.)_
 
 ## Coverage pass
 
