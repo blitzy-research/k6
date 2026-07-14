@@ -724,7 +724,7 @@ interrupt_run3.log:0
 - `js/modules/k6/grpc/stream.go:149` `queueMessage()` increments the received counter — `js/modules/k6/grpc/stream.go:153-159` emit `StreamsMessagesReceived` with `Value: 1` per message.
 - Interrupt path: `js/modules/k6/grpc/stream.go:119` `loop()`; `:133` `ctxDone := ctx.Done()`; `:136` `case <-ctxDone`; `:137-138` comment "VU is shutting down during an interrupt"; `:140` `return s.closeWithError(nil)`. On cancel k6 logs `js/modules/k6/grpc/stream.go:201` `"stream is cancelled/finished"` and `js/modules/k6/grpc/stream.go:371` `"…is closing"` — both Observed.
 - The shipped contract: `lib/testutils/grpcservice/route_guide.proto:38` `rpc ListFeatures(Rectangle) returns (stream Feature)`; the server impl `lib/testutils/grpcservice/service.go:57` `ListFeatures`, `:62` `time.Sleep(100 * time.Millisecond)` (the fixed per-message cadence), `:63` `stream.Send(feature)`; `:170` `LoadFeatures` returns the `:234` `exampleData` (100 features when the path is empty).
-- **Event-loop correction (finding #4).** `js/runner.go:837-839` create the event loop; `:840` `eventLoop.Start(fn)` runs the default function; `:847-852` `select { case <-ctx.Done(): … isFullIteration = false … }`; `:854-855` `cancel()` then `eventLoop.WaitOnRegistered()` keeps the iteration alive until async stream callbacks finish. The script’s `sleep(0.5)` runs **immediately after** `stream.write()`, not after the `end` event, and a full stream takes ~10 s at the 100 ms cadence — so the prior draft’s claim that "the interrupt lands during a post-stream `sleep(0.5)`" is **false**; the interrupt lands while the stream is actively delivering.
+- **Event-loop correction (finding #4).** `js/runner.go:837-839` create the event loop; `:840` `eventLoop.Start(fn)` runs the default function; `:845-850` `select { case <-ctx.Done(): … isFullIteration = false … }`; `:853-854` `cancel()` then `eventLoop.WaitOnRegistered()` keeps the iteration alive until async stream callbacks finish. The script’s `sleep(0.5)` runs **immediately after** `stream.write()`, not after the `end` event, and a full stream takes ~10 s at the 100 ms cadence — so the prior draft’s claim that "the interrupt lands during a post-stream `sleep(0.5)`" is **false**; the interrupt lands while the stream is actively delivering.
 
 ### Observed vs. inferred
 
@@ -1109,7 +1109,7 @@ Minor (reclaiming a frame) page faults: 45626
 Exit status: 0
 ```
 
-**Resource disclosure (Observed).** All 16 runs exited `0`; none was OOM-killed. Peak usage was the naive 200-VU run at ~16.8 GB, comfortably within **both** the binding process cgroup limit (`/sys/fs/cgroup/…/memory.max` = `103079215104` bytes = **96 GiB**, observed) and the host’s available memory (~3.7 TiB), so the high-memory naive runs completed rather than aborting.
+**Resource disclosure (Observed).** All 16 runs exited `0`; none was OOM-killed. Peak usage on this authoring host was the naive 200-VU run at ~16.8 GB (the naive-200 high-water mark is host/GC-timing-dependent — ~15–17 GB across hosts), comfortably within **both** the binding process cgroup limit (`/sys/fs/cgroup/…/memory.max` = `103079215104` bytes = **96 GiB**, observed) and the host’s available memory (~3.7 TiB), so the high-memory naive runs completed rather than aborting.
 
 ### Supplementary control measurements (no-data baseline + `VmHWM` corroboration)
 
@@ -1146,7 +1146,7 @@ shared    200    2    0    188.9        174.0
 
 ### Direct answer
 
-**Observed:** the `SharedArray` footprint stays **approximately constant** — ~176–188 MB across 1→200 VUs (both runs) — whereas the naive per-VU load grows **roughly linearly**, ~80 MB per added VU, reaching ~16.2–16.8 GB at 200 VUs. So each VU does **not** copy the `SharedArray`; the naive script makes one full copy of the dataset per VU. The constructor-once behavior is confirmed at runtime by CPU time: the shared 200-VU run used **User time 1.19 s** (parse once), while the naive 200-VU run used **177.91 s** (~200 parses).
+**Observed:** the `SharedArray` footprint stays **approximately constant** — ~176–188 MB across 1→200 VUs (both runs) — whereas the naive per-VU load grows **roughly linearly**, ~80 MB per added VU, reaching **~15–17 GB** at 200 VUs (this authoring host recorded ~16.2–16.8 GB, shown in the table above; the exact 200-VU peak is a GC-timing/host-dependent high-water mark — an independent re-measurement on another host observed ~15.1–16.0 GB across three runs — while the flat-vs-linear contrast and the ~80 MB/VU slope are stable across hosts). So each VU does **not** copy the `SharedArray`; the naive script makes one full copy of the dataset per VU. The constructor-once behavior is confirmed at runtime by CPU time: the shared 200-VU run used **User time 1.19 s** (parse once), while the naive 200-VU run used **177.91 s** (~200 parses).
 
 ### Root cause (`path:line`)
 
@@ -1726,7 +1726,7 @@ A final decomposition confirming every named mechanism, metric, API, module, and
 - `k6 stats` ignores positional args — **Observed** (identical name-sets) + **Source-inferred** (`cmd/stats.go` `RunE(_,_)`).
 
 **Q4 — `SharedArray` footprint.**
-- Footprint approximately constant vs each-VU-copies — **Observed** = constant (~176–188 MB flat; naive ~16.8 GB at 200 VUs).
+- Footprint approximately constant vs each-VU-copies — **Observed** = constant (~176–188 MB flat; naive **~15–17 GB** at 200 VUs, a host/GC-timing-dependent high-water mark).
 - Supported by test-script output — **Observed** (`SHARED len=50000` / `NAIVE len=50000` probes).
 - Root cause in the `k6/data` module — **Source-inferred** (`js/modules/k6/data/data.go:20-33/52-57/95/152-163`, `share.go:9-11/21-33/35-41/44-58`); footprint + parse-once CPU (`1.19s` vs `177.91s`) **Observed**.
 - Magnitude/scale + two-run stability — **Observed** (VUs 1/50/100/200 × 2 runs; all `exit 0`, no OOM).
