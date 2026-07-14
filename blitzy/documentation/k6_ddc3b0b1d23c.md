@@ -28,12 +28,17 @@ k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 
 The `commit/…` field is **not** hard-coded: it is the abbreviated git `HEAD` revision (the first 10 characters of `vcs.revision`) that the Go toolchain stamps into the binary at build time via `debug.ReadBuildInfo()`, with a `-dirty` suffix appended only when the working tree is modified — see `FullVersion()` at [lib/consts/consts.go:L16-L53], the 10-character truncation at [lib/consts/consts.go:L30-L35], and the `-dirty` suffix at [lib/consts/consts.go:L48-L50]. The banner shown above is therefore **anchored to the fixed base commit `ddc3b0b1d2`** — the commit this branch (`k6_ddc3b0b1d23c`) is named after, and the commit every `file:line` citation in this document was verified against — so it does not drift as this answer document is committed. It is reproducible by building that exact commit (`git checkout ddc3b0b1d2 && go build && ./k6 version`).
 
-Because the answer document is itself committed on top of that base, a canonical `go build` in the delivered branch checkout stamps the **current branch `HEAD`** instead of the base commit. For example, while this document was being written the working tree carried the uncommitted edit, and the same command reported:
+Because the answer document is itself committed on top of that base, a canonical `go build` in the delivered branch checkout stamps the **current branch `HEAD`** — which advances with every commit to this branch — instead of the base commit. The stamped field therefore takes the generic form `commit/<HEAD-10>` (with a `-dirty` suffix while an edit is still uncommitted), and its exact value is **expected to drift** as this document is revised and re-committed. Two genuine snapshots illustrate the drift. During an earlier uncommitted edit (branch `HEAD` then `d9f7d8327…`) the command reported:
 ```text
 $ ./k6 version
 k6 v0.55.0 (commit/d9f7d83278-dirty, go1.23.12, linux/amd64)
 ```
-Here `d9f7d83278` is the abbreviated branch `HEAD` (the base commit plus the answer-document commits) and `-dirty` reflects the pending edit; both clear to a plain `commit/<HEAD-10>` once the tree is committed and clean. Only the `commit/…` field tracks `HEAD` — the semantic version (`v0.55.0`), the Go version (`go1.23.12`), and the platform (`linux/amd64`) are unaffected, and no answer-document commit modifies any cited k6 source file.
+At a later clean checkout (branch `HEAD` then `04c1951243…`) the same command reported:
+```text
+$ ./k6 version
+k6 v0.55.0 (commit/04c1951243, go1.23.12, linux/amd64)
+```
+In each, the `commit/…` field is simply `<HEAD-10>` plus an optional `-dirty`; only that field tracks `HEAD` — the semantic version (`v0.55.0`), the Go version (`go1.23.12`), and the platform (`linux/amd64`) are unaffected, and no answer-document commit modifies any cited k6 source file. The fixed, reproducible banner for the **source under investigation** remains the base-commit one above (`commit/ddc3b0b1d2`).
 
 **Test suite** (the `tests` make target, [Makefile:L28-L29]) — this exact invocation is the health baseline for Question 1:
 ```text
@@ -55,7 +60,7 @@ go version go1.23.12 linux/amd64
 
 ## Question 1 — Project health: how many tests pass vs. fail, and are any skipped or broken?
 
-**Short answer.** Under the canonical `go test -race -timeout 210s ./...` invocation on `linux/amd64`, the suite **does not fully pass**: it exits non-zero, with a small, **non-deterministic** set of packages failing on timing/TLS/OCSP/network-sensitive assertions. Across twelve repeated cold runs (two six-run captures on the same host) the totals stay in a narrow band — **82 packages total, 28 of which contain no tests (so 54 contain tests), with 45–48 passing (`ok`) and 6–9 failing (`FAIL`)** (most commonly **46 `ok` / 8 `FAIL`**; the `82`/`28`/`54` invariants and `exit=1` never change). A **four-package structural core** — `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `lib/executor` — fails in every cold run on environment-independent causes; the other failing packages (`js/modules/k6/timers`, `js`, `js/eventloop`, `cmd/tests`, and a rare rotating tail) are timing/load-sensitive flakes whose exact set varies per run and host. One test is **skipped at runtime** in this environment (`TestTC39`); several other skips are Windows-only guards that do not fire on Linux. No test is "broken" in the sense of failing to compile — every package builds; the failures are runtime assertion/timing failures. The evidence follows.
+**Short answer.** Under the canonical `go test -race -timeout 210s ./...` invocation on `linux/amd64`, the suite **does not fully pass**: it exits non-zero, with a small, **non-deterministic** set of packages failing on timing/TLS/OCSP/network-sensitive assertions. Across twelve repeated cold runs (two six-run captures on the same host) the totals stay in a narrow band — **82 packages total, 28 of which contain no tests (so 54 contain tests), with 45–48 passing (`ok`) and 6–9 failing (`FAIL`)** (most commonly **46 `ok` / 8 `FAIL`**; the `82`/`28`/`54` invariants and `exit=1` never change). A **four-package structural core** — `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `lib/executor` — fails in every cold run on environment-independent causes; the other failing packages (`js/modules/k6/timers`, `js`, `js/eventloop`, `cmd/tests`, and a rare rotating tail) are timing/load-sensitive flakes whose exact set varies per run and host. One test is **skipped at runtime** in this environment (`TestTC39`); several other skips are Windows-only guards that do not fire on Linux. No test is "broken" in the sense of failing to compile — every package builds; the failures are runtime failures (assertion/timing, plus one rare map-ordering panic in `output/cloud/expv2`), not build breakage. The evidence follows.
 
 ### 1.1 Suite scope (how many tests there are)
 
@@ -237,6 +242,39 @@ This separates into a dependable core and a load-sensitive tail:
 - **Structural core — fails in _every_ run of both captures (12/12), on environment-independent causes:** `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, `lib/executor`. These are the truly dependable failures — a TLS trust failure, an OCSP-stapling assertion, and `-race` concurrency / scheduling-tolerance assertions (detailed below).
 - **Frequent timing / load-sensitive flakes:** `js/modules/k6/timers` and `js` (both 6/6 in this session), `js/eventloop` (5/6), `cmd/tests` (3/6). `timers` failed in all twelve of my runs, but its assertion is a load-dependent callback count (`"4" >= "5"`), so it is *frequent* rather than *structural* and can pass on a less-contended host.
 - **Rare rotating tail:** `lib/netext/httpext` (2/6 here) and `lib` (1/6 here). In the earlier same-host capture the tail was instead `cloudapi` (1/6) with `httpext` not tripping at all — direct evidence that *which* tail package flakes is environment-specific.
+- **Rare tail with a _different_ failure mode — `output/cloud/expv2` (a map-ordering panic).** A later set of four cold validation re-runs on the same host (`go clean -testcache` before each; same `82`/`28`/`54`/`exit=1` invariants, split **46/8, 46/8, 48/6, 47/7**) surfaced one further tail package not seen in the two six-run captures above: **`output/cloud/expv2`** (**1 of 4** re-runs). It matters because its failure mode is **distinct from the timing/TLS/OCSP/concurrency flakes** — it is a Go **map-iteration-order** flake in `TestFlushMaxSeriesInBatch` that fails an ordering-dependent assertion and then **panics**. Extraction command and its complete output (the labelled excerpt runs from the `--- FAIL` line to the identifying stack frame):
+```text
+$ sed -n '/--- FAIL: TestFlushMaxSeriesInBatch/,/expv2\/flush_test.go:297/p' /tmp/k6_investigation/revalidation_run1.log
+```
+```text
+--- FAIL: TestFlushMaxSeriesInBatch (0.10s)
+    flush_test.go:295: 
+        	Error Trace:	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/output/cloud/expv2/flush_test.go:295
+        	Error:      	Not equal: 
+        	            	expected: "val1"
+        	            	actual  : "val3"
+        	            	
+        	            	Diff:
+        	            	--- Expected
+        	            	+++ Actual
+        	            	@@ -1 +1 @@
+        	            	-val1
+        	            	+val3
+        	Test:       	TestFlushMaxSeriesInBatch
+panic: runtime error: index out of range [1] with length 1 [recovered]
+	panic: runtime error: index out of range [1] with length 1
+
+goroutine 39 [running]:
+testing.tRunner.func1.2({0x105f0a0, 0xc00026a258})
+	/usr/local/go/src/testing/testing.go:1632 +0x3fc
+testing.tRunner.func1()
+	/usr/local/go/src/testing/testing.go:1635 +0x6b6
+panic({0x105f0a0?, 0xc00026a258?})
+	/usr/local/go/src/runtime/panic.go:791 +0x132
+go.k6.io/k6/output/cloud/expv2.TestFlushMaxSeriesInBatch(0xc000290820)
+	/tmp/blitzy/k6/blitzy-3871de35-a4eb-4690-af49-5aa518f88260_b042a1/output/cloud/expv2/flush_test.go:297 +0x1229
+```
+The metrics are held in a Go `map` and flushed in randomized order, so the assertion at [output/cloud/expv2/flush_test.go:L295] can observe `"val3"` where `"val1"` was expected, after which `require.Len(t, ts[1].Labels, 1)` at [output/cloud/expv2/flush_test.go:L297] indexes past a shorter-than-expected slice and panics with `index out of range [1] with length 1`. This is still a **runtime** failure (the package compiles), so it does not change the "broken" answer in [§1.5(d)](#15-skipped-or-broken-tests) — but it shows the rotating tail varies not only in *identity* but in *failure mode*: most non-core failures are timing/TLS/OCSP/concurrency assertions, while at least one (`expv2`) is a map-ordering panic.
 
 _These per-package frequencies are environment-specific and should be read as indicative, not fixed._ They are the tallies from the six canonical cold runs above; because the non-core failures are `-race` timing-tail flakes, the set of packages that trips in any given run shifts by ±1–2 with machine scheduling (run 6, for instance, dropped `js/eventloop` and the tail entirely, giving 47/7). Only the invariants (28 no-test, 82 total, 54 tested, `exit=1`) and the four-package **structural core** are dependable across environments; everything else — the exact `FAIL` count and the identity of the flaky packages beyond the core — varies from run to run and host to host.
 
@@ -426,7 +464,7 @@ This is why a plain `go test ./...` summary reports no skips even though `TestTC
 
 These excluded files are **not broken** — they simply are not part of this invocation's compile.
 
-**(d) "Broken" tests.** No package fails to **compile**; all 82 packages build. The failures in [§1.4](#14-which-packages-fail-and-why) are **runtime assertion/timing failures**, not build breakage. In that precise sense there are no "broken" (uncompilable) tests; there is a small, flaky set of runtime failures.
+**(d) "Broken" tests.** No package fails to **compile**; all 82 packages build. The failures in [§1.4](#14-which-packages-fail-and-why) are **runtime failures** — overwhelmingly assertion/timing failures, plus (rarely) a map-ordering **panic** (`output/cloud/expv2`, [§1.4](#14-which-packages-fail-and-why)) — **not build breakage**. In that precise sense there are no "broken" (uncompilable) tests; there is a small, flaky set of runtime failures.
 
 ### 1.6 The test-isolation harness (why some failures look unusual)
 
@@ -442,7 +480,7 @@ _(inferred)_ Because of this harness, a `cmd/tests` failure can manifest as a pa
 
 - **Pass vs. fail:** Not a clean pass. Across twelve cold runs (two six-run captures on the same host) the split was **45–48 packages `ok`, 6–9 `FAIL`, 28 with no tests**, out of **82** total (of which **54** contain tests); the process exits non-zero (`exit=1`) every time. The exact `FAIL` count is environment- and load-sensitive under `-race` — in the timed session it was **8** in five of six runs and **7** in one, while the earlier session ranged 6–9 (most commonly **8**; see [§1.2](#12-passfail-counts-and-their-stability-across-runs)) — whereas the 28 no-test, 54 tested, and 82 total are invariant. The dependable failures are a **four-package structural core** that fails in every run on environment-independent causes — `execution`, `js/modules/k6/grpc`, `js/modules/k6/http`, and `lib/executor` — while `js/modules/k6/timers`, `js`, `js/eventloop`, `cmd/tests`, and a rare rotating tail are timing/load-sensitive flakes whose exact set varies per run and host.
 - **Skipped:** One test is **observed skipping at runtime** here — `TestTC39` ([js/tc39/tc39_test.go:L807], reason: the `test262` corpus is absent). Three further `t.Skip` guards exist but are **Windows-only** and do not fire on Linux. Non-verbose `go test` hides skips.
-- **Broken:** _(inferred)_ None in the compile sense — all 82 packages build. The failing packages are flaky on **timing / TLS / OCSP / concurrency** assertions under the `-race` detector, not the metric-tracking code that Questions 2–3 concern.
+- **Broken:** _(inferred)_ None in the compile sense — all 82 packages build. The failing packages are flaky on **timing / TLS / OCSP / concurrency** assertions under the `-race` detector (plus a rare map-ordering **panic** in `output/cloud/expv2`, [§1.4](#14-which-packages-fail-and-why)), not the metric-tracking code that Questions 2–3 concern.
 
 ## Question 2 — What counts iterations and collects performance data when I kick off a load test?
 
@@ -823,7 +861,7 @@ The count is exactly **5** because — and only because — each of the five ite
   - `test-current-cov` ([.github/workflows/test.yml:L85]) — Go **1.23.x** ([.github/workflows/test.yml:L89]) — does **not** run a single `./...`; it loops **per package** with coverage: `go test … -timeout 800s --coverpkg="$list" -coverprofile=… $pkg` ([.github/workflows/test.yml:L118]).
   Note CI uses `-timeout 800s` whereas the local `tests` target uses `-timeout 210s`. _(inferred)_ The per-package coverage job and the more generous CI timeout make CI less prone to the timing flakiness seen locally, but the flaky tests are the same code.
 - **Result caching.** `go test` caches only *passing* package results, so failing packages are re-run on every invocation regardless of cache state; _(inferred)_ a warm cache therefore cannot mask the failing set. All health figures in §1.2–§1.4 were taken from **cold** runs (`go clean -testcache` before each) to force genuine re-execution of every package.
-- **Timing sensitivity.** _(inferred)_ The failing packages fail predominantly on wall-clock / TLS / OCSP / concurrency assertions amplified by the `-race` detector; they are largely unrelated to the metric-tracking code that Questions 2–3 describe. Because these are timing-tail flakes, the **exact count** of failing packages in any single cold run is environment- and load-sensitive (this part is *observed*, not inferred): across the twelve cold runs the count moved between `FAIL` **6 and 9** (`ok` **48 down to 45**) as flaky packages tripped in and out, while the invariants (28 no-test, 54 tested, 82 total, `exit=1`) never change — see [§1.2](#12-passfail-counts-and-their-stability-across-runs).
+- **Timing sensitivity.** _(inferred)_ The failing packages fail predominantly on wall-clock / TLS / OCSP / concurrency assertions amplified by the `-race` detector (with one rare exception — the `output/cloud/expv2` **map-ordering panic** in [§1.4](#14-which-packages-fail-and-why)); they are largely unrelated to the metric-tracking code that Questions 2–3 describe. Because these are timing-tail (and, in the `expv2` case, map-ordering) flakes, the **exact count** of failing packages in any single cold run is environment- and load-sensitive (this part is *observed*, not inferred): across the twelve cold runs the count moved between `FAIL` **6 and 9** (`ok` **48 down to 45**) as flaky packages tripped in and out, while the invariants (28 no-test, 54 tested, 82 total, `exit=1`) never change — see [§1.2](#12-passfail-counts-and-their-stability-across-runs).
 - **Read-only compliance.** The only file created or modified in the repository is this document. The minimal script, the JSON output, and all logs were kept under `/tmp/k6_investigation/` (outside the checkout) and were removed after the relevant outputs had been extracted into this document; `git status --porcelain` was verified to show only this document.
 
 ## Coverage pass (every named item addressed)
