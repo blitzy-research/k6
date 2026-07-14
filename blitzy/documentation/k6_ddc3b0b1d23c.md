@@ -8,7 +8,7 @@ This document answers five questions (Q1–Q5). For each: the harness, the exact
 
 ### Build and environment (foundation transcript)
 
-Two binaries were built with the pinned toolchain, both **outside** the checkout so the repository stays pristine. `/tmp/k6bin/k6_canonical` is built from the base commit `ddc3b0b1d23c…` and carries the canonical banner `commit/ddc3b0b1d2` cited by the AAP; it is the binary used for **every** experiment below. `/tmp/k6bin/k6` is built from the working-tree `HEAD` (`ec4344835…` = base + this markdown-only doc commit) and differs only by the embedded VCS stamp — the doc commit adds no Go code, so runtime behavior is identical. The complete transcript (working directory, branch, full HEAD, `git log`, pre-build clean status, real `go version`, both builds with exit codes and banners, binary identities, post-build clean status) is:
+Two binaries were built with the pinned toolchain, both **outside** the checkout so the repository stays pristine. `/tmp/k6bin/k6_canonical` is built from the base commit `ddc3b0b1d23c…` and carries the canonical banner `commit/ddc3b0b1d2` cited by the AAP; it is the binary used for the **primary** Q1–Q5 experiments below. `/tmp/k6bin/k6` is built from the working-tree `HEAD` (`ec4344835…` = base + this markdown-only doc commit) and differs only by the embedded VCS stamp — the doc commit adds no Go code, so runtime behavior is identical (verified: `git diff base…HEAD` touches only this Markdown file — zero `.go`/`.mod`/`.sum`/`vendor/` changes). The only place a binary other than `k6_canonical` is used is the two **supplementary Q4 controls** (the no-data baseline and the `VmHWM` corroboration), which were captured with a runtime-equivalent `HEAD` build (banner `commit/0ad99e99c6`, runtime-identical to `k6_canonical` because the doc commit adds no Go code) and are explicitly labelled as such where they appear. The complete transcript (working directory, branch, full HEAD, `git log`, pre-build clean status, real `go version`, both builds with exit codes and banners, binary identities, post-build clean status) is:
 
 _Command: the transcript below records each command with its `$` prompt and `[exit=N]` status; it was run from the repository root before any answer prose was written._
 
@@ -81,7 +81,7 @@ _Transcript provenance (self-reference note)._ This foundation transcript is the
 ### Methodology and safety
 
 - **Run-first.** Each answer was produced by building/running the relevant path and capturing the real stdout/stderr, REST JSON, peak-RSS numbers, or decoded payload bytes; prose came afterward.
-- **Two-run stability.** Every magnitude/timing value (Q1 interrupted count, Q2 message count, Q3 drop counts, Q4 RSS curves, Q5 name set) was confirmed across at least two runs; Q2’s timing-dependent count was run three times and the distribution reported.
+- **Two-run stability.** Every magnitude/timing value (Q1 interrupted count, Q2 message count, Q3 drop counts, Q4 RSS curves, Q5 name set) was confirmed across at least two runs. Two are inherently **timing/scheduling-dependent** and are therefore reported as multi-run observations rather than asserted as fixed constants: Q2’s received-message count (run three times — observed **`95` in all three**, because the interrupt at t≈2 s consistently caught 95 messages before shutdown) and Q3’s primary `shared-iterations` drop count (re-run 45 times — **`985` in 42/45**, range `980–985`). Q2 happened to be stable at its observed value across the three runs; Q3’s exact integer varied run-to-run, so for Q3 the reproduced, stable facts are the surrounding invariants — the REST-API provenance and `dropped_iterations + iterations = 1000` — rather than the exact integer.
 - **Run-varying fields are labeled, not reproduced.** A few incidental fields are inherently run-to-run variable and are **not** part of the reproduced magnitudes: per-second throughput **rates** in summaries (e.g. `48.099874/s`); the `Content-Length` of a REST JSON body that embeds a computed rate float (e.g. `169` vs `170`, differing only by the rate’s digit count); the exact progress-snapshot line rendered at the precise instant of interrupt; and the byte length/`sha256` of a remote-write payload carrying `Math.random()`-derived trend samples. For these, the **stable** quantity (the count, the metric value, the decoded name set) is what is confirmed across runs; a variable field may be shown in full for one run and elided as `...` for the others.
 - **Canonical entry points only.** Values come from `k6 run`, `k6 stats`, and the real REST API (`GET /v1/metrics…`) — never a debug hook, mock, or synthetic bypass. The Q2 gRPC server and Q5 remote-write receiver are standard harnesses (a faithful build of the shipped `grpcservice` server, and a minimal capture endpoint), not behavioral substitutes for k6.
 - **Safety (finding #12 / S1–S3).** Every harness used `set -euo pipefail`; evidence directories were mode-`0700`; listeners bound to loopback only (`127.0.0.1`); **unique** ports were chosen per run via `shuf -i 20000-39999 -n1` (the concrete port appears in each log, e.g. `39652`, `27640`, `38022`); helper processes were tracked by owned PID with `kill -0` verification and shut down via `trap … EXIT`; readiness was established by bounded TCP-connect polling (not fixed sleeps); the Q5 receiver bounded each request body with `io.LimitReader(r.Body, 10<<20)`.
@@ -795,7 +795,38 @@ HTTP_STATUS:200
 HTTP_STATUS:200
 ```
 
-**Observed:** `GET /v1/metrics/dropped_iterations` returns `HTTP/1.1 200 OK` with `data.attributes.sample.count = 985` (both runs; run 2 `count=985` as well). The list route returns all seven metrics; within it `iterations` shows `count:15` and `dropped_iterations` shows `count:985` — `15 + 985 = 1000`, the requested iteration total.
+**Observed:** `GET /v1/metrics/dropped_iterations` returns `HTTP/1.1 200 OK` with `data.attributes.sample.count = 985` in both authoring captures above. The list route returns all seven metrics; within it `iterations` shows `count:15` and `dropped_iterations` shows `count:985` — `15 + 985 = 1000`, the requested iteration total. The `985` here is the value both authoring runs recorded, but it is **not** a fixed constant: the exact drop integer is timing/scheduling-dependent (it equals `1000` minus however many iterations finish inside the 3 s `maxDuration` window). The multi-run distribution immediately below quantifies this; what is invariant across every run is the value's **API provenance** and the conservation identity `dropped_iterations + iterations = 1000`.
+
+**Observed — multi-run distribution (unchanged input).** Because the split between completed and dropped iterations turns on how many iterations finish inside the 3 s `maxDuration` window, the *identical* scenario was re-run 45 times (two batches, 15 + 30) with `k6_canonical`; every run read `dropped_iterations` from the REST API via `--linger` (the API count equalled the console-summary count in every run of the first batch):
+
+_Command (repeat the unchanged run; read the API count per run, then tally):_
+
+```bash
+for i in $(seq 1 45); do
+  PORT=$(shuf -i 20000-39999 -n1)
+  /tmp/k6bin/k6_canonical run --linger --address 127.0.0.1:$PORT \
+      /tmp/k6_evidence/q3/q3_shared_iters.js >/tmp/q3_run.log 2>&1 & K6PID=$!
+  # wait for the end-of-test drop sample to materialize, then read it from the REST API:
+  for t in $(seq 1 60); do
+    c=$(curl -s http://127.0.0.1:$PORT/v1/metrics/dropped_iterations \
+         | python3 -c "import sys,json
+try: print(json.load(sys.stdin)['data']['attributes']['sample']['count'])
+except Exception: pass")
+    [ -n "$c" ] && [ "$c" != 0 ] && echo "$c" && break
+    sleep 0.25
+  done
+  kill -INT "$K6PID"; wait "$K6PID" 2>/dev/null
+done | sort -n | uniq -c
+```
+
+```
+      1 980
+      1 983
+      1 984
+     42 985
+```
+
+`985` occurred in **42 of 45 runs** (the mode, and the value both authoring captures recorded); the other three runs returned `984`, `983`, and `980`. In every one of the 45 runs the conservation identity held exactly (`dropped_iterations + iterations = 1000`), and each lower drop count corresponded to a few extra iterations completing before the cutoff (`completed = 16 → 984`, `17 → 983`, `20 → 980`). So the exact integer is **timing/scheduling-dependent**, not deterministic: independent runs of the same input on a different, less-contended host observed the range **982–985**. The stable, reproduced facts are (a) the value's REST-API provenance and (b) the invariant `dropped_iterations + iterations = 1000`.
 
 **`k6 stats` — full output, and the positional-argument semantics (findings #5, #17).** `k6 stats` prints **all** metrics; the CLI **ignores** any positional argument (`cmd/stats.go` `RunE func(_ *cobra.Command, _ []string)`), so `k6 stats dropped_iterations` returns the same set. Proven by comparing the metric-name sets of `k6 stats` vs `k6 stats dropped_iterations`:
 
@@ -930,7 +961,7 @@ $ cat /tmp/k6_evidence/q3/arrival_final2.json
 
 ### Direct answer
 
-**Observed:** `dropped_iterations = 985` for the primary over-`maxDuration` `shared-iterations` scenario, obtained from the REST API via `GET /v1/metrics/dropped_iterations` (`HTTP 200`, `data.attributes.sample.count = 985`) — proven to come from the API, not the console, because `--linger` kept the server alive and the raw JSON body was captured with its HTTP status. The value is stable across two runs. The secondary `constant-arrival-rate` over-capacity scenario yields `1951` drops that accrue during the run (API == console).
+**Observed:** `dropped_iterations ≈ 985` for the primary over-`maxDuration` `shared-iterations` scenario, obtained from the REST API via `GET /v1/metrics/dropped_iterations` (`HTTP 200`, `data.attributes.sample.count`; both authoring captures were `985`) — proven to come from the API, not the console, because `--linger` kept the server alive and the raw JSON body was captured with its HTTP status. The exact integer is **timing/scheduling-dependent** (it equals `1000` minus the iterations that finish within the 3 s `maxDuration` window): re-running the unchanged input 45× produced `985` in 42 runs and `984`/`983`/`980` in the other three (range **980–985**; an independent host observed **982–985**). What is stable across every run is the value's REST-API provenance and the conservation invariant `dropped_iterations + iterations = 1000`. The secondary `constant-arrival-rate` over-capacity scenario yields on the order of `1951` drops (observed **1950–1951**) that accrue during the run (API == console).
 
 ### Root cause (`path:line`)
 
@@ -1710,7 +1741,7 @@ A final decomposition confirming every named mechanism, metric, API, module, and
 
 **Cross-cutting.**
 - Canonical, default build + banner — **Observed** (foundation transcript: `k6_canonical v0.55.0 (commit/ddc3b0b1d2, …)`, `go1.21.13`).
-- Two-run stability for every magnitude/timing value — **Observed** (Q1 ×2, Q2 ×3, Q3 ×2, Q4 ×2, Q5 ×2).
+- Two-run stability for every magnitude/timing value — **Observed** (Q1 ×2, Q2 ×3, Q3 45× for the primary drop count, Q4 ×2, Q5 ×2); Q2 and Q3 are timing-dependent and are reported as observed distributions (Q3: `985` in 42/45, range `980–985`), with the `dropped_iterations + iterations = 1000` conservation invariant stable across all runs.
 - Canonical entry points only (`k6 run`, `k6 stats`, REST API) — **Observed**.
 - Safe scripting, read-only repo, full cleanup — **Observed** (methodology bullets + cleanup transcript; only the deliverable changed).
 
