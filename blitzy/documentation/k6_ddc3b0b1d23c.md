@@ -1250,9 +1250,11 @@ copied).
 - **Data stringified once.** For the JS-facing `new SharedArray(name, fn)` constructor (`sharedArray`,
   `:L73`), the array is built a single time via `(*sharedArrays).get` (`:L95`, `:L152`), which calls
   `getShareArrayFromCall` (`:L169`); that function `JSON.stringify`s each element into one host-side
-  `[]string` in a loop (`:L180`-`:L188`) and stores it under lock via `(*sharedArrays).set` (`:L143`).
-  (The `json.Marshal`-based path at `:L131`/`:L136` is the separate internal `NewSharedArrayFrom`
-  reader path, `:L116`, used for CSV-style sources — not the path our script exercises.)
+  `[]string` in a loop (`:L180`-`:L188`) and returns it (`:L190`); `get` then stores that array
+  exactly once, inline under the write lock it holds — `s.data[name] = array` (store `:L162`; lock
+  acquired `:L157`). (The `json.Marshal`-based path at `:L131`/`:L136` is the separate internal
+  `NewSharedArrayFrom` reader path (`:L116`), which is the *sole* caller of `(*sharedArrays).set`
+  (`:L139`→`:L143`) and is used for CSV-style sources — not the path our script exercises.)
 - **Lazy per-element proxy — no full-dataset copy per VU.** `js/modules/k6/data/share.go`:
   `type sharedArray struct { arr []string }` (`:L10`); `wrap` (`:L23`) returns a
   `rt.NewDynamicArray(...)` proxy (`:L27`); `wrappedSharedArray.Get(index)` (`:L44`) lazily
