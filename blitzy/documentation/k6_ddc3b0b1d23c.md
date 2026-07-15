@@ -35,8 +35,12 @@ code but not directly sampled at runtime are explicitly labeled **(INFERRED)**.
   the real transcript, not an annotation added after the fact. The only normalization applied to the
   captured output is that trailing whitespace (a cosmetic artifact of fixed-width column padding in the
   probe's and harnesses' formatting) has been trimmed for lint-cleanliness; no value, log message,
-  count, timing, or footer was altered — every fenced block is otherwise byte-for-byte identical to the
-  file that produced it.
+  count, timing, or footer was altered. The substantive content of every fenced block — the values, the
+  log-message text, the counts, the timings, and the `PASS`/`ok` footers — is verbatim from the run that
+  produced it. The one exception is the source-line-number prefix that Go's `t.Logf` automatically
+  prepends to each probe log line (e.g., `blitzy_adhoc_test_probe_test.go:484:`): because the probe was
+  lightly edited between capture runs, those auto-generated numeric prefixes can differ by a few lines
+  from the consolidated §9.1 listing; the message text after each prefix is unaltered.
 
 ---
 
@@ -151,7 +155,9 @@ command label the capture script echoed, followed by that command's real stdout 
 
 The Go race detector requires `CGO_ENABLED=1` and a C compiler; both are present (`go env CGO_ENABLED`
 prints `1`; `gcc` is **15.2.0**). Vendored modules are used (`GOFLAGS=-mod=vendor`), so builds and tests
-run fully offline.
+run fully offline. (The `git rev-parse HEAD` value in the block below is a point-in-time capture taken at
+the initial documentation draft commit; §3.2 explains why this self-referential value does not affect any
+`file:line` reference in this document.)
 
 ```text
 ### git branch --show-current
@@ -186,13 +192,21 @@ exit=0
 
 ### 3.2 Relationship of the working tree to the investigated commit
 
-The branch's `HEAD` is the documentation commit `128744ee4`; its parent `ddc3b0b1d23c` ("Update
-comment") is the **investigated k6 source commit**. The documentation commit adds only this one markdown
-file and touches no source, so the source tree at `HEAD` is byte-identical to `ddc3b0b1d23c` — i.e., all
-`file:line` references in this document resolve equally against `HEAD` and against `ddc3b0b1d23c`. The
-`go.mod` minimum (`go 1.21`) is satisfied by the local toolchain (Go 1.23.6), which is also the highest
-CI-supported line (`DEFAULT_GO_VERSION: "1.23.x"`). The exit code used by the ctrl+c path (§7-C),
-`ExternalAbort = 105`, is defined here as well.
+The git evidence shown in this section was captured at the initial documentation **draft** commit
+`128744ee4` (at that point the file was a 1,008-line draft, which is exactly what the `git diff … --stat`
+below reports). The document was subsequently expanded to its present form by a later commit on the same
+branch, so the current `HEAD` is a *later* documentation commit than the one quoted in the block below.
+This self-referential, point-in-time capture changes none of the analysis, thanks to a stable invariant:
+**every** documentation commit on this branch adds only this one markdown file and touches **no** k6
+source, so the working tree's source stays byte-identical to the investigated k6 source commit
+`ddc3b0b1d23c` ("Update comment", the parent of the first documentation commit) regardless of which
+documentation commit is checked out — i.e., all `file:line` references in this document resolve equally
+against the current `HEAD` and against `ddc3b0b1d23c`. This invariant is stable across re-commits and is
+independently verifiable at any time with
+`git diff --name-only ddc3b0b1d23c HEAD -- . ':(exclude)blitzy/documentation/k6_ddc3b0b1d23c.md'`, which
+prints nothing. The `go.mod` minimum (`go 1.21`) is satisfied by the local toolchain (Go 1.23.6), which is
+also the highest CI-supported line (`DEFAULT_GO_VERSION: "1.23.x"`). The exit code used by the ctrl+c path
+(§7-C), `ExternalAbort = 105`, is defined here as well.
 
 ```text
 ### Relationship of current HEAD to investigated commit ddc3b0b1d23c
@@ -783,9 +797,13 @@ The VU buffer is the `es.vus` channel inside `ExecutionState`. A VU is acquired 
 The active-VU counter read by `GetCurrentlyActiveVUsCount` is explicitly documented as a UI/reporting
 signal — "*don't use it for synchronization*" `lib/execution.go:268-270`. So on its own, a net-zero
 active count does **not** prove one-return-per-acquire. It becomes meaningful only *together* with a
-direct buffer check: it is literally the counter that `getVU` increments `lib/executor/ramping_vus.go:601`
-and `returnVU` decrements `lib/executor/ramping_vus.go:607` in the same closures that call
-`GetPlannedVU`/`ReturnVU`. Therefore the evidence below pairs **(i)** net-zero active count with **(ii)**
+direct buffer check: the value it returns is the `es.activeVUs` field `lib/execution.go:270`, which the
+`getVU` closure increments via `ModCurrentlyActiveVUsCount(+1)` `lib/executor/ramping_vus.go:602` and the
+`returnVU` closure decrements via `ModCurrentlyActiveVUsCount(-1)` `lib/executor/ramping_vus.go:609` — in
+the same closures that call `GetPlannedVU`/`ReturnVU`. (The adjacent `atomic.AddInt64(rs.activeVUsCount, ±1)`
+at `lib/executor/ramping_vus.go:601`/`:607` maintains a *separate* progress-display counter,
+`rs.activeVUsCount` `lib/executor/ramping_vus.go:569`, in lockstep on the same two lines, so the observable
+and the progress counter always hold equal values.) Therefore the evidence below pairs **(i)** net-zero active count with **(ii)**
 a direct drain of the buffer after the run, and **(iii)** the direct one-to-one `getVU==returnVU` count
 from §5.3. "No leak" is asserted for these observed paths.
 
@@ -901,11 +919,15 @@ path fails cleanly rather than leaking (§6.4).
 
 **Direct answer:** VUs are **not** permanently stuck. The "stuck" appearance is a transient, **bounded**
 graceful-ramp-down lag: during a rapid down-stage the scheduled target drops faster than VUs that are
-mid-iteration can finish, so those VUs stay counted as active (in the transient `toGracefulStop` state,
-**INFERRED** from `lib/executor/vu_handle.go:19,24-55` — the state is not directly sampled because the
-`vuHandles` slice lives in a `Run`-local struct) until they complete their current short iteration and
-return. Because the iteration (300 ms) is far shorter than `GracefulRampDown` (3 s), they always finish
-and the active count always returns to 0.
+mid-iteration can finish, so those VUs stay counted as active (in the transient `toGracefulStop` state —
+**INFERRED**, not directly sampled because the `vuHandles` slice lives in a `Run`-local struct, from its
+definition at `lib/executor/vu_handle.go:20` within the state `iota` block `lib/executor/vu_handle.go:17-21`
+and the transition table `lib/executor/vu_handle.go:24-55`) until they complete their current short
+iteration and return. Because the iteration (300 ms) is far shorter than `GracefulRampDown` (3 s), they
+always finish and the active count always returns to 0. (The temporary probe's own `INFERRED` log line —
+preserved verbatim in the §7-A transcripts below and in the §9.1 probe source — cites the adjacent
+`vu_handle.go:19`, which is the `running` state; the precise definition of `toGracefulStop` is
+`vu_handle.go:20`. The captured log text is left unedited; this note supplies the exact line.)
 
 **Method.** The user's scenario ("stages that go up and down rapidly with a long `gracefulRampDown`") is
 reproduced as a `RampingVUsConfig` ramping 8↔0 at 1 s per stage ×4, `StartVUs=0`, `GracefulRampDown=3s`,
@@ -3111,8 +3133,11 @@ is committed to the repository (see §9.4).
 
 ### 9.1 In-package Go probe (`lib/executor/blitzy_adhoc_test_probe_test.go`)
 
-This is the single temporary Go test file used for the in-process reproductions (§5, §6, §7-A, §7-B, and
-the arithmetic in §7-D.1). It is placed in `package executor` because it reuses the real, unexported test
+This is the consolidated final source of the single temporary Go test file used for the in-process
+reproductions (§5, §6, §7-A, §7-B, and the arithmetic in §7-D.1). Because the probe was lightly edited
+between capture runs, the auto-generated `t.Logf` source-line-number prefixes in the transcripts above
+reflect the exact draft at each capture and may differ by a few lines from this consolidated listing; the
+message text and all reported values are identical either way. It is placed in `package executor` because it reuses the real, unexported test
 harness (`simpleRunner`, `getTestRunState`, `setupExecutor`, `newStoppedVUHandle`, `NewExecutionState`,
 `NewExecutionTuple`, `GetFilledExecutionSegmentSequence`, `ScaleInt64`) exactly as the in-repo tests do —
 so all observations flow through the canonical package API, not a stand-in. To capture the DebugLevel
