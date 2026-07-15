@@ -1770,7 +1770,7 @@ version exit status: 0
 | Q | Script(s) | Invocation (essence) | Value(s) read from |
 |---|-----------|----------------------|--------------------|
 | Q1 | `/tmp/q1_ramping.js`, `/tmp/q1_hardstop.js` | `/tmp/k6_base/k6 run --verbose … &` then `kill -INT` (then a **second** `kill -INT` during a widened `teardown()` window for the hard stop) | console/log stream + progress line |
-| Q2 | `/tmp/q2_stream.js` + `examples/grpc_server` | `go run -mod=mod examples/grpc_server/*.go &`; `GRPC_PROTO_PATH=<abs>/route_guide.proto /tmp/k6_base/k6 run --verbose … &` then `kill -INT` | interrupt log + end-of-test summary |
+| Q2 | `/tmp/q2_stream.js` + `examples/grpc_server` | `go run -mod=mod examples/grpc_server/*.go &`; `GRPC_IMPORT_PATH="/tmp" GRPC_PROTO_FILE="route_guide.proto" /tmp/k6_base/k6 run --verbose … &` then `kill -INT` | interrupt log + end-of-test summary |
 | Q3 | `/tmp/q3_car.js`, `/tmp/q3_si.js` | `/tmp/k6_base/k6 run … &` then `curl -sS http://localhost:6565/v1/metrics` | **REST API JSON:API** (primary) + summary cross-check |
 | Q4 | `/tmp/q4_shared.js`, `/tmp/q4_copy.js` | `VUS=N /tmp/k6_base/k6 run …` while polling `/proc/<pid>/status` `VmRSS` | peak `VmRSS` |
 | Q5 | `/tmp/q5.js` (+ `/tmp/rwrecv` receiver) | `/tmp/k6_base/k6 run -o experimental-prometheus-rw …` | decoded `prompb.WriteRequest` `__name__` labels |
@@ -1854,7 +1854,7 @@ document whose per-metric object carries `type`, `id`, and an `attributes` block
 `localhost:6565`, becoming opt-in only in a later major release; k6 `v0.55.0` (the version under test)
 is on the on-by-default side of that change, matching the observed default bind at
 `cmd/state/state.go:L150`.
-*Source:* Grafana k6 documentation, "k6 REST API" (`https://grafana.com/docs/k6/latest/misc/k6-rest-api/`).
+*Source:* Grafana k6 documentation, "k6 REST API" (`https://grafana.com/docs/k6/latest/reference/k6-rest-api/`).
 
 **Q5 — metric-name integrity and Prometheus naming.** The official *Prometheus remote write*
 documentation confirms the two naming facts the Q5 runtime evidence turns on: every exported time
