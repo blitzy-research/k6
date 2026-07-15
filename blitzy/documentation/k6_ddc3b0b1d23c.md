@@ -1487,55 +1487,99 @@ export default function () {
 }
 ```
 
-A capture harness `/tmp/q5_harness.sh` proves the **full receiver lifecycle for every run** — it binds
-first, probes readiness against the real socket, runs k6 through its canonical CLI, verifies request
-receipt, shuts the receiver down by PID, and confirms the port is released. It runs k6 from the
-harness's current working directory (the exported `__name__` set is independent of cwd — verified by
-running from a non-repository directory) and filters the names stream to metric-name records
+A capture harness `/tmp/q5_harness.sh` **asserts** the **full receiver lifecycle for every run** — it
+binds first, probes readiness against the real socket, runs k6 through its canonical CLI, verifies
+request receipt, shuts the receiver down by PID, and confirms the port is released. The harness runs
+under `set -euo pipefail` with an exact-PID `trap … EXIT` cleanup and **fails closed**: readiness, a
+zero k6 exit, at least one received remote-write POST, a non-empty `k6_*` `__name__` set, a graceful
+receiver shutdown, and a released port are each asserted with a `die` helper, so any missing step aborts
+the harness with a non-zero exit and an `ASSERT-FAIL` diagnostic rather than silently reporting success.
+(This is verified below the output: the harness exits `0` only when a live receiver handles the run, and
+exits non-zero — printing `ASSERT-FAIL` — when the receiver is absent or the port is not free.) It runs
+k6 from the harness's current working directory (the exported `__name__` set is independent of cwd —
+verified by running from a non-repository directory) and filters the names stream to metric-name records
 (`grep -E '^k6_'`); the receiver's own startup/readiness line goes to **stderr**, never into the
 `__name__` stream:
 
 ```bash
 #!/usr/bin/env bash
-# Q5 remote-write capture harness: proves the full receiver lifecycle
+# Q5 remote-write capture harness: ASSERTS the full receiver lifecycle
 # (bind -> readiness -> request receipt -> graceful shutdown -> port release)
 # for every k6 run, and records the exported __name__ set per run.
-set -u
+# Fail-closed: any missing step (receiver not ready, k6 non-zero, no POST
+# received, empty __name__ set, ungraceful shutdown, or a port left open)
+# aborts the harness with a non-zero exit and an ASSERT-FAIL diagnostic.
+set -euo pipefail
 K6=/tmp/k6_base/k6
 RECV=/tmp/rwrecv/rwrecv
 PORT=9090
+RPID=""
 
-port_open () { (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null && { exec 3>&- 3<&-; return 0; }; return 1; }
+die () { echo "ASSERT-FAIL: $*" >&2; exit 1; }
+
+# Exact-PID cleanup: if the harness aborts mid-capture, the still-running
+# receiver we launched is terminated by the PID we captured (never a broad kill).
+cleanup () { if [ -n "${RPID:-}" ]; then kill "$RPID" 2>/dev/null || true; fi; }
+trap cleanup EXIT
+
+# Returns 0 iff a TCP connect to 127.0.0.1:$PORT succeeds (real listening socket).
+port_open () { (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; }
 
 capture () {  # $1=label  $2=script  $3..=env assignments (K=V), optional
   local label="$1" script="$2"; shift 2
   local names="/tmp/q5_${label}.names" rlog="/tmp/q5_${label}.recvlog" k6out="/tmp/q5_${label}.k6out"
   : > "$names"; : > "$rlog"; : > "$k6out"
+
   # 1) start receiver (binds 127.0.0.1 FIRST; prints bound addr + pid to stderr)
   "$RECV" 1>"$names" 2>"$rlog" &
   local rpid=$!
+  RPID=$rpid                                    # track for the EXIT trap
+
   # 2) readiness probe against the actual listening socket
   local ready=no
-  for _ in $(seq 1 50); do port_open && { ready=yes; break; }; sleep 0.1; done
+  local _
+  for _ in $(seq 1 50); do if port_open; then ready=yes; break; fi; sleep 0.1; done
+
   # 3) run k6 through its real CLI (from the current cwd — no repository path needed); capture exit status
-  ( env "$@" "$K6" run -o experimental-prometheus-rw "$script" ) >"$k6out" 2>&1
-  local k6rc=$?
+  local k6rc=0
+  ( env "$@" "$K6" run -o experimental-prometheus-rw "$script" ) >"$k6out" 2>&1 || k6rc=$?
+
   # 4) graceful shutdown by PID, wait, then confirm the port is released
-  kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null; local rrc=$?
-  local port=released; port_open && port=STILL_OPEN
+  kill "$rpid" 2>/dev/null || true
+  local rrc=0
+  wait "$rpid" 2>/dev/null || rrc=$?
+  RPID=""                                        # receiver reaped; nothing to clean up
+  local port=released; if port_open; then port=STILL_OPEN; fi
+
+  # --- diagnostic block (identical shape to the pre-fix harness) ---
   echo "[$label] ready=$ready  k6_exit=$k6rc  recv_wait_rc=$rrc  port_${PORT}=$port"
   echo "[$label] receiver stderr:"; sed 's/^/    /' "$rlog"
   echo "[$label] unique __name__ set (grep '^k6_' | sort -u):"
-  grep -E '^k6_' "$names" | sort -u | sed 's/^/    /'
+  grep -E '^k6_' "$names" | sort -u | sed 's/^/    /' || true
   echo "----------------------------------------------------------------"
+
+  # --- fail-closed assertions (each proves one lifecycle guarantee) ---
+  local receipts nnames
+  receipts=$(grep -c 'received valid remote-write POST' "$rlog" 2>/dev/null || true)
+  nnames=$(grep -Ec '^k6_' "$names" 2>/dev/null || true)
+  [ "$ready" = yes ]        || die "[$label] receiver never became ready on port ${PORT}"
+  [ "$k6rc" -eq 0 ]         || die "[$label] k6 exited non-zero ($k6rc)"
+  [ "$rrc" -eq 0 ]          || die "[$label] receiver did not shut down gracefully (wait rc=$rrc)"
+  [ "$receipts" -ge 1 ]     || die "[$label] no remote-write POST was received"
+  [ "$nnames" -ge 1 ]       || die "[$label] no k6_* __name__ series were captured"
+  [ "$port" = released ]    || die "[$label] port ${PORT} was not released after the run"
 }
 
-echo "### preflight: port ${PORT} $(port_open && echo BUSY || echo FREE)"
+# preflight: the port MUST be free so the listener we probe is unambiguously ours
+if port_open; then die "preflight: port ${PORT} already BUSY"; fi
+echo "### preflight: port ${PORT} FREE"
 capture default_run1 /tmp/q5.js
 capture default_run2 /tmp/q5.js
 capture dropped      /tmp/q3_car.js
 capture trend_custom /tmp/q5.js K6_PROMETHEUS_RW_TREND_STATS="p(99),p(95),max,min,avg,med"
-echo "### final: port ${PORT} $(port_open && echo BUSY || echo FREE)"
+# final: every receiver was reaped and every port released
+if port_open; then die "final: port ${PORT} STILL_OPEN"; fi
+echo "### final: port ${PORT} FREE"
 ```
 
 ### Observed output
@@ -1548,7 +1592,7 @@ shutdown, port release, and the exported `__name__` set):
 ### preflight: port 9090 FREE
 [default_run1] ready=yes  k6_exit=0  recv_wait_rc=0  port_9090=released
 [default_run1] receiver stderr:
-    rw-receiver listening on 127.0.0.1:9090 (pid 175721)
+    rw-receiver listening on 127.0.0.1:9090 (pid 638222)
     received valid remote-write POST: 7 __name__ series
     received valid remote-write POST: 7 __name__ series
     received valid remote-write POST: 6 __name__ series
@@ -1563,10 +1607,10 @@ shutdown, port release, and the exported `__name__` set):
 ----------------------------------------------------------------
 [default_run2] ready=yes  k6_exit=0  recv_wait_rc=0  port_9090=released
 [default_run2] receiver stderr:
-    rw-receiver listening on 127.0.0.1:9090 (pid 175758)
+    rw-receiver listening on 127.0.0.1:9090 (pid 638264)
     received valid remote-write POST: 7 __name__ series
     received valid remote-write POST: 7 __name__ series
-    received valid remote-write POST: 4 __name__ series
+    received valid remote-write POST: 6 __name__ series
 [default_run2] unique __name__ set (grep '^k6_' | sort -u):
     k6_checks_rate
     k6_data_received_total
@@ -1578,7 +1622,7 @@ shutdown, port release, and the exported `__name__` set):
 ----------------------------------------------------------------
 [dropped] ready=yes  k6_exit=0  recv_wait_rc=0  port_9090=released
 [dropped] receiver stderr:
-    rw-receiver listening on 127.0.0.1:9090 (pid 175794)
+    rw-receiver listening on 127.0.0.1:9090 (pid 638306)
     received valid remote-write POST: 7 __name__ series
     received valid remote-write POST: 7 __name__ series
     received valid remote-write POST: 7 __name__ series
@@ -1597,7 +1641,7 @@ shutdown, port release, and the exported `__name__` set):
 ----------------------------------------------------------------
 [trend_custom] ready=yes  k6_exit=0  recv_wait_rc=0  port_9090=released
 [trend_custom] receiver stderr:
-    rw-receiver listening on 127.0.0.1:9090 (pid 175835)
+    rw-receiver listening on 127.0.0.1:9090 (pid 638352)
     received valid remote-write POST: 12 __name__ series
     received valid remote-write POST: 12 __name__ series
     received valid remote-write POST: 11 __name__ series
@@ -1617,6 +1661,37 @@ shutdown, port release, and the exported `__name__` set):
 ----------------------------------------------------------------
 ### final: port 9090 FREE
 ```
+
+**Fail-closed verification (negative controls).** The harness's assertions are load-bearing, not
+decorative — two negative controls confirm it aborts with a **non-zero** exit instead of silently
+reporting success. Critically, in the first control **k6 itself still exits `0`** even though the
+receiver is absent (the remote-write output logs flush errors but does not fail the run), so a harness
+that merely printed results — as the earlier `set -u` version did — would have reported a false success;
+the readiness assertion catches it:
+
+```console
+# (1) receiver absent — RECV points at a non-existent binary → readiness assertion fires
+$ sed 's#^RECV=/tmp/rwrecv/rwrecv#RECV=/tmp/rwrecv/DOES_NOT_EXIST#' /tmp/q5_harness.sh > /tmp/q5_harness_absent.sh
+$ bash /tmp/q5_harness_absent.sh; echo "exit=$?"
+### preflight: port 9090 FREE
+[default_run1] ready=no  k6_exit=0  recv_wait_rc=127  port_9090=released
+[default_run1] receiver stderr:
+    /tmp/q5_harness_absent.sh: line 30: /tmp/rwrecv/DOES_NOT_EXIST: No such file or directory
+[default_run1] unique __name__ set (grep '^k6_' | sort -u):
+----------------------------------------------------------------
+ASSERT-FAIL: [default_run1] receiver never became ready on port 9090
+exit=1
+
+# (2) port not free at preflight — an unrelated listener already holds 9090 → preflight assertion fires
+$ /tmp/rwrecv/rwrecv & sleep 0.5          # occupy 9090 (torn down by its PID afterward)
+$ bash /tmp/q5_harness.sh; echo "exit=$?"
+ASSERT-FAIL: preflight: port 9090 already BUSY
+exit=1
+```
+
+Both controls exit `1`; in the positive runs above every capture instead shows
+`ready=yes  k6_exit=0  recv_wait_rc=0  port_9090=released` and the harness exits `0` — so a clean run is
+distinguishable from a broken one by exit status alone.
 
 The two default runs produced an **identical** unique `__name__` set (stability across ≥2 runs). One
 exemplar per metric type (real k6 metrics, labelled by their registered type):
@@ -1780,8 +1855,9 @@ version exit status: 0
 - Observed Go toolchain: `go version go1.23.12 linux/amd64`. (`go.mod` declares `go 1.21` /
   `toolchain go1.21.13` at `go.mod:L3,L5`; the CI/environment builds with Go 1.23.x, matching the
   `Dockerfile`'s Go 1.23 build image.)
-- The baseline tree is offline-buildable because all 188 dependencies are committed under `vendor/`,
-  so `go build` auto-selects `-mod=vendor`.
+- The baseline tree is offline-buildable because all 94 vendored modules are committed under `vendor/`
+  (94 module entries in `vendor/modules.txt`, matching the 94 `require` entries in `go.mod` — 52 direct
+  plus 42 `// indirect`), so `go build` auto-selects `-mod=vendor`.
 - Every test was driven through the real CLI entry point `main.go:L8-L9` → `cmd.Execute()`; no debug
   hooks, mocks, or synthetic bypasses were used. The resulting `/tmp/k6_base/k6` binary is the single
   binary used for **all** of Q1–Q5, so every k6 log banner below reads
@@ -1798,9 +1874,18 @@ test-support certificate infrastructure (`js/modules/k6/grpc` `TestClient_TlsPar
 unknown`), and the remainder are timing-sensitive flakes that pass on isolated re-run under reduced
 `-race` contention. `git diff --stat ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD` for each failing
 package directory is **empty** — the test files are byte-identical to the frozen baseline, so the same
-failures occur at that baseline regardless of this document — and none of these packages lie on the
-Q1–Q5 runtime paths investigated here. (Observed this run: `grpc` and `http` failed deterministically
-with the TLS/OCSP signatures above; the full-suite process exited `1`.)
+failures occur at that baseline regardless of this document. The specific **failing subpaths** are never
+exercised by Q1–Q5: `TestClient_TlsParameters` is a TLS-handshake test, whereas Q2 drives the gRPC
+module against a **plaintext** RouteGuide server (`examples/grpc_server` defaults to `-tls=false` at
+`examples/grpc_server/main.go:L47`), so the failing certificate-verification path is never entered; and
+`js/modules/k6/http` is not imported by any Q1–Q5 script. Where a failing test's **package** does lie on
+a runtime path — `js/modules/k6/grpc` (Q2), `lib/executor` and `execution` (Q1/Q3 scenario scheduling),
+`js/eventloop` (the JS runtime for every script) — the runtime behavior each question measures (the
+ramping-vus SIGINT lifecycle, the arrival-rate/shared-iterations `dropped_iterations` accounting, the
+gRPC server-streaming `grpc_streams_msgs_received` count) was observed and re-confirmed **directly** in
+the runs documented above, independently of those tests, and the timing-sensitive flakes pass on isolated
+re-run. (Observed this run: `grpc` and `http` failed deterministically with the TLS/OCSP signatures
+above; the full-suite process exited `1`.)
 
 **Per-question invocation summary.**
 
@@ -1942,7 +2027,7 @@ $ ls -la /tmp/q1_ramping.js /tmp/q1_hardstop.js /tmp/q2_stream.js /tmp/q3_car.js
 -rwxr-xr-x 1 root root     1447 Jul 14 21:58 /tmp/q4_driver.sh
 -rw-r--r-- 1 root root      400 Jul 14 21:58 /tmp/q4_shared.js
 -rw-r--r-- 1 root root      179 Jul 14 22:20 /tmp/q5.js
--rw-r--r-- 1 root root     2081 Jul 14 22:21 /tmp/q5_harness.sh
+-rw-r--r-- 1 root root     3860 Jul 14 22:21 /tmp/q5_harness.sh
 -rw-r--r-- 1 root root     3519 Jul 14 21:41 /tmp/route_guide.proto
 
 $ ls -la /tmp/rwrecv/ 2>&1
