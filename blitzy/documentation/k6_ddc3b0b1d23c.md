@@ -67,12 +67,14 @@ k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.12, linux/amd64)
 
 - **Q1 (test health):** The suite **compiles cleanly — zero build-failed ("broken") packages** in every
   run. Counting **leaf tests** (the test/subtest functions that actually run assertions, *not* their
-  parent aggregate entries — see the counting note below), each of four back-to-back runs executed
-  **3,800 leaf tests**: **1 is intentionally skipped** (`js/tc39.TestTC39`) and **5–8 fail**
-  (`3,791–3,794 pass`) depending on the run. Of those failures, **5 are consistent** (three gRPC TLS-CA
-  subtests + one HTTP OCSP-staple test + one constant-arrival-rate timing segment) and **4 are flaky**
-  (timing/scheduling- or connectivity-sensitive). Package-level: of **82** packages, **28 have no test
-  files** and **3–4 fail** (3 in three runs, 4 in one — one extra flaky package in a single run).
+  parent aggregate entries — see the counting note below), each of **five independent cache-cleared runs**
+  executed **3,800 leaf tests** (3,794 in the one run truncated early by a flaky panic — see below):
+  **1 is intentionally skipped** (`js/tc39.TestTC39`) and **12–19 fail** (so **3,774–3,787 pass**)
+  depending on the run. Of those failures, **9 are consistent** (three gRPC TLS-CA subtests + one HTTP
+  OCSP-staple test + five constant-arrival-rate timing segments) and **15 are flaky**
+  (timing/scheduling- or connectivity-sensitive), for a **union of 24 distinct failing leaf tests** across
+  the five runs. Package-level: of **82** packages, **28 have no test files** and **5–7 fail** per run
+  (eight packages fail in at least one run).
 - **Q2 (what counts iterations & collects data):** Iteration counting lives in `metrics/builtin.go`
   (the `iterations` Counter) and `js/runner.go` (the per-VU hot path), with `lib/executor/*` deciding
   *how many* iterations run. Performance data is collected by the `metrics/` package (types + sinks),
@@ -115,22 +117,34 @@ v15.2.0). `-timeout 210s` is a per-package timeout.
 ### Methodology (and the counting unit)
 
 Because a load-testing suite naturally contains timing-sensitive tests, health was assessed across
-**four** back-to-back runs of the identical, unmodified command, so consistent failures could be
-separated from flaky ones. Each run was captured as a machine-readable `-json` event stream written to
+**five independent runs** of the identical, unmodified command, so consistent failures could be
+separated from flaky ones. **Crucially, `go clean -testcache` is run before *each* iteration.** Go's
+test cache stores the result of every *passing* package and, on a re-run, replays that cached result
+instead of re-executing the package; only packages that previously failed (or whose inputs changed) run
+again. Without clearing the cache between iterations, runs 2–N would silently replay the dozens of
+cached-pass packages and re-execute only the already-failing ones — which **understates** the failure
+rate and **hides** the timing-sensitive flakes that only surface on a cold re-execution. Clearing the
+cache (equivalently, passing `-count=1`) forces every package to actually run every time, so each run is
+a true, independent sample. Each run was captured as a machine-readable `-json` event stream written to
 a **securely created temporary directory outside the repository** (never into the checkout), with each
 run's exit code captured:
 
 ```bash
 # WORKDIR is created outside the k6 tree with a random, private (0700) name.
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/k6health.XXXXXX")"; chmod 700 "$WORKDIR"
-for i in 1 2 3 4; do
+for i in 1 2 3 4 5; do
+  go clean -testcache                        # force a true cold re-run (no cached passes)
   go test -race -timeout 210s -json ./... > "$WORKDIR/run${i}.json" 2> "$WORKDIR/run${i}.stderr"
-  echo "$?" > "$WORKDIR/run${i}.exit"      # capture each run's exit code
+  echo "$?" > "$WORKDIR/run${i}.exit"        # capture each run's exit code
 done
 ```
 
 Tallies come from parsing the `-json` `Action` events (`pass` / `fail` / `skip`); build-broken
-detection scans package output for `[build failed]`.
+detection scans package output for `[build failed]`. **(observed)** These five runs were executed on
+**2026-07-15, ~02:01–02:08 UTC** on a 4-CPU host under heavy contention (load average ~18–21), each run
+taking ~83–85 s of wall time. The elevated load is itself a contributor to the timing-sensitive flakes
+reported below, so the *consistent-vs-flaky* split is anchored to this specific window and machine; on a
+quiescent machine several of the flaky tests below would likely pass.
 
 **The counting unit matters (this is why the totals below differ from a naïve tally).** `go test -json`
 emits a terminal `pass`/`fail`/`skip` action for **every** test *and* every subtest — including the
@@ -142,24 +156,29 @@ terminal event in the same package has its name plus `"/"` as a prefix.
 
 ### Results — package level
 
-Package outcomes are **not** identical across runs — **one run had an extra failing package** — so this
-is per-run rather than a single "every run" claim:
+Package outcomes are **not** identical across runs — the per-run package-fail count ranges from **5 to
+7** — so this is per-run rather than a single "every run" claim:
 
 | Run | Packages pass | Packages fail | No test files | Build-failed ("broken") | Total |
 |-----|--------------:|--------------:|--------------:|------------------------:|------:|
-| run1 | 50 | 4 | 28 | 0 | 82 |
-| run2 | 51 | 3 | 28 | 0 | 82 |
-| run3 | 51 | 3 | 28 | 0 | 82 |
-| run4 | 51 | 3 | 28 | 0 | 82 |
+| run1 | 47 | 7 | 28 | 0 | 82 |
+| run2 | 47 | 7 | 28 | 0 | 82 |
+| run3 | 48 | 6 | 28 | 0 | 82 |
+| run4 | 49 | 5 | 28 | 0 | 82 |
+| run5 | 47 | 7 | 28 | 0 | 82 |
 
-**(observed)** The total **82** is `go list ./...`. The three packages that fail in **all four** runs:
+**(observed)** The total **82** is `go list ./...`. **Four** packages fail in **all five** runs:
 
+- `go.k6.io/k6/execution`
 - `go.k6.io/k6/js/modules/k6/grpc`
 - `go.k6.io/k6/js/modules/k6/http`
 - `go.k6.io/k6/lib/executor`
 
-A **fourth** package, `go.k6.io/k6/cmd/tests`, failed in **run1 only** (a flaky output-capture test,
-detailed below) — which is exactly why the package-fail count is 4 in run1 and 3 in the other three.
+**Four more** packages fail in only *some* runs (their flaky tests are detailed below):
+`go.k6.io/k6/cmd/tests` (4 of 5 runs), `go.k6.io/k6/js/modules/k6/timers` (4 of 5),
+`go.k6.io/k6/js/eventloop` (3 of 5), and `go.k6.io/k6/cloudapi` (1 of 5). So **eight** distinct packages
+fail in at least one run, which is why the per-run package-fail count varies from **5** (run4) to **7**
+(runs 1, 2, 5).
 
 The **28 "no test files"** packages are not errors — they are protobuf-generated and
 test-support/helper packages (e.g. `cloudapi/insights/proto/**`, `lib/testutils/**`, `js/modulestest`,
@@ -175,16 +194,20 @@ Go reports each with a **`?`** prefix, *not* `ok`:
 
 | Run | Wall time | Exit | Leaf pass | Leaf fail | Leaf skip | Leaf total |
 |-----|----------:|-----:|----------:|----------:|----------:|-----------:|
-| run1 | 69.4 s | 1 | 3791 | 8 | 1 | 3800 |
-| run2 | 66.6 s | 1 | 3792 | 7 | 1 | 3800 |
-| run3 | 65.1 s | 1 | 3794 | 5 | 1 | 3800 |
-| run4 | 65.0 s | 1 | 3794 | 5 | 1 | 3800 |
+| run1 | 85 s | 1 | 3782 | 17 | 1 | 3800 |
+| run2 | 85 s | 1 | 3774 | 19 | 1 | 3794 |
+| run3 | 83 s | 1 | 3786 | 13 | 1 | 3800 |
+| run4 | 84 s | 1 | 3787 | 12 | 1 | 3800 |
+| run5 | 84 s | 1 | 3784 | 15 | 1 | 3800 |
 
-**(observed)** Every run also produced **626 parent (aggregate) terminal events** — pass/fail rolled up
-from children. Leaf **3,800 + parent 626 = 4,426**, so a naïve "count every `pass`/`fail`/`skip` event"
-tally yields 4,426 but **double-counts** the 626 parents on top of their leaves. The leaf numbers above
-are the honest per-test totals; wall times and exit codes are from each run's captured `.walltime` and
-`.exit` files.
+**(observed)** Four of the five runs also produced **626 parent (aggregate) terminal events** — pass/fail
+rolled up from children — for **3,800 leaf + 626 parent = 4,426** terminal events; a naïve "count every
+`pass`/`fail`/`skip` event" tally therefore yields 4,426 but **double-counts** the 626 parents on top of
+their leaves. **Run2 is the exception:** a flaky `panic: send on closed channel` in the `execution`
+package (detailed under the flaky failures below) aborted that package before all of its tests reported,
+so run2 emitted **3,794 leaf + 624 parent** terminals instead — the only departure from the otherwise
+stable 3,800/626 shape. The leaf numbers above are the honest per-test totals; wall times and exit codes
+are from each run's captured `.walltime` and `.exit` files.
 
 Exit code `1` **(observed)** simply reflects that at least one test failed; the toolchain itself ran
 fine and **no package failed to compile**.
@@ -206,9 +229,11 @@ Exactly **one** leaf test is skipped every run, on purpose:
 
 ### Failing tests — consistent vs flaky
 
-A failure that appears in **all four** runs is **consistent**; one that appears in some runs but not
+A failure that appears in **all five** runs is **consistent**; one that appears in some runs but not
 others, on the **same unchanged command**, is **flaky**. Every classification below is scoped to *this
-exact four-run set* (a larger or different run set could shift a test between the two buckets).
+exact five-run set* on the loaded machine described above (a larger, different, or less-loaded run set
+could shift a test between the two buckets — indeed several of the timing tests below are consistent
+*only because* of the heavy load during this window).
 
 Each excerpt below reproduces the **verbatim message content** from the named run's `-json` stream:
 every file path, line number, error string, duration, and `time.Time` value is exactly as emitted, with
@@ -219,7 +244,7 @@ with a tab, so — purely to keep this Markdown file free of "space-before-tab" 
 leading indentation and those tab separators are rendered as spaces and trailing spaces are trimmed. No
 character of the actual message text is changed.
 
-#### Consistent failures (all 4 runs) — 5 leaf tests
+#### Consistent failures (all 5 runs) — 9 leaf tests
 
 **1) gRPC TLS-CA — `TestClient_TlsParameters/{ConnectTls, ConnectTlsEncryptedKey, ConnectTlsInvokeSuccess}`**
 (package `js/modules/k6/grpc`). The failing assertion is `assert.NoError(t, err)` in the shared helper
@@ -232,11 +257,10 @@ character of the actual message text is changed.
 === CONT  TestClient_TlsParameters/ConnectTls
     helpers_test.go:19:
         Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/modules/k6/grpc/helpers_test.go:19
-            /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/modules/k6/grpc/client_test.go:1287
         Error:       Received unexpected error:
             GoError: context deadline exceeded: connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority (possibly because of \"crypto/rsa: verification error\" while trying to verify candidate authority certificate \"Acme Co\")" at reflect.methodValueCall (native)
         Test:        TestClient_TlsParameters/ConnectTls
---- FAIL: TestClient_TlsParameters/ConnectTls (60.37s)
+--- FAIL: TestClient_TlsParameters/ConnectTls (62.09s)
 ```
 
 **Cause → effect (source-verified fixture + observed handshake).** The test tells the gRPC client to
@@ -258,13 +282,14 @@ verify the server certificate's RSA signature against it, and the check fails �
 same TLS-CA subtests the httptest server logged the corresponding rejection **(observed, run3)**:
 
 ```
-2026/07/14 20:12:28 http: TLS handshake error from 127.0.0.1:60442: remote error: tls: bad certificate
+2026/07/15 02:04:44 http: TLS handshake error from 127.0.0.1:55168: remote error: tls: bad certificate
 ```
 
 The handshake keeps retrying until the RPC's context deadline: `ConnectTls`/`ConnectTlsEncryptedKey`
-run ~60 s while `ConnectTlsInvokeSuccess` fails in ~5.85 s because it sets `timeout: '5s'`
-(`client_test.go:L1258`). **(inferred:** attributing the ~60 s vs ~5 s split to those timeout settings
-is reasoning; the durations themselves are observed.**)** The `"Acme Co"` string is produced at runtime
+run ~62 s (**62.09 s / 61.81 s observed** in run3) while `ConnectTlsInvokeSuccess` fails in **~9.1 s**
+because it sets `timeout: '5s'` (`client_test.go:L1258`) — under the heavy load in this window even that
+shorter path overruns its nominal 5 s. **(inferred:** attributing the long-vs-short split to those
+timeout settings is reasoning; the durations themselves are observed.**)** The `"Acme Co"` string is produced at runtime
 from *both* certificates' Organization field — it is **not** a literal in the grpc source (an earlier
 version of this note wrongly attributed it to an unrelated HTTP test file).
 
@@ -284,7 +309,7 @@ as the Go `assert.NoError(t, err)` at **`request_test.go:L2208`** **(source-veri
         Error:       Received unexpected error:
             Error: wrong ocsp stapled response status: unknown at <eval>:3:58(22)
         Test:        TestRequestAndBatchTLS/ocsp_stapled_good
---- FAIL: TestRequestAndBatchTLS/ocsp_stapled_good (2.01s)
+--- FAIL: TestRequestAndBatchTLS/ocsp_stapled_good (3.40s)
 ```
 
 **Cause → effect.** The observed stapled OCSP status was **`unknown`**, so the JS `throw` fired. What
@@ -295,84 +320,148 @@ a GOOD response, so this test is environment-dependent. **(inferred:** the preci
 came back `unknown` — restricted egress vs. upstream not stapling at that moment — is not determined by
 the output.**)**
 
-**3) Constant-arrival-rate timing — `TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_`**
-(package `lib/executor`) fails in all four runs. It asserts that scheduled iteration start times land
-within **24 ms** of their expected offsets; under a `-race` build the deltas exceed tolerance. Captured
-first assertion from the block **(observed, run3;** the block contains several such assertions, the
-first shown verbatim, remaining trace frames elided with `…`**)**:
+**3) Constant-arrival-rate timing — five `TestConstantArrivalRateRunCorrectTiming` segments**
+(package `lib/executor`). Under the heavy load in this window, **five** distinct segment-sequence
+subtests of `TestConstantArrivalRateRunCorrectTiming` fail in **all five** runs:
+
+- `TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_`
+- `TestConstantArrivalRateRunCorrectTiming/segment_1/3:2/3_sequence_`
+- `TestConstantArrivalRateRunCorrectTiming/segment_1/6:3/6_sequence_`
+- `TestConstantArrivalRateRunCorrectTiming/segment_1/6:3/6_sequence_1/6,3/6`
+- `TestConstantArrivalRateRunCorrectTiming/segment_2/3:1_sequence_`
+
+Each asserts that scheduled iteration start times land within **24 ms** of their expected offsets; under
+a `-race` build on a loaded host the deltas exceed that tolerance. Captured first assertion from the
+`segment_0:1/3` block **(observed, run4;** that block alone contains ~20 such assertions, the first
+shown verbatim**)**:
 
 ```
     constant_arrival_rate_test.go:185:
         Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/lib/executor/constant_arrival_rate_test.go:185
-            …
-        Error:       Max difference between 2026-07-14 20:12:23.111512845 +0000 UTC m=+0.308607089 and 2026-07-14 20:12:23.177831607 +0000 UTC m=+0.374925855 allowed is 24ms, but difference was -66.318766ms
-        Test:        TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_
-        Messages:    6 expectedTime 300ms
---- FAIL: TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_ (2.00s)
+        Error:       Max difference between 2026-07-15 02:06:04.240501607 +0000 UTC m=+0.259307093 and 2026-07-15 02:06:04.277893521 +0000 UTC m=+0.296699015 allowed is 24ms, but difference was -37.391922ms
+        Messages:    2 expectedTime 60ms
+--- FAIL: TestConstantArrivalRateRunCorrectTiming/segment_0:1/3_sequence_ (2.09s)
 ```
 
 Note the message prints **real `time.Time` values** (not placeholders); across the assertions in this
-run the over-tolerance deltas ranged from ~27 ms to ~87 ms. **(inferred:** the sensitivity to a `-race`
-build and machine load is a reasonable explanation for why a 24 ms tolerance is exceeded; the deltas
-themselves are observed.**)**
+run the over-tolerance deltas ranged from ~25 ms to ~78 ms. **(inferred:** the sensitivity to a `-race`
+build and machine load is a reasonable explanation both for why a 24 ms tolerance is exceeded and for
+why **five** segments trip together here; on the author's earlier, less-loaded runs only one-to-two of
+these segments failed consistently, so the *size* of this consistent set is itself load-dependent — the
+deltas and the five-way membership are observed, the load attribution is reasoning.**)**
 
-#### Flaky failures (varied across the four runs) — 4 leaf tests
+#### Flaky failures (varied across the five runs) — 15 leaf tests
 
-- **`cmd/tests :: TestBinaryNameHelpStdout`** — failed in **run1 only** (this is the extra failing
-  package in run1). It asserts stdout is empty, but a concurrent gRPC route-guide example logged a
-  `GetFeature called with: …` line into the captured stream — a cross-test output-capture race. Captured
-  block (its second, human-readable assertion) **(observed, run1)**:
+Fifteen distinct leaf tests failed in **some but not all** of the five runs. The table lists each with
+the runs in which it failed (of runs 1–5) and the source location of the tripping assertion
+**(observed)**; representative verbatim blocks follow. Together with the 9 consistent failures above, the
+**union across all five runs is 24 distinct failing leaf tests**.
 
-  ```
-    cmd_run_test.go:130:
-        Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/cmd/tests/cmd_run_test.go:130
-        Error:       Should be empty, but was [{0xc00039c900 map[] 2026-07-14 20:10:12.888831593 +0000 UTC m=+2.692907398 info <nil> 2026/07/14 20:10:12 GetFeature called with: latitude:410248224  longitude:-747127767 <nil> <nil> }]
-        Test:        TestBinaryNameHelpStdout
-  --- FAIL: TestBinaryNameHelpStdout (2.48s)
-  ```
+| Test (package) | Failed in runs | Assertion site | Nature |
+|----------------|----------------|----------------|--------|
+| `execution :: TestExecutionInfoVUSharing` | 1, 3, 4, 5 (4/5) | `scheduler_ext_exec_test.go:131` | VU/iteration count off by one under load |
+| `execution :: TestExecutionInfoScenarioIter` | 1, 2, 3 (3/5) | `scheduler_ext_exec_test.go:219` | scenario-iteration console-log assertion |
+| `cmd/tests :: TestActiveVUsCount` | 2, 3, 5 (3/5) | `cmd_run_test.go:1498` | "Insufficient VUs" warning-count variance |
+| `js/modules/k6/timers :: TestSetIntervalOrder` | 1, 2, 5 (3/5) | `timers_test.go:138` | fewer interval callbacks fired than expected |
+| `js/modules/k6/timers :: TestSetTimeoutOrder` | 1, 2, 4 (3/5) | `timers_test.go:104` | timeout-callback ordering under load |
+| `js/modules/k6/grpc :: TestClient/BadTLS` | 1, 2, 5 (3/5) | `helpers_test.go:22` → `client_test.go:1146` | deadline hit before expected cert-error text |
+| `js/modules/k6/http :: TestAsyncRequest/Concurrent` | 1, 2 (2/5) | `async_request_test.go:71` | concurrent async request error under load |
+| `js/eventloop :: TestEventLoopAllCallbacksGetCalled` | 2, 5 (2/5) | `eventloop_test.go:120` | callback latency exceeded a 50 ms bound |
+| `cmd/tests :: TestSetupTimeout` | 2, 5 (2/5) | `cmd_run_test.go:2366` | setup-timeout timing |
+| `cloudapi :: TestStreamLogsToLogger/Success` | 1 (1/5) | `logs_test.go:264` | log-streaming timing |
+| `cmd/tests :: TestEventLoopCrossScenario` | 1 (1/5) | (k6 subprocess) | cross-scenario event-loop timing |
+| `execution :: TestRealTimeAndSetupTeardownMetrics` | 2 (1/5) | `scheduler_ext_test.go:1266` | sample-timing; tied to the run-2 panic below |
+| `execution :: TestSchedulerEndIterations` | 4 (1/5) | `scheduler_ext_test.go:1009` | end-iteration count timing |
+| `js/eventloop :: TestEventLoopWaitOnRegistered` | 3 (1/5) | `eventloop_test.go:83` | wait-on-registered timing |
+| `lib/executor :: TestRampingVUsHandleRemainingVUs` | 2 (1/5) | `ramping_vus_test.go:370`–`371` | remaining-VU count scheduling race |
 
-- **`grpc :: TestClient/BadTLS`** — failed in **run2 only**. A different branch: `assert.Contains(...)`
-  at **`helpers_test.go:L22`** **(source-verified)**. **(observed, run2)**:
+**Representative blocks.**
 
-  ```
+`execution :: TestExecutionInfoVUSharing` (the most frequent flake, 4/5) trips two off-by-one count
+assertions **(observed, run4)**:
+
+```
+    scheduler_ext_exec_test.go:131:
+        Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/execution/scheduler_ext_exec_test.go:131
+        Error:       Not equal:
+            expected: 0x9
+            actual  : 0xa
+    scheduler_ext_exec_test.go:133:
+        Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/execution/scheduler_ext_exec_test.go:133
+        Error:       Not equal:
+            expected: 0x4
+            actual  : 0x5
+```
+
+`js/modules/k6/timers :: TestSetIntervalOrder` (3/5) asserts a minimum number of interval firings, which
+falls short when the loaded scheduler delivers fewer callbacks in the window **(observed, run5)**:
+
+```
+    timers_test.go:138:
+        Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/modules/k6/timers/timers_test.go:138
+        Error:       "4" is not greater than or equal to "5"
+--- FAIL: TestSetIntervalOrder (3.51s)
+```
+
+`js/eventloop :: TestEventLoopAllCallbacksGetCalled` (2/5) trips a latency bound that only holds when the
+machine is responsive **(observed, run2)**:
+
+```
+    eventloop_test.go:120:
+        Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/eventloop/eventloop_test.go:120
+        Error:       "50ms" is not greater than "98.945891ms"
+--- FAIL: TestEventLoopAllCallbacksGetCalled (0.60s)
+```
+
+`js/modules/k6/grpc :: TestClient/BadTLS` (3/5) is a **timing-dependent variant of the same TLS-CA
+scenario** as the consistent gRPC failures: it uses the `assert.Contains(...)` branch at
+**`helpers_test.go:L22`** **(source-verified)** and, under load, the handshake reaches the context
+deadline *before* producing the certificate-error text the assertion looks for **(observed, run5)**:
+
+```
     helpers_test.go:22:
         Error Trace: /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/modules/k6/grpc/helpers_test.go:22
             /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/modules/k6/grpc/client_test.go:1146
         Error:       "GoError: context deadline exceeded at reflect.methodValueCall (native)" does not contain "certificate signed by unknown authority"
         Test:        TestClient/BadTLS
-  --- FAIL: TestClient/BadTLS (1.59s)
-  ```
+--- FAIL: TestClient/BadTLS (4.49s)
+```
 
-  **(inferred)** Here the handshake reached the context deadline *before* producing the certificate
-  error text the test looks for, so the substring match failed — a timing-dependent variant of the same
-  TLS-CA scenario as the consistent gRPC failures.
+**The run-2 panic.** Run2's leaf/parent totals were **3,794 / 624** (not 3,800 / 626) because the
+`execution` package aborted mid-way on a flaky data-race panic in that run only (`-race` build). The panic
+is a *send on a closed channel* during scenario **teardown** — a VU pushing a sample after the samples
+channel has already been closed **(observed, run2; the goroutine-frame pointer arguments are elided with
+`…`, nothing else altered)**:
 
-- **`lib/executor :: TestConstantArrivalRateRunCorrectTiming/segment_1/3:2/3_sequence_`** — failed in
-  **run1 and run2** (a *second* timing segment of the same constant-arrival-rate test, tripping only in
-  the two slightly slower runs).
+```
+panic: send on closed channel
 
-- **`lib/executor :: TestRampingVUsHandleRemainingVUs`** — failed in **run1 only**, a VU-count
-  assertion (it tripped at both `ramping_vus_test.go:L370` and `:L371`). **(observed, run1)**:
+goroutine 1800 [running]:
+go.k6.io/k6/js.(*VU).runFn(…)
+ /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/runner.go:868 +0x999
+go.k6.io/k6/js.(*Runner).runPart(…)
+ /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/runner.go:557 +0x445
+go.k6.io/k6/js.(*Runner).Teardown(…)
+ /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/js/runner.go:335 +0x48b
+go.k6.io/k6/execution.(*Scheduler).Run.func3()
+ /tmp/blitzy/k6/blitzy-5d914375-726d-4709-9a11-c8af9ba3bd91_21f0f3/execution/scheduler.go:529 +0xd7
+```
 
-  ```
-    ramping_vus_test.go:370:
-        Error:       Not equal:
-            expected: 0x1
-            actual  : 0x0
-    ramping_vus_test.go:371:
-        Error:       Not equal:
-            expected: 0x1
-            actual  : 0x2
-  --- FAIL: TestRampingVUsHandleRemainingVUs (0.08s)
-  ```
+**(inferred)** The stack shows the push happening from `Teardown` as the run is ending, so this is a
+shutdown-ordering race under `-race`, not a deterministic logic defect — consistent with its appearing in
+only one of five runs. When it fires it takes the whole `execution` test binary down, which is exactly why
+that run reports fewer terminal events.
 
-  **(inferred)** The 0.08 s duration plus run-to-run variability point to a scheduling race in how
-  remaining VUs are counted, rather than a deterministic logic error.
+**(inferred, all flaky rows)** Every flaky failure above is timing-, scheduling-, or connectivity-
+sensitive: the assertion sites and error strings are observed, while attributing their intermittency to
+the `-race` build and heavy machine load is reasoning. On a quiescent machine the 2/5 and 1/5 rows in
+particular would be expected to pass, and (as noted above) some of the constant-arrival-rate segments
+currently in the *consistent* set would likely drop back to flaky.
 
 ### Are any "broken"?
 
 **No. (observed)** "Broken" in Go terms means a package that fails to compile (`[build failed]`). Scanning
-every run's `-json` stream for `[build failed]` returns **zero** matches in all four runs. Everything
+every run's `-json` stream for `[build failed]` returns **zero** matches in all five runs. Everything
 compiles; the failures above are runtime assertion failures in TLS/OCSP and timing tests, not build
 breakage.
 
@@ -516,7 +605,7 @@ flowchart TD
 
     subgraph X["Scheduling to per-VU execution"]
         C --> E["Scheduler.Run: emitVUsAndVUsMax (1s ticker) + go runExecutor(...)<br/>execution/scheduler.go:199,231 · :500"]
-        E --> F["Executor.Run → per-vu-iterations loop launches numVUs goroutines<br/>lib/executor/per_vu_iterations.go:195,203,213,228"]
+        E --> F["Executor.Run → per-vu-iterations loop launches numVUs goroutines<br/>lib/executor/per_vu_iterations.go:233,241"]
         F --> G["getIterationRunner closure → vu.RunOnce()<br/>lib/executor/helpers.go:107-108"]
         G --> H["ActiveVU.RunOnce()<br/>js/runner.go:724"]
         H --> I["incrIteration(): u.iteration++<br/>js/runner.go:904-905"]
@@ -767,12 +856,23 @@ That guard applies to the *built-in* iteration samples only; it is unrelated to 
 are emitted. A custom metric's `.add()` method builds a `metrics.Sample` and **immediately** pushes it
 via `metrics.PushIfNotDone(m.vu.Context(), state.Samples, sample)` on every call
 (`js/modules/k6/metrics/metrics.go:L77`, push at `L127`) **(source-verified)** — there is no
-`isFullIteration && isDefault` gate on that path. The official Grafana k6 documentation describes
-custom metrics as being collected from VU threads "at the end of each VU iteration," which accurately
-describes *when the periodic flush/aggregation cycle observes them*; but in the v0.55.0 source the
-`Sample` itself is enqueued onto the samples channel the moment `.add()` runs, not deferred to an
-end-of-iteration hook **(source-verified — a distinction between the docs' aggregation-level phrasing
-and the actual code path).**
+`isFullIteration && isDefault` gate on that path. The official Grafana k6 documentation describes custom
+metrics as being collected from VU threads "at the end of each VU iteration." That is a **higher-level
+simplification** — it does **not** match the per-`Sample` runtime timing in the v0.55.0 source. The
+`Sample` is enqueued onto the samples channel **the moment `.add()` runs** (`L127`), so the same two
+50 ms flushers traced in Q3 (`output.Manager` and the engine's `OutputIngester`) observe and output it
+**mid-iteration** — within one ~50 ms flush tick of the `.add()` call — **not** at the end of the
+iteration **(source-verified for the immediate enqueue at `L127`; the 50 ms flush cadence is the same
+path traced in Q3).**
+
+I confirmed this at runtime **(observed)**: a one-VU, one-iteration script that calls a custom
+`Counter.add(1)` and then `sleep(1.2)` emitted, with `--out json`, a `my_custom_counter` point whose
+sample timestamp was `2026-07-15T02:27:05.195Z` — **~1.20 s earlier** than the `iteration_duration` and
+`iterations` points (both `2026-07-15T02:27:06.396Z`), a gap equal to the 1.2 s `sleep`. That is, the
+custom sample was emitted at the *start* of the iteration (when `.add()` ran) while the built-in
+iteration samples were emitted at its *end* — directly contradicting an "only at the end of the
+iteration" reading of the actual per-sample timing, and confirming the immediate `PushIfNotDone` enqueue
+above.
 
 ### One more observed detail: the `vus` gauge was absent
 
