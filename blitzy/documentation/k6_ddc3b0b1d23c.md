@@ -907,7 +907,7 @@ GOTOOLCHAIN=local GOPROXY=off go build -o "$WORK/k6" .
 **Repo scale (re-confirmed):** 82 packages (`go list ./...`), 176 `_test.go` files. No `[build failed]`
 package in any run.
 
-**Canonical suite command (run 4×):**
+**Canonical suite command (run 5×):**
 
 ```bash
 go test -race -timeout 210s ./...        # Makefile tests: (L27-L29); CONTRIBUTING.md make tests (L61)
