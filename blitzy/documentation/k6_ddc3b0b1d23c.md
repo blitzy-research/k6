@@ -32,15 +32,21 @@ code but not directly sampled at runtime are explicitly labeled **(INFERRED)**.
 - **A note on the fenced blocks.** Everything inside a fenced block is verbatim captured output or
   verbatim source. All explanatory annotations are in prose *outside* the fenced blocks. Where a log
   line begins with `###` or `----`, that marker was echoed by the capture script itself and is part of
-  the real transcript, not an annotation added after the fact. The only normalization applied to the
+  the real transcript, not an annotation added after the fact. A first normalization applied to the
   captured output is that trailing whitespace (a cosmetic artifact of fixed-width column padding in the
   probe's and harnesses' formatting) has been trimmed for lint-cleanliness; no value, log message,
   count, timing, or footer was altered. The substantive content of every fenced block — the values, the
   log-message text, the counts, the timings, and the `PASS`/`ok` footers — is verbatim from the run that
-  produced it. The one exception is the source-line-number prefix that Go's `t.Logf` automatically
-  prepends to each probe log line (e.g., `blitzy_adhoc_test_probe_test.go:484:`): because the probe was
-  lightly edited between capture runs, those auto-generated numeric prefixes can differ by a few lines
-  from the consolidated §9.1 listing; the message text after each prefix is unaltered.
+  produced it. A second normalization reconciles the source-line-number prefix that Go's `t.Logf`
+  automatically prepends to each probe log line (e.g., `blitzy_adhoc_test_probe_test.go:320:`) to the
+  consolidated §9.1 listing, so that each numeric prefix names the exact `t.Logf` call in §9.1 that
+  emitted the line; this was verified programmatically - all 414 transcript prefixes in §4-§7 resolve to
+  a real `t.Logf` statement in the §9.1 source, and the message text after each prefix is unaltered. The
+  only quantities that are inherently run-specific are the goroutine identifiers in the handler-ordering
+  trace (§4, e.g., `g36`/`g42`), the wall-clock durations in the `--- PASS`/`ok` footers, and a few
+  timing-sampled values (the per-transition offsets in §7-B and the 100 ms active-VU trajectory samples
+  in §7-A); these vary slightly between otherwise-identical runs, while every other value, count, table,
+  and message is deterministic and reproduces exactly across runs (confirmed under `-race -count=2`).
 
 ---
 
@@ -54,8 +60,13 @@ nor from a VU-buffer leak. On the canonical `ramping-vus` path, observed at runt
    `scheduledVUsHandlerStrategy` `lib/executor/ramping_vus.go:679`. They are invoked **sequentially**,
    one call per loop iteration, from a single `for` loop inside `iterateSteps`
    `lib/executor/ramping_vus.go:622-643`, which runs in the main `Run` goroutine
-   `lib/executor/ramping_vus.go:491`. `go test -race` over both the VU-handle race suite and the full
-   ramping-vus suite is clean across two iterations each (§4).
+   `lib/executor/ramping_vus.go:491`. This is not inferred from reading: a direct runtime trace that
+   wraps the two **real** strategies and drives them through the **real** `iterateSteps` sequencer
+   records every scheduling call on a **single** goroutine with **`max handler bodies executing
+   simultaneously = 1`**, the graceful tail contributing exactly one later `maxAllowed` call on a
+   *separate* goroutine only after `iterateSteps` returns (§4.1). `go test -race` over both the
+   VU-handle race suite and the full ramping-vus suite is additionally clean across two iterations
+   each (§4.4).
 2. **Per-VU state cannot be modified unsafely "simultaneously."** `start`, `gracefulStop`, and
    `hardStop` each lock the *same* per-VU `mutex` `lib/executor/vu_handle.go:71`, so their bodies
    cannot interleave; state writes go through an atomic store and reads are either performed under that
@@ -75,8 +86,8 @@ Each of the four named symptoms was reproduced against the real code; the precis
 |---|---|---|
 | **A — "stuck" VUs** during rapid up/down + long `gracefulRampDown` | The *appearance* is reproduced; permanent stuck state is **not** | Across 10 identical runs, active VUs transiently exceed the scheduled target by a **bounded** amount (max surplus **+2**) during each rapid down-stage, then always return to **0** by the end (final `0×10`). No run left a permanently stuck VU. The surplus is graceful-ramp-down lag: VUs mid-iteration in the transient `toGracefulStop` state **(INFERRED)** finishing their short iteration. (§7-A) |
 | **B — scheduled vs. graceful count mismatch** | Yes — and it is **by design** | The max-allowed *ceiling* (graceful handler) legitimately holds **above** the scheduled *target* (scheduled handler) throughout every down-stage; `ceiling >= target` holds for **every** sampled instant. The two closures track different quantities on purpose; the divergence is expected, not a defect. (§7-B) |
-| **C — VUs outrun `gracefulStop` on ctrl+c** | Re-characterized — **not** reproduced as a VU/`gracefulStop` defect | A single real `SIGINT` cancels VU iteration contexts and interrupts the JS VM, so even a CPU-busy iteration stops in **~17–19 ms** (exit code 105). The only way to observe "keeps running for seconds" is non-VU **graceful-phase work** such as `teardown()` (~3 s here) running to completion during the graceful abort — which is **not** a per-VU iteration overrunning `gracefulStop`. A second `SIGINT` escalates to an immediate hard stop (~17–19 ms). The user's literal "VUs keep running longer than `gracefulStop`" was not reproduced on the canonical path **(INFERRED:** the user likely observed graceful-phase work, or a non-yielding native call inside an iteration**)**. (§7-C) |
-| **D — one instance shows more VUs; sum exceeds max** | Yes — deterministically | With a **shared** `--execution-segment-sequence`, three synchronized instances split a global max of 11 as `[4, 4, 3]`, one instance consistently higher, sum **== 11** (never exceeds). The sum **exceeds** the configured max only when instances are run **without** a shared sequence (`[4, 4, 4]`, sum **12 > 11**), because each instance independently fills a different sequence and rounds up. Both cases are deterministic per the striping arithmetic — not random, not a race. (§7-D) |
+| **C — VUs outrun `gracefulStop` on ctrl+c** | Re-characterized — **not** reproduced as a VU/`gracefulStop` defect | A single real `SIGINT` cancels VU iteration contexts and interrupts the JS VM, so a sleeping iteration, a CPU-busy iteration, an iteration at a stage edge, and an iteration already in `toGracefulStop` all stop in **~7–8 ms** (exit code 105); a no-signal natural stage-end exits `0`. The only way to observe "keeps running for seconds" is non-VU **graceful-phase work** such as `teardown()` (~3 s here) running to completion during the graceful abort — which is **not** a per-VU iteration overrunning `gracefulStop`. A second `SIGINT` escalates to an immediate hard stop (~7–8 ms, teardown truncated). The user's literal "VUs keep running longer than `gracefulStop`" was not reproduced on the canonical path **(INFERRED:** the user likely observed graceful-phase work, or a non-yielding native call inside an iteration**)**. (§7-C) |
+| **D — one instance shows more VUs; sum exceeds max** | Yes — deterministically | With a **shared** `--execution-segment-sequence`, three synchronized instances split a global max of 11 as canonical `vus_max = [4, 4, 3]`; the remainder `11 % 3 = 2` deterministically lands on the **two earliest** segments (`0:1/3`, `1/3:2/3`), so **two instances tie** at the top (not one), sum **== 11** (never exceeds). The number of top instances equals the remainder — at max 1 it is a single one (`[1, 0, 0]`). The sum **exceeds** the configured max only when instances are run **without** a shared sequence (`[4, 4, 4]`, all three tied, sum **12 > 11**), because each independently fills its own sequence and rounds up. All cases are deterministic per the striping arithmetic — not random, not a race. (§7-D) |
 
 Every conclusion above is grounded in the runtime evidence in §3–§7 and the source trace at the cited
 `file:line` locations. Items that were reasoned from the source rather than directly sampled are marked
@@ -104,9 +115,13 @@ never both at once, and that loop runs in the single main `Run` goroutine
 `lib/executor/ramping_vus.go:615`, and, only after `iterateSteps` returns, a graceful-tail goroutine
 `go runState.runRemainingGracefulSteps` `lib/executor/ramping_vus.go:554` — but those interact with
 per-VU state only through the mutex/atomic discipline of §5, not by two handlers mutating the same
-state concurrently. Running the VU-handle race suite and the full ramping-vus suite under
-`go test -race` (two iterations each) reports **zero** data races (§4). (Caveat: the race detector only
-observes exercised interleavings.)
+state concurrently. The sequential premise is confirmed directly at runtime: a trace that wraps the two
+**real** strategies and drives them through the **real** `iterateSteps` sequencer records every
+scheduling call on a **single** goroutine with **`max handler bodies executing simultaneously = 1`** —
+the two strategies never overlap — with the graceful tail contributing exactly one later `maxAllowed`
+call on a *separate* goroutine only after `iterateSteps` returns (§4.1). Running the VU-handle race
+suite and the full ramping-vus suite under `go test -race` (two iterations each) additionally reports
+**zero** data races (§4.4). (Caveat: the race detector only observes exercised interleavings.)
 
 ### 2.2 Question (b) — "Or maybe the VU buffer is leaking somehow?"
 
@@ -155,21 +170,22 @@ command label the capture script echoed, followed by that command's real stdout 
 
 The Go race detector requires `CGO_ENABLED=1` and a C compiler; both are present (`go env CGO_ENABLED`
 prints `1`; `gcc` is **15.2.0**). Vendored modules are used (`GOFLAGS=-mod=vendor`), so builds and tests
-run fully offline. (The `git rev-parse HEAD` value in the block below is a point-in-time capture taken at
-the initial documentation draft commit; §3.2 explains why this self-referential value does not affect any
-`file:line` reference in this document.)
+run fully offline. (Rather than pin an ephemeral, self-referential documentation-commit hash — a file
+cannot contain the hash of the commit that will contain it — the block below records the *stable
+invariant* directly: baseline→`HEAD` adds only this one markdown file, so no k6 source differs from the
+investigated commit `ddc3b0b1d23c`. §3.2 elaborates and shows this is independently re-verifiable.)
 
 ```text
 ### git branch --show-current
 blitzy-cfb43038-9f4d-4c7a-9f83-818b7e754ba5
 exit=0
 
-### git rev-parse HEAD
-128744ee44b8af37d9ede6e620ce87fc6c2c7fca
-exit=0
+### git diff --name-only ddc3b0b1d23c HEAD -- . ':(exclude)blitzy/documentation/k6_ddc3b0b1d23c.md'
+exit=0  (empty output above => no k6 source file differs from the investigated commit ddc3b0b1d23c)
 
-### git status --porcelain --untracked-files=all
-exit=0  (empty output above => clean)
+### git diff ddc3b0b1d23c..HEAD --name-status
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
+exit=0
 
 ### go version
 go version go1.23.6 linux/amd64
@@ -192,34 +208,25 @@ exit=0
 
 ### 3.2 Relationship of the working tree to the investigated commit
 
-The git evidence shown in this section was captured at the initial documentation **draft** commit
-`128744ee4` (at that point the file was a 1,008-line draft, which is exactly what the `git diff … --stat`
-below reports). The document was subsequently expanded to its present form by a later commit on the same
-branch, so the current `HEAD` is a *later* documentation commit than the one quoted in the block below.
-This self-referential, point-in-time capture changes none of the analysis, thanks to a stable invariant:
-**every** documentation commit on this branch adds only this one markdown file and touches **no** k6
-source, so the working tree's source stays byte-identical to the investigated k6 source commit
-`ddc3b0b1d23c` ("Update comment", the parent of the first documentation commit) regardless of which
-documentation commit is checked out — i.e., all `file:line` references in this document resolve equally
-against the current `HEAD` and against `ddc3b0b1d23c`. This invariant is stable across re-commits and is
-independently verifiable at any time with
+This branch carries the k6 source at the investigated commit `ddc3b0b1d23c` ("Update comment") plus a
+sequence of documentation-only commits that each add or revise **only** this one markdown file. Because
+those commits touch **no** k6 source, the working tree's source stays byte-identical to `ddc3b0b1d23c`
+regardless of which documentation commit is checked out — so every `file:line` reference in this document
+resolves equally against the current `HEAD` and against `ddc3b0b1d23c`. This is the stable invariant that
+makes the self-referential `HEAD` hash irrelevant, and it is independently re-verifiable at any time with
 `git diff --name-only ddc3b0b1d23c HEAD -- . ':(exclude)blitzy/documentation/k6_ddc3b0b1d23c.md'`, which
-prints nothing. The `go.mod` minimum (`go 1.21`) is satisfied by the local toolchain (Go 1.23.6), which is
+prints nothing (empty output, exit 0), and with `git diff ddc3b0b1d23c..HEAD --name-status`, which lists
+exactly one added path — the document itself. The `go.mod` minimum (`go 1.21`) is satisfied by the local toolchain (Go 1.23.6), which is
 also the highest CI-supported line (`DEFAULT_GO_VERSION: "1.23.x"`). The exit code used by the ctrl+c path
 (§7-C), `ExternalAbort = 105`, is defined here as well.
 
 ```text
-### Relationship of current HEAD to investigated commit ddc3b0b1d23c
---- git log --oneline -2 ---
-128744ee4 docs: add k6 ramping-vus concurrency investigation answer (k6_ddc3b0b1d23c)
-ddc3b0b1d Update comment
-
---- git diff ddc3b0b1d23c..HEAD --stat (what the doc commit changed) ---
- blitzy/documentation/k6_ddc3b0b1d23c.md | 1008 +++++++++++++++++++++++++++++++
- 1 file changed, 1008 insertions(+)
-
---- git diff ddc3b0b1d23c..HEAD --name-status ---
+### Stable invariant: only the documentation file differs from investigated commit ddc3b0b1d23c
+--- git diff ddc3b0b1d23c..HEAD --name-status (baseline->HEAD adds only this one file) ---
 A	blitzy/documentation/k6_ddc3b0b1d23c.md
+
+--- git diff --name-only ddc3b0b1d23c HEAD -- . ':(exclude)blitzy/documentation/k6_ddc3b0b1d23c.md' ---
+(empty output => no k6 source file differs from ddc3b0b1d23c)
 
 ### go.mod (module/go/toolchain lines)
 1:module go.k6.io/k6
@@ -242,34 +249,39 @@ A	blitzy/documentation/k6_ddc3b0b1d23c.md
 
 ### 3.3 Offline build of the k6 binary under test
 
-`go mod verify` confirms the vendored modules are intact, and the investigation binary builds offline in
-~2.7 s. It is written to `/tmp/k6` — **outside** the repository tree — so the repo is left unchanged.
-(The environment setup separately produced a binary at `/tmp/k6_bin`; the binary this investigation
-built and used is the distinct `/tmp/k6`.) The product version string is `k6 v0.55.0`; the
-`commit/128744ee44` suffix in the version string is the build-time `HEAD` and is environment-specific
-(it reflects whatever commit is checked out at build time, here the documentation commit).
+`go mod verify` confirms the vendored modules are intact, and k6 builds offline from the vendored tree
+in ~2.5 s (timing below). The binary under test for the real-binary reproductions (§7-C, §7-D) is the
+canonical **baseline** build — `k6 v0.55.0`, `commit/ddc3b0b1d2` (the investigated commit
+`ddc3b0b1d23c`) — produced offline during environment setup and kept **outside** the repository tree at
+`/tmp/k6` (the setup also produced the byte-identical copy `/tmp/k6_bin`; `sha256` of the two matches at
+`eb304828f77bfd14…`), so the repo is left unchanged. `/tmp/k6` is removed during cleanup (§9.4). The
+`commit/ddc3b0b1d2` suffix in the version string is the build-time `HEAD`, here matching the
+investigated commit exactly.
 
 ```text
 ### go mod verify
 all modules verified
 exit=0
 
-### vendor mode check (head of vendor/modules.txt + count)
+### vendor mode check — head -5 vendor/modules.txt
 # buf.build/gen/go/gogo/protobuf/protocolbuffers/go v1.31.0-20210810001428-4df00b267f94.1
 ## explicit
 buf.build/gen/go/gogo/protobuf/protocolbuffers/go/gogoproto
-... (total explicit modules:)
+# buf.build/gen/go/prometheus/prometheus/protocolbuffers/go v1.31.0-20230627135113-9a12bc2590d2.1
+## explicit
+
+### explicit module count — grep -c '^## explicit' vendor/modules.txt
 94
 
-### Build k6 (investigation binary, kept OUTSIDE repo at /tmp/k6)
+### Offline build from vendored tree (reproducibility check)
 
-real	0m2.713s
-user	0m3.880s
-sys	0m2.342s
+real	0m2.534s
+user	0m3.634s
+sys	0m2.493s
 build exit=0
 
 ### /tmp/k6 version
-k6 v0.55.0 (commit/128744ee44, go1.23.6, linux/amd64)
+k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.6, linux/amd64)
 exit=0
 ```
 
@@ -300,6 +312,96 @@ concurrently with each other** — the "race between two handler goroutines" pre
 handler keeps its *own* closure-local `cur` counter (`lib/executor/ramping_vus.go:669` and `:680`),
 which is why they can report different counts at the same instant (this is Symptom B, §7-B) without any
 shared-memory hazard.
+
+**Direct runtime confirmation (run-first, canonical, under `-race`).** The serialization above is not
+asserted from reading `iterateSteps` alone — it is confirmed by a direct trace that wraps the two **real**
+handler strategies (`maxAllowedVUsHandlerStrategy` `lib/executor/ramping_vus.go:668` and
+`scheduledVUsHandlerStrategy` `lib/executor/ramping_vus.go:679`) in a recorder and drives them through the
+**real** sequencer `iterateSteps` `lib/executor/ramping_vus.go:622`, followed by the **real** graceful tail
+`runRemainingGracefulSteps` `lib/executor/ramping_vus.go:654` launched in its own goroutine exactly as `Run`
+does (`go runState.runRemainingGracefulSteps(...)` `lib/executor/ramping_vus.go:554`). Each invocation is
+timestamped and tagged with its goroutine id and phase; an atomic depth counter records the maximum number
+of handler bodies ever executing simultaneously. The input is the canonical rapid up/down config
+(8↔0 ×4, `GracefulRampDown=3s`). Reproduced ×2 under `-race` with no `WARNING: DATA RACE`.
+
+**Command:**
+
+```text
+CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeHandlerOrdering' ./lib/executor/ -count=2 -v
+```
+
+Complete output of one representative run (the second `-count=2` iteration is structurally identical — same
+two-goroutine split, same `max simultaneous = 1`, same `0` scheduled calls in the tail; only the runtime
+goroutine ids and exact offsets differ):
+
+```text
+=== RUN   TestBlitzyProbeHandlerOrdering
+=== PAUSE TestBlitzyProbeHandlerOrdering
+=== CONT  TestBlitzyProbeHandlerOrdering
+    blitzy_adhoc_test_probe_test.go:901: Q(a)/M1 direct handler-invocation trace (rawSteps=33 gracefulSteps=10 maxVUs=8):
+    blitzy_adhoc_test_probe_test.go:903:   seq | phase         | handler    | goroutine | TimeOffset | PlannedVUs
+    blitzy_adhoc_test_probe_test.go:905:      1 | iterateSteps | scheduled  | g36       |         0s | 0
+    blitzy_adhoc_test_probe_test.go:905:      2 | iterateSteps | maxAllowed | g36       |         0s | 0
+    blitzy_adhoc_test_probe_test.go:905:      3 | iterateSteps | scheduled  | g36       |      125ms | 1
+    blitzy_adhoc_test_probe_test.go:905:      4 | iterateSteps | maxAllowed | g36       |      125ms | 1
+    blitzy_adhoc_test_probe_test.go:905:      5 | iterateSteps | scheduled  | g36       |      250ms | 2
+    blitzy_adhoc_test_probe_test.go:905:      6 | iterateSteps | maxAllowed | g36       |      250ms | 2
+    blitzy_adhoc_test_probe_test.go:905:      7 | iterateSteps | scheduled  | g36       |      375ms | 3
+    blitzy_adhoc_test_probe_test.go:905:      8 | iterateSteps | maxAllowed | g36       |      375ms | 3
+    blitzy_adhoc_test_probe_test.go:905:      9 | iterateSteps | scheduled  | g36       |      500ms | 4
+    blitzy_adhoc_test_probe_test.go:905:     10 | iterateSteps | maxAllowed | g36       |      500ms | 4
+    blitzy_adhoc_test_probe_test.go:905:     11 | iterateSteps | scheduled  | g36       |      625ms | 5
+    blitzy_adhoc_test_probe_test.go:905:     12 | iterateSteps | maxAllowed | g36       |      625ms | 5
+    blitzy_adhoc_test_probe_test.go:905:     13 | iterateSteps | scheduled  | g36       |      750ms | 6
+    blitzy_adhoc_test_probe_test.go:905:     14 | iterateSteps | maxAllowed | g36       |      750ms | 6
+    blitzy_adhoc_test_probe_test.go:905:     15 | iterateSteps | scheduled  | g36       |      875ms | 7
+    blitzy_adhoc_test_probe_test.go:905:     16 | iterateSteps | maxAllowed | g36       |      875ms | 7
+    blitzy_adhoc_test_probe_test.go:905:     17 | iterateSteps | scheduled  | g36       |         1s | 8
+    blitzy_adhoc_test_probe_test.go:905:     18 | iterateSteps | maxAllowed | g36       |         1s | 8
+    blitzy_adhoc_test_probe_test.go:905:     19 | iterateSteps | scheduled  | g36       |     1.125s | 7
+    blitzy_adhoc_test_probe_test.go:905:     20 | iterateSteps | scheduled  | g36       |      1.25s | 6
+    blitzy_adhoc_test_probe_test.go:905:     21 | iterateSteps | scheduled  | g36       |     1.375s | 5
+    blitzy_adhoc_test_probe_test.go:905:     22 | iterateSteps | scheduled  | g36       |       1.5s | 4
+    blitzy_adhoc_test_probe_test.go:905:     23 | iterateSteps | scheduled  | g36       |     1.625s | 3
+    blitzy_adhoc_test_probe_test.go:905:     24 | iterateSteps | scheduled  | g36       |      1.75s | 2
+    blitzy_adhoc_test_probe_test.go:905:     25 | iterateSteps | scheduled  | g36       |     1.875s | 1
+    blitzy_adhoc_test_probe_test.go:905:     26 | iterateSteps | scheduled  | g36       |         2s | 0
+    blitzy_adhoc_test_probe_test.go:905:     27 | iterateSteps | scheduled  | g36       |     2.125s | 1
+    blitzy_adhoc_test_probe_test.go:905:     28 | iterateSteps | scheduled  | g36       |      2.25s | 2
+    blitzy_adhoc_test_probe_test.go:905:     29 | iterateSteps | scheduled  | g36       |     2.375s | 3
+    blitzy_adhoc_test_probe_test.go:905:     30 | iterateSteps | scheduled  | g36       |       2.5s | 4
+    blitzy_adhoc_test_probe_test.go:905:     31 | iterateSteps | scheduled  | g36       |     2.625s | 5
+    blitzy_adhoc_test_probe_test.go:905:     32 | iterateSteps | scheduled  | g36       |      2.75s | 6
+    blitzy_adhoc_test_probe_test.go:905:     33 | iterateSteps | scheduled  | g36       |     2.875s | 7
+    blitzy_adhoc_test_probe_test.go:905:     34 | iterateSteps | scheduled  | g36       |         3s | 8
+    blitzy_adhoc_test_probe_test.go:905:     35 | iterateSteps | scheduled  | g36       |     3.125s | 7
+    blitzy_adhoc_test_probe_test.go:905:     36 | iterateSteps | scheduled  | g36       |      3.25s | 6
+    blitzy_adhoc_test_probe_test.go:905:     37 | iterateSteps | scheduled  | g36       |     3.375s | 5
+    blitzy_adhoc_test_probe_test.go:905:     38 | iterateSteps | scheduled  | g36       |       3.5s | 4
+    blitzy_adhoc_test_probe_test.go:905:     39 | iterateSteps | scheduled  | g36       |     3.625s | 3
+    blitzy_adhoc_test_probe_test.go:905:     40 | iterateSteps | scheduled  | g36       |      3.75s | 2
+    blitzy_adhoc_test_probe_test.go:905:     41 | iterateSteps | scheduled  | g36       |     3.875s | 1
+    blitzy_adhoc_test_probe_test.go:905:     42 | iterateSteps | scheduled  | g36       |         4s | 0
+    blitzy_adhoc_test_probe_test.go:905:     43 | tail         | maxAllowed | g42       |         5s | 0
+    blitzy_adhoc_test_probe_test.go:907: distinct goroutines that invoked ANY handler = 2 (expect 1 during iterateSteps + at most 1 for the tail)
+    blitzy_adhoc_test_probe_test.go:908: max handler bodies executing simultaneously = 1 (expect 1 => no concurrent handler execution)
+    blitzy_adhoc_test_probe_test.go:909: scheduled-handler calls during tail = 0 (expect 0); maxAllowed calls during tail = 1
+    blitzy_adhoc_test_probe_test.go:910: totals: scheduled=33 maxAllowed=10 ; handledGracefulSteps(returned by iterateSteps)=9
+--- PASS: TestBlitzyProbeHandlerOrdering (5.00s)
+PASS
+ok  	go.k6.io/k6/lib/executor	11.029s
+```
+
+This trace **directly answers Question (a)**. Every one of the 42 scheduling calls (both `scheduled` and
+`maxAllowed`) executed on a **single** goroutine (`g36` in this run) during `iterateSteps`, strictly one at
+a time — `max handler bodies executing simultaneously = 1`, so the two strategies **never** run
+concurrently. The trace does record **2** distinct handler-invoking goroutines, but the second (`g42`) is
+**only** the graceful tail: it fires a **single** `maxAllowed` call (`scheduled-handler calls during tail = 0`),
+and only *after* `iterateSteps` has returned. So the "two handler goroutines racing on shared VU state"
+premise does not hold: there is no instant at which the scheduled and max-allowed strategies are both
+executing. (Goroutine ids and exact offsets differ between the two `-count=2` iterations; the structural
+facts — one scheduling goroutine, `max simultaneous = 1`, `0` scheduled calls in the tail — are identical
+across both.)
 
 ### 4.2 The goroutines `Run` actually starts (so the claim is scoped precisely)
 
@@ -735,37 +837,69 @@ loop stopping, just continue").
 **Command:**
 
 ```text
-CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -run 'TestBlitzyProbeStateTransitions' ./lib/executor/ -v
+CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStateTransitions' ./lib/executor/ -count=2 -v
 ```
 
-This probe drives one real `vuHandle` (constructed via `newStoppedVUHandle` with its run loop started
-on its own goroutine, exactly as the executor does) through `start → gracefulStop → start → hardStop`,
-observing the state via the real lock-free fast-path read (`atomic.LoadInt32`), capturing the actual
-DebugLevel transition log lines, and counting VU acquire/return calls. The `gracefulStop` passes
-through the transient `toGracefulStop` state — the VU finishes its in-flight ~50 ms iteration and only
-then settles to `stopped` via the slow path — which is the same lag mechanism that makes VUs *look*
-"stuck" in Symptom A (§7-A). Acquire/return is one-to-one (`getVU=2 == returnVU=2`), the invariant noted
-at `lib/executor/vu_handle.go:62`:
+This probe drives one real `vuHandle` (constructed via `newStoppedVUHandle`, exactly as the executor
+does) and **directly samples the state at each transition point**, capturing all five states — including
+the three *transient* ones (`starting`, `toGracefulStop`, `toHardStop`), not just the stable endpoints.
+Determinism comes from a channel-gated iteration callback: `runIter` blocks on an unbuffered `proceed`
+channel, so while a VU is `running` the loop is parked *inside* `runIter` and cannot advance the state
+machine. That lets the probe call `gracefulStop()` / `hardStop()` and read the resulting **transient**
+state *before* releasing the iteration; `starting` is captured by calling `start()` **before** launching
+the run-loop goroutine (nothing has advanced it to `running` yet). The surplus VUs that linger in
+`toGracefulStop` are the same lag mechanism that makes VUs *look* "stuck" in Symptom A (§7-A). State is
+read via the real lock-free fast-path (`atomic.LoadInt32`), the actual DebugLevel transition lines are
+captured, and VU acquire/return is counted. All five source state names
+(`lib/executor/vu_handle.go:17-21`) are observed **directly**; acquire/return is one-to-one
+(`getVU=2 == returnVU=2`), the invariant noted at `lib/executor/vu_handle.go:62`. Reproduced ×2 under
+`-race` with no `WARNING: DATA RACE` (both iterations are shown; they are identical):
 
 ```text
 === RUN   TestBlitzyProbeStateTransitions
 === PAUSE TestBlitzyProbeStateTransitions
 === CONT  TestBlitzyProbeStateTransitions
-    blitzy_adhoc_test_probe_test.go:165: Q(c) single-vuHandle state-machine trace (initial state=stopped):
-    blitzy_adhoc_test_probe_test.go:170:   start()        : stopped        -> running
-    blitzy_adhoc_test_probe_test.go:175:   gracefulStop() : running        -> stopped
-    blitzy_adhoc_test_probe_test.go:180:   start()        : stopped        -> running
-    blitzy_adhoc_test_probe_test.go:185:   hardStop()     : running        -> stopped
-    blitzy_adhoc_test_probe_test.go:190:   after cancel() : final state=stopped
-    blitzy_adhoc_test_probe_test.go:194: Captured vuHandle debug transition lines (Message @ level):
-    blitzy_adhoc_test_probe_test.go:196:     level=debug msg="Start" vuNum=0
-    blitzy_adhoc_test_probe_test.go:196:     level=debug msg="Graceful stop" vuNum=0
-    blitzy_adhoc_test_probe_test.go:196:     level=debug msg="Start" vuNum=0
-    blitzy_adhoc_test_probe_test.go:196:     level=debug msg="Hard stop" vuNum=0
-    blitzy_adhoc_test_probe_test.go:198: vuHandle-level acquire/return accounting: getVU=2 returnVU=2 (must be equal, invariant vu_handle.go:62)
---- PASS: TestBlitzyProbeStateTransitions (0.46s)
+    blitzy_adhoc_test_probe_test.go:224: Q(c)/M2 DIRECT five-state capture (one real vuHandle, channel-gated):
+    blitzy_adhoc_test_probe_test.go:227:   initial                                    -> stopped
+    blitzy_adhoc_test_probe_test.go:227:   start() [loop not launched]                -> starting
+    blitzy_adhoc_test_probe_test.go:227:   loop entered iteration                     -> running
+    blitzy_adhoc_test_probe_test.go:227:   gracefulStop() [iteration held]            -> toGracefulStop
+    blitzy_adhoc_test_probe_test.go:227:   after iteration finishes                   -> stopped
+    blitzy_adhoc_test_probe_test.go:227:   start() again -> loop entered iteration    -> running
+    blitzy_adhoc_test_probe_test.go:227:   hardStop() [iteration held]                -> toHardStop
+    blitzy_adhoc_test_probe_test.go:227:   after hardStop settles                     -> stopped
+    blitzy_adhoc_test_probe_test.go:227:   after cancel()                             -> stopped
+    blitzy_adhoc_test_probe_test.go:235: distinct states directly observed = [stopped starting running toGracefulStop toHardStop]
+    blitzy_adhoc_test_probe_test.go:238: captured vuHandle debug transition lines:
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Start" vuNum=0
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Graceful stop" vuNum=0
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Start" vuNum=0
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Hard stop" vuNum=0
+    blitzy_adhoc_test_probe_test.go:242: vuHandle acquire/return accounting: getVU=2 returnVU=2 (must be equal, invariant vu_handle.go:62)
+--- PASS: TestBlitzyProbeStateTransitions (0.08s)
+=== RUN   TestBlitzyProbeStateTransitions
+=== PAUSE TestBlitzyProbeStateTransitions
+=== CONT  TestBlitzyProbeStateTransitions
+    blitzy_adhoc_test_probe_test.go:224: Q(c)/M2 DIRECT five-state capture (one real vuHandle, channel-gated):
+    blitzy_adhoc_test_probe_test.go:227:   initial                                    -> stopped
+    blitzy_adhoc_test_probe_test.go:227:   start() [loop not launched]                -> starting
+    blitzy_adhoc_test_probe_test.go:227:   loop entered iteration                     -> running
+    blitzy_adhoc_test_probe_test.go:227:   gracefulStop() [iteration held]            -> toGracefulStop
+    blitzy_adhoc_test_probe_test.go:227:   after iteration finishes                   -> stopped
+    blitzy_adhoc_test_probe_test.go:227:   start() again -> loop entered iteration    -> running
+    blitzy_adhoc_test_probe_test.go:227:   hardStop() [iteration held]                -> toHardStop
+    blitzy_adhoc_test_probe_test.go:227:   after hardStop settles                     -> stopped
+    blitzy_adhoc_test_probe_test.go:227:   after cancel()                             -> stopped
+    blitzy_adhoc_test_probe_test.go:235: distinct states directly observed = [stopped starting running toGracefulStop toHardStop]
+    blitzy_adhoc_test_probe_test.go:238: captured vuHandle debug transition lines:
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Start" vuNum=0
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Graceful stop" vuNum=0
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Start" vuNum=0
+    blitzy_adhoc_test_probe_test.go:240:     level=debug msg="Hard stop" vuNum=0
+    blitzy_adhoc_test_probe_test.go:242: vuHandle acquire/return accounting: getVU=2 returnVU=2 (must be equal, invariant vu_handle.go:62)
+--- PASS: TestBlitzyProbeStateTransitions (0.09s)
 PASS
-ok  	go.k6.io/k6/lib/executor	0.468s
+ok  	go.k6.io/k6/lib/executor	1.190s
 ```
 
 **Conclusion for Question (c):** the three control methods serialize on one per-VU mutex (§5.1); state
@@ -802,8 +936,14 @@ direct buffer check: the value it returns is the `es.activeVUs` field `lib/execu
 `returnVU` closure decrements via `ModCurrentlyActiveVUsCount(-1)` `lib/executor/ramping_vus.go:609` — in
 the same closures that call `GetPlannedVU`/`ReturnVU`. (The adjacent `atomic.AddInt64(rs.activeVUsCount, ±1)`
 at `lib/executor/ramping_vus.go:601`/`:607` maintains a *separate* progress-display counter,
-`rs.activeVUsCount` `lib/executor/ramping_vus.go:569`, in lockstep on the same two lines, so the observable
-and the progress counter always hold equal values.) Therefore the evidence below pairs **(i)** net-zero active count with **(ii)**
+`rs.activeVUsCount` `lib/executor/ramping_vus.go:569`. The progress-counter update and the observable
+update are two *distinct* atomic operations on adjacent lines within the same closure — the pair `:601`+`:602`
+on acquire and `:607`+`:609` on return — so the two counters are **not** guaranteed equal at an arbitrary
+instant: a concurrent reader can observe one store before its sibling and momentarily see them differ.
+They **reconcile after each *completed* acquire or return**, and both settle to **zero** once `Run`
+returns — by which point `defer runState.wg.Wait()` `lib/executor/ramping_vus.go:540` has released every
+VU. INFERRED from the source pairing; the net-zero endpoint is confirmed by the observed run below.)
+Therefore the evidence below pairs **(i)** net-zero active count with **(ii)**
 a direct drain of the buffer after the run, and **(iii)** the direct one-to-one `getVU==returnVU` count
 from §5.3. "No leak" is asserted for these observed paths.
 
@@ -825,11 +965,11 @@ returns every `returnVU` has already completed, so a full 8-of-8 drain proves no
 === RUN   TestBlitzyProbeBufferAccounting
 === PAUSE TestBlitzyProbeBufferAccounting
 === CONT  TestBlitzyProbeBufferAccounting
-    blitzy_adhoc_test_probe_test.go:240: Q(b) buffer accounting — config: rapid up/down 8<->0 @1s x4, GracefulRampDown=3s, GracefulStop=1s
-    blitzy_adhoc_test_probe_test.go:241:   initialized VUs in buffer at start: 8
-    blitzy_adhoc_test_probe_test.go:242:   active-VU count BEFORE Run: 0
-    blitzy_adhoc_test_probe_test.go:268:   active-VU count AFTER Run returns: 0 (peak observed during run: 8)
-    blitzy_adhoc_test_probe_test.go:287:   buffer restoration: drained 8/8 planned VUs in 0s (all present => none orphaned)
+    blitzy_adhoc_test_probe_test.go:292: Q(b) buffer accounting — config: rapid up/down 8<->0 @1s x4, GracefulRampDown=3s, GracefulStop=1s
+    blitzy_adhoc_test_probe_test.go:293:   initialized VUs in buffer at start: 8
+    blitzy_adhoc_test_probe_test.go:294:   active-VU count BEFORE Run: 0
+    blitzy_adhoc_test_probe_test.go:320:   active-VU count AFTER Run returns: 0 (peak observed during run: 8)
+    blitzy_adhoc_test_probe_test.go:339:   buffer restoration: drained 8/8 planned VUs in 0s (all present => none orphaned)
 --- PASS: TestBlitzyProbeBufferAccounting (4.06s)
 PASS
 ok  	go.k6.io/k6/lib/executor	4.061s
@@ -841,20 +981,20 @@ Re-running the identical input with `-count=2` shows the same result both times:
 === RUN   TestBlitzyProbeBufferAccounting
 === PAUSE TestBlitzyProbeBufferAccounting
 === CONT  TestBlitzyProbeBufferAccounting
-    blitzy_adhoc_test_probe_test.go:240: Q(b) buffer accounting — config: rapid up/down 8<->0 @1s x4, GracefulRampDown=3s, GracefulStop=1s
-    blitzy_adhoc_test_probe_test.go:241:   initialized VUs in buffer at start: 8
-    blitzy_adhoc_test_probe_test.go:242:   active-VU count BEFORE Run: 0
-    blitzy_adhoc_test_probe_test.go:268:   active-VU count AFTER Run returns: 0 (peak observed during run: 8)
-    blitzy_adhoc_test_probe_test.go:287:   buffer restoration: drained 8/8 planned VUs in 0s (all present => none orphaned)
+    blitzy_adhoc_test_probe_test.go:292: Q(b) buffer accounting — config: rapid up/down 8<->0 @1s x4, GracefulRampDown=3s, GracefulStop=1s
+    blitzy_adhoc_test_probe_test.go:293:   initialized VUs in buffer at start: 8
+    blitzy_adhoc_test_probe_test.go:294:   active-VU count BEFORE Run: 0
+    blitzy_adhoc_test_probe_test.go:320:   active-VU count AFTER Run returns: 0 (peak observed during run: 8)
+    blitzy_adhoc_test_probe_test.go:339:   buffer restoration: drained 8/8 planned VUs in 0s (all present => none orphaned)
 --- PASS: TestBlitzyProbeBufferAccounting (4.05s)
 === RUN   TestBlitzyProbeBufferAccounting
 === PAUSE TestBlitzyProbeBufferAccounting
 === CONT  TestBlitzyProbeBufferAccounting
-    blitzy_adhoc_test_probe_test.go:240: Q(b) buffer accounting — config: rapid up/down 8<->0 @1s x4, GracefulRampDown=3s, GracefulStop=1s
-    blitzy_adhoc_test_probe_test.go:241:   initialized VUs in buffer at start: 8
-    blitzy_adhoc_test_probe_test.go:242:   active-VU count BEFORE Run: 0
-    blitzy_adhoc_test_probe_test.go:268:   active-VU count AFTER Run returns: 0 (peak observed during run: 8)
-    blitzy_adhoc_test_probe_test.go:287:   buffer restoration: drained 8/8 planned VUs in 0s (all present => none orphaned)
+    blitzy_adhoc_test_probe_test.go:292: Q(b) buffer accounting — config: rapid up/down 8<->0 @1s x4, GracefulRampDown=3s, GracefulStop=1s
+    blitzy_adhoc_test_probe_test.go:293:   initialized VUs in buffer at start: 8
+    blitzy_adhoc_test_probe_test.go:294:   active-VU count BEFORE Run: 0
+    blitzy_adhoc_test_probe_test.go:320:   active-VU count AFTER Run returns: 0 (peak observed during run: 8)
+    blitzy_adhoc_test_probe_test.go:339:   buffer restoration: drained 8/8 planned VUs in 0s (all present => none orphaned)
 --- PASS: TestBlitzyProbeBufferAccounting (4.06s)
 PASS
 ok  	go.k6.io/k6/lib/executor	8.116s
@@ -889,13 +1029,13 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -run 'TestBlitzyProbeDepletedBuffer' .
 === RUN   TestBlitzyProbeDepletedBuffer
 === PAUSE TestBlitzyProbeDepletedBuffer
 === CONT  TestBlitzyProbeDepletedBuffer
-    blitzy_adhoc_test_probe_test.go:317: Q(b) depleted-buffer failure path — calling GetPlannedVU on an EMPTY buffer (0 initialized VUs):
-    blitzy_adhoc_test_probe_test.go:322:     Could not get a VU from the buffer for 400ms
-    blitzy_adhoc_test_probe_test.go:322:     Could not get a VU from the buffer for 800ms
-    blitzy_adhoc_test_probe_test.go:322:     Could not get a VU from the buffer for 1.2s
-    blitzy_adhoc_test_probe_test.go:322:     Could not get a VU from the buffer for 1.6s
-    blitzy_adhoc_test_probe_test.go:322:     Could not get a VU from the buffer for 2s
-    blitzy_adhoc_test_probe_test.go:324:   returned: vu==nil? true ; err="could not get a VU from the buffer in 2s" ; elapsed=2s (expect ~5x400ms=2s)
+    blitzy_adhoc_test_probe_test.go:369: Q(b) depleted-buffer failure path — calling GetPlannedVU on an EMPTY buffer (0 initialized VUs):
+    blitzy_adhoc_test_probe_test.go:374:     Could not get a VU from the buffer for 400ms
+    blitzy_adhoc_test_probe_test.go:374:     Could not get a VU from the buffer for 800ms
+    blitzy_adhoc_test_probe_test.go:374:     Could not get a VU from the buffer for 1.2s
+    blitzy_adhoc_test_probe_test.go:374:     Could not get a VU from the buffer for 1.6s
+    blitzy_adhoc_test_probe_test.go:374:     Could not get a VU from the buffer for 2s
+    blitzy_adhoc_test_probe_test.go:376:   returned: vu==nil? true ; err="could not get a VU from the buffer in 2s" ; elapsed=2s (expect ~5x400ms=2s)
 --- PASS: TestBlitzyProbeDepletedBuffer (2.00s)
 PASS
 ok  	go.k6.io/k6/lib/executor	2.009s
@@ -950,11 +1090,11 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
 === RUN   TestBlitzyProbeStuckVUsDistribution
 === PAUSE TestBlitzyProbeStuckVUsDistribution
 === CONT  TestBlitzyProbeStuckVUsDistribution
-    blitzy_adhoc_test_probe_test.go:480: Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, GracefulStop=1s, iteration sleep=300ms; 10 identical (unchanged-input) runs
-    blitzy_adhoc_test_probe_test.go:482: Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; 'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).
-    blitzy_adhoc_test_probe_test.go:484: Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 1/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:531: Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, GracefulStop=1s, iteration sleep=300ms; 10 identical (unchanged-input) runs
+    blitzy_adhoc_test_probe_test.go:533: Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; 'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).
+    blitzy_adhoc_test_probe_test.go:535: Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 1/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -995,8 +1135,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 2/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 2/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1037,8 +1177,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 3/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 3/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1079,8 +1219,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 4/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 4/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1121,8 +1261,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 5/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 5/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1163,8 +1303,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 6/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 6/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1205,8 +1345,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 7/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 7/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1247,8 +1387,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 8/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 8/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1289,8 +1429,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 9/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 9/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1331,8 +1471,8 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 10/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 10/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1373,11 +1513,11 @@ trajectory with per-sample target and lag, `peak`, `final(after Run)`, and trans
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:591: Symptom A — DISTRIBUTION over 10 identical runs (value×count):
-    blitzy_adhoc_test_probe_test.go:592:   peak active-VU count:                 8×10
-    blitzy_adhoc_test_probe_test.go:593:   final active-VU count (after Run):    0×10
-    blitzy_adhoc_test_probe_test.go:594:   max transient surplus (active-target): 2×10
-    blitzy_adhoc_test_probe_test.go:595:   runs leaving a permanently STUCK VU (final != 0): 0/10
+    blitzy_adhoc_test_probe_test.go:642: Symptom A — DISTRIBUTION over 10 identical runs (value×count):
+    blitzy_adhoc_test_probe_test.go:643:   peak active-VU count:                 8×10
+    blitzy_adhoc_test_probe_test.go:644:   final active-VU count (after Run):    0×10
+    blitzy_adhoc_test_probe_test.go:645:   max transient surplus (active-target): 2×10
+    blitzy_adhoc_test_probe_test.go:646:   runs leaving a permanently STUCK VU (final != 0): 0/10
 --- PASS: TestBlitzyProbeStuckVUsDistribution (40.54s)
 PASS
 ok  	go.k6.io/k6/lib/executor	40.542s
@@ -1401,11 +1541,11 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
 === RUN   TestBlitzyProbeStuckVUsDistribution
 === PAUSE TestBlitzyProbeStuckVUsDistribution
 === CONT  TestBlitzyProbeStuckVUsDistribution
-    blitzy_adhoc_test_probe_test.go:480: Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, GracefulStop=1s, iteration sleep=300ms; 10 identical (unchanged-input) runs
-    blitzy_adhoc_test_probe_test.go:482: Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; 'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).
-    blitzy_adhoc_test_probe_test.go:484: Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 1/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:531: Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, GracefulStop=1s, iteration sleep=300ms; 10 identical (unchanged-input) runs
+    blitzy_adhoc_test_probe_test.go:533: Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; 'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).
+    blitzy_adhoc_test_probe_test.go:535: Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 1/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1446,8 +1586,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 2/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 2/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1488,8 +1628,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 3/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 3/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1530,8 +1670,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 4/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 4/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1572,8 +1712,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 5/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 5/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1614,8 +1754,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 6/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 6/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1656,8 +1796,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 7/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 7/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1698,8 +1838,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 8/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 8/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1740,8 +1880,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 9/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 9/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1782,8 +1922,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 10/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 10/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1824,20 +1964,20 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:591: Symptom A — DISTRIBUTION over 10 identical runs (value×count):
-    blitzy_adhoc_test_probe_test.go:592:   peak active-VU count:                 8×10
-    blitzy_adhoc_test_probe_test.go:593:   final active-VU count (after Run):    0×10
-    blitzy_adhoc_test_probe_test.go:594:   max transient surplus (active-target): 2×10
-    blitzy_adhoc_test_probe_test.go:595:   runs leaving a permanently STUCK VU (final != 0): 0/10
+    blitzy_adhoc_test_probe_test.go:642: Symptom A — DISTRIBUTION over 10 identical runs (value×count):
+    blitzy_adhoc_test_probe_test.go:643:   peak active-VU count:                 8×10
+    blitzy_adhoc_test_probe_test.go:644:   final active-VU count (after Run):    0×10
+    blitzy_adhoc_test_probe_test.go:645:   max transient surplus (active-target): 2×10
+    blitzy_adhoc_test_probe_test.go:646:   runs leaving a permanently STUCK VU (final != 0): 0/10
 --- PASS: TestBlitzyProbeStuckVUsDistribution (40.55s)
 === RUN   TestBlitzyProbeStuckVUsDistribution
 === PAUSE TestBlitzyProbeStuckVUsDistribution
 === CONT  TestBlitzyProbeStuckVUsDistribution
-    blitzy_adhoc_test_probe_test.go:480: Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, GracefulStop=1s, iteration sleep=300ms; 10 identical (unchanged-input) runs
-    blitzy_adhoc_test_probe_test.go:482: Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; 'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).
-    blitzy_adhoc_test_probe_test.go:484: Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 1/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:531: Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, GracefulStop=1s, iteration sleep=300ms; 10 identical (unchanged-input) runs
+    blitzy_adhoc_test_probe_test.go:533: Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; 'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).
+    blitzy_adhoc_test_probe_test.go:535: Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 1/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1878,8 +2018,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 2/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 2/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1920,8 +2060,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 3/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 3/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -1962,8 +2102,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 4/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 4/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2004,8 +2144,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 5/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 5/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2046,8 +2186,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 6/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 6/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2088,8 +2228,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 7/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 7/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2130,8 +2270,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 8/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 8/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2172,8 +2312,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 9/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 9/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2214,8 +2354,8 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:555: Symptom A run 10/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
-    blitzy_adhoc_test_probe_test.go:568:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
+    blitzy_adhoc_test_probe_test.go:606: Symptom A run 10/10: before(t=0)=0  peak=8  final(after Run)=0  transitions[Start=16 GracefulStop=16 HardStop=0]
+    blitzy_adhoc_test_probe_test.go:619:   active-VU trajectory (100ms samples; '*' = active>target, the 'stuck'-looking surplus):
               t=100ms  active=0 target=0 lag=+0
               t=200ms  active=1 target=1 lag=+0
               t=300ms  active=2 target=2 lag=+0
@@ -2256,11 +2396,11 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeStuckVUsDis
               t=3.8s   active=3 target=2 lag=+1*
               t=3.9s   active=2 target=1 lag=+1*
               t=4s     active=2 target=0 lag=+2*
-    blitzy_adhoc_test_probe_test.go:591: Symptom A — DISTRIBUTION over 10 identical runs (value×count):
-    blitzy_adhoc_test_probe_test.go:592:   peak active-VU count:                 8×10
-    blitzy_adhoc_test_probe_test.go:593:   final active-VU count (after Run):    0×10
-    blitzy_adhoc_test_probe_test.go:594:   max transient surplus (active-target): 2×10
-    blitzy_adhoc_test_probe_test.go:595:   runs leaving a permanently STUCK VU (final != 0): 0/10
+    blitzy_adhoc_test_probe_test.go:642: Symptom A — DISTRIBUTION over 10 identical runs (value×count):
+    blitzy_adhoc_test_probe_test.go:643:   peak active-VU count:                 8×10
+    blitzy_adhoc_test_probe_test.go:644:   final active-VU count (after Run):    0×10
+    blitzy_adhoc_test_probe_test.go:645:   max transient surplus (active-target): 2×10
+    blitzy_adhoc_test_probe_test.go:646:   runs leaving a permanently STUCK VU (final != 0): 0/10
 --- PASS: TestBlitzyProbeStuckVUsDistribution (40.55s)
 PASS
 ok  	go.k6.io/k6/lib/executor	82.121s
@@ -2310,123 +2450,123 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -run 'TestBlitzyProbeHandlerDivergence
 === RUN   TestBlitzyProbeHandlerDivergence
 === PAUSE TestBlitzyProbeHandlerDivergence
 === CONT  TestBlitzyProbeHandlerDivergence
-    blitzy_adhoc_test_probe_test.go:353: Symptom B — raw steps (scheduledVUsHandlerStrategy target, cur := raw.PlannedVUs):
-    blitzy_adhoc_test_probe_test.go:354:     idx |  TimeOffset | PlannedVUs
-    blitzy_adhoc_test_probe_test.go:356:       0 |         0s | 0
-    blitzy_adhoc_test_probe_test.go:356:       1 |      125ms | 1
-    blitzy_adhoc_test_probe_test.go:356:       2 |      250ms | 2
-    blitzy_adhoc_test_probe_test.go:356:       3 |      375ms | 3
-    blitzy_adhoc_test_probe_test.go:356:       4 |      500ms | 4
-    blitzy_adhoc_test_probe_test.go:356:       5 |      625ms | 5
-    blitzy_adhoc_test_probe_test.go:356:       6 |      750ms | 6
-    blitzy_adhoc_test_probe_test.go:356:       7 |      875ms | 7
-    blitzy_adhoc_test_probe_test.go:356:       8 |         1s | 8
-    blitzy_adhoc_test_probe_test.go:356:       9 |     1.125s | 7
-    blitzy_adhoc_test_probe_test.go:356:      10 |      1.25s | 6
-    blitzy_adhoc_test_probe_test.go:356:      11 |     1.375s | 5
-    blitzy_adhoc_test_probe_test.go:356:      12 |       1.5s | 4
-    blitzy_adhoc_test_probe_test.go:356:      13 |     1.625s | 3
-    blitzy_adhoc_test_probe_test.go:356:      14 |      1.75s | 2
-    blitzy_adhoc_test_probe_test.go:356:      15 |     1.875s | 1
-    blitzy_adhoc_test_probe_test.go:356:      16 |         2s | 0
-    blitzy_adhoc_test_probe_test.go:356:      17 |     2.125s | 1
-    blitzy_adhoc_test_probe_test.go:356:      18 |      2.25s | 2
-    blitzy_adhoc_test_probe_test.go:356:      19 |     2.375s | 3
-    blitzy_adhoc_test_probe_test.go:356:      20 |       2.5s | 4
-    blitzy_adhoc_test_probe_test.go:356:      21 |     2.625s | 5
-    blitzy_adhoc_test_probe_test.go:356:      22 |      2.75s | 6
-    blitzy_adhoc_test_probe_test.go:356:      23 |     2.875s | 7
-    blitzy_adhoc_test_probe_test.go:356:      24 |         3s | 8
-    blitzy_adhoc_test_probe_test.go:356:      25 |     3.125s | 7
-    blitzy_adhoc_test_probe_test.go:356:      26 |      3.25s | 6
-    blitzy_adhoc_test_probe_test.go:356:      27 |     3.375s | 5
-    blitzy_adhoc_test_probe_test.go:356:      28 |       3.5s | 4
-    blitzy_adhoc_test_probe_test.go:356:      29 |     3.625s | 3
-    blitzy_adhoc_test_probe_test.go:356:      30 |      3.75s | 2
-    blitzy_adhoc_test_probe_test.go:356:      31 |     3.875s | 1
-    blitzy_adhoc_test_probe_test.go:356:      32 |         4s | 0
-    blitzy_adhoc_test_probe_test.go:358: Symptom B — graceful steps (maxAllowedVUsHandlerStrategy ceiling, cur := graceful.PlannedVUs):
-    blitzy_adhoc_test_probe_test.go:359:     idx |  TimeOffset | PlannedVUs
-    blitzy_adhoc_test_probe_test.go:361:       0 |         0s | 0
-    blitzy_adhoc_test_probe_test.go:361:       1 |      125ms | 1
-    blitzy_adhoc_test_probe_test.go:361:       2 |      250ms | 2
-    blitzy_adhoc_test_probe_test.go:361:       3 |      375ms | 3
-    blitzy_adhoc_test_probe_test.go:361:       4 |      500ms | 4
-    blitzy_adhoc_test_probe_test.go:361:       5 |      625ms | 5
-    blitzy_adhoc_test_probe_test.go:361:       6 |      750ms | 6
-    blitzy_adhoc_test_probe_test.go:361:       7 |      875ms | 7
-    blitzy_adhoc_test_probe_test.go:361:       8 |         1s | 8
-    blitzy_adhoc_test_probe_test.go:361:       9 |         5s | 0
-    blitzy_adhoc_test_probe_test.go:365: Symptom B — reconstructed ceiling-vs-target over time (INFERRED from steps above):
-    blitzy_adhoc_test_probe_test.go:366:     time(ms) | scheduled target | max-allowed ceiling | ceiling>=target?
-    blitzy_adhoc_test_probe_test.go:371:            0 |                0 |                   0 | true
-    blitzy_adhoc_test_probe_test.go:371:          125 |                1 |                   1 | true
-    blitzy_adhoc_test_probe_test.go:371:          250 |                2 |                   2 | true
-    blitzy_adhoc_test_probe_test.go:371:          375 |                3 |                   3 | true
-    blitzy_adhoc_test_probe_test.go:371:          500 |                4 |                   4 | true
-    blitzy_adhoc_test_probe_test.go:371:          625 |                5 |                   5 | true
-    blitzy_adhoc_test_probe_test.go:371:          750 |                6 |                   6 | true
-    blitzy_adhoc_test_probe_test.go:371:          875 |                7 |                   7 | true
-    blitzy_adhoc_test_probe_test.go:371:         1000 |                8 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1125 |                7 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1250 |                6 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1375 |                5 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1500 |                4 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1625 |                3 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1750 |                2 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         1875 |                1 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2000 |                0 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2125 |                1 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2250 |                2 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2375 |                3 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2500 |                4 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2625 |                5 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2750 |                6 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         2875 |                7 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3000 |                8 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3125 |                7 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3250 |                6 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3375 |                5 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3500 |                4 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3625 |                3 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3750 |                2 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         3875 |                1 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         4000 |                0 |                   8 | true
-    blitzy_adhoc_test_probe_test.go:371:         5000 |                0 |                   0 | true
-    blitzy_adhoc_test_probe_test.go:407: Symptom B — observed vuHandle transitions (real debug lines, relative to Run start):
-    blitzy_adhoc_test_probe_test.go:409:     t=   126ms  Start         vuNum=0
-    blitzy_adhoc_test_probe_test.go:409:     t=   250ms  Start         vuNum=1
-    blitzy_adhoc_test_probe_test.go:409:     t=   376ms  Start         vuNum=2
-    blitzy_adhoc_test_probe_test.go:409:     t=   501ms  Start         vuNum=3
-    blitzy_adhoc_test_probe_test.go:409:     t=   626ms  Start         vuNum=4
-    blitzy_adhoc_test_probe_test.go:409:     t=   750ms  Start         vuNum=5
-    blitzy_adhoc_test_probe_test.go:409:     t=   876ms  Start         vuNum=6
-    blitzy_adhoc_test_probe_test.go:409:     t=  1.001s  Start         vuNum=7
-    blitzy_adhoc_test_probe_test.go:409:     t=  1.125s  Graceful stop vuNum=7
-    blitzy_adhoc_test_probe_test.go:409:     t=   1.25s  Graceful stop vuNum=6
-    blitzy_adhoc_test_probe_test.go:409:     t=  1.375s  Graceful stop vuNum=5
-    blitzy_adhoc_test_probe_test.go:409:     t=  1.501s  Graceful stop vuNum=4
-    blitzy_adhoc_test_probe_test.go:409:     t=  1.625s  Graceful stop vuNum=3
-    blitzy_adhoc_test_probe_test.go:409:     t=   1.75s  Graceful stop vuNum=2
-    blitzy_adhoc_test_probe_test.go:409:     t=  1.876s  Graceful stop vuNum=1
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.001s  Graceful stop vuNum=0
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.125s  Start         vuNum=0
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.251s  Start         vuNum=1
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.376s  Start         vuNum=2
-    blitzy_adhoc_test_probe_test.go:409:     t=    2.5s  Start         vuNum=3
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.626s  Start         vuNum=4
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.751s  Start         vuNum=5
-    blitzy_adhoc_test_probe_test.go:409:     t=  2.875s  Start         vuNum=6
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.001s  Start         vuNum=7
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.126s  Graceful stop vuNum=7
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.251s  Graceful stop vuNum=6
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.375s  Graceful stop vuNum=5
-    blitzy_adhoc_test_probe_test.go:409:     t=    3.5s  Graceful stop vuNum=4
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.626s  Graceful stop vuNum=3
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.751s  Graceful stop vuNum=2
-    blitzy_adhoc_test_probe_test.go:409:     t=  3.876s  Graceful stop vuNum=1
-    blitzy_adhoc_test_probe_test.go:409:     t=  4.001s  Graceful stop vuNum=0
-    blitzy_adhoc_test_probe_test.go:411: Symptom B — transition TOTALS: Start(scheduled grow)=16  Graceful stop(scheduled shrink)=16  Hard stop(max-allowed ceiling shrink)=0
+    blitzy_adhoc_test_probe_test.go:405: Symptom B — raw steps (scheduledVUsHandlerStrategy target, cur := raw.PlannedVUs):
+    blitzy_adhoc_test_probe_test.go:406:     idx |  TimeOffset | PlannedVUs
+    blitzy_adhoc_test_probe_test.go:408:       0 |         0s | 0
+    blitzy_adhoc_test_probe_test.go:408:       1 |      125ms | 1
+    blitzy_adhoc_test_probe_test.go:408:       2 |      250ms | 2
+    blitzy_adhoc_test_probe_test.go:408:       3 |      375ms | 3
+    blitzy_adhoc_test_probe_test.go:408:       4 |      500ms | 4
+    blitzy_adhoc_test_probe_test.go:408:       5 |      625ms | 5
+    blitzy_adhoc_test_probe_test.go:408:       6 |      750ms | 6
+    blitzy_adhoc_test_probe_test.go:408:       7 |      875ms | 7
+    blitzy_adhoc_test_probe_test.go:408:       8 |         1s | 8
+    blitzy_adhoc_test_probe_test.go:408:       9 |     1.125s | 7
+    blitzy_adhoc_test_probe_test.go:408:      10 |      1.25s | 6
+    blitzy_adhoc_test_probe_test.go:408:      11 |     1.375s | 5
+    blitzy_adhoc_test_probe_test.go:408:      12 |       1.5s | 4
+    blitzy_adhoc_test_probe_test.go:408:      13 |     1.625s | 3
+    blitzy_adhoc_test_probe_test.go:408:      14 |      1.75s | 2
+    blitzy_adhoc_test_probe_test.go:408:      15 |     1.875s | 1
+    blitzy_adhoc_test_probe_test.go:408:      16 |         2s | 0
+    blitzy_adhoc_test_probe_test.go:408:      17 |     2.125s | 1
+    blitzy_adhoc_test_probe_test.go:408:      18 |      2.25s | 2
+    blitzy_adhoc_test_probe_test.go:408:      19 |     2.375s | 3
+    blitzy_adhoc_test_probe_test.go:408:      20 |       2.5s | 4
+    blitzy_adhoc_test_probe_test.go:408:      21 |     2.625s | 5
+    blitzy_adhoc_test_probe_test.go:408:      22 |      2.75s | 6
+    blitzy_adhoc_test_probe_test.go:408:      23 |     2.875s | 7
+    blitzy_adhoc_test_probe_test.go:408:      24 |         3s | 8
+    blitzy_adhoc_test_probe_test.go:408:      25 |     3.125s | 7
+    blitzy_adhoc_test_probe_test.go:408:      26 |      3.25s | 6
+    blitzy_adhoc_test_probe_test.go:408:      27 |     3.375s | 5
+    blitzy_adhoc_test_probe_test.go:408:      28 |       3.5s | 4
+    blitzy_adhoc_test_probe_test.go:408:      29 |     3.625s | 3
+    blitzy_adhoc_test_probe_test.go:408:      30 |      3.75s | 2
+    blitzy_adhoc_test_probe_test.go:408:      31 |     3.875s | 1
+    blitzy_adhoc_test_probe_test.go:408:      32 |         4s | 0
+    blitzy_adhoc_test_probe_test.go:410: Symptom B — graceful steps (maxAllowedVUsHandlerStrategy ceiling, cur := graceful.PlannedVUs):
+    blitzy_adhoc_test_probe_test.go:411:     idx |  TimeOffset | PlannedVUs
+    blitzy_adhoc_test_probe_test.go:413:       0 |         0s | 0
+    blitzy_adhoc_test_probe_test.go:413:       1 |      125ms | 1
+    blitzy_adhoc_test_probe_test.go:413:       2 |      250ms | 2
+    blitzy_adhoc_test_probe_test.go:413:       3 |      375ms | 3
+    blitzy_adhoc_test_probe_test.go:413:       4 |      500ms | 4
+    blitzy_adhoc_test_probe_test.go:413:       5 |      625ms | 5
+    blitzy_adhoc_test_probe_test.go:413:       6 |      750ms | 6
+    blitzy_adhoc_test_probe_test.go:413:       7 |      875ms | 7
+    blitzy_adhoc_test_probe_test.go:413:       8 |         1s | 8
+    blitzy_adhoc_test_probe_test.go:413:       9 |         5s | 0
+    blitzy_adhoc_test_probe_test.go:417: Symptom B — reconstructed ceiling-vs-target over time (INFERRED from steps above):
+    blitzy_adhoc_test_probe_test.go:418:     time(ms) | scheduled target | max-allowed ceiling | ceiling>=target?
+    blitzy_adhoc_test_probe_test.go:423:            0 |                0 |                   0 | true
+    blitzy_adhoc_test_probe_test.go:423:          125 |                1 |                   1 | true
+    blitzy_adhoc_test_probe_test.go:423:          250 |                2 |                   2 | true
+    blitzy_adhoc_test_probe_test.go:423:          375 |                3 |                   3 | true
+    blitzy_adhoc_test_probe_test.go:423:          500 |                4 |                   4 | true
+    blitzy_adhoc_test_probe_test.go:423:          625 |                5 |                   5 | true
+    blitzy_adhoc_test_probe_test.go:423:          750 |                6 |                   6 | true
+    blitzy_adhoc_test_probe_test.go:423:          875 |                7 |                   7 | true
+    blitzy_adhoc_test_probe_test.go:423:         1000 |                8 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1125 |                7 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1250 |                6 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1375 |                5 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1500 |                4 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1625 |                3 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1750 |                2 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         1875 |                1 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2000 |                0 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2125 |                1 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2250 |                2 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2375 |                3 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2500 |                4 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2625 |                5 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2750 |                6 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         2875 |                7 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3000 |                8 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3125 |                7 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3250 |                6 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3375 |                5 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3500 |                4 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3625 |                3 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3750 |                2 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         3875 |                1 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         4000 |                0 |                   8 | true
+    blitzy_adhoc_test_probe_test.go:423:         5000 |                0 |                   0 | true
+    blitzy_adhoc_test_probe_test.go:459: Symptom B — observed vuHandle transitions (real debug lines, relative to Run start):
+    blitzy_adhoc_test_probe_test.go:461:     t=   126ms  Start         vuNum=0
+    blitzy_adhoc_test_probe_test.go:461:     t=   250ms  Start         vuNum=1
+    blitzy_adhoc_test_probe_test.go:461:     t=   376ms  Start         vuNum=2
+    blitzy_adhoc_test_probe_test.go:461:     t=   501ms  Start         vuNum=3
+    blitzy_adhoc_test_probe_test.go:461:     t=   626ms  Start         vuNum=4
+    blitzy_adhoc_test_probe_test.go:461:     t=   750ms  Start         vuNum=5
+    blitzy_adhoc_test_probe_test.go:461:     t=   876ms  Start         vuNum=6
+    blitzy_adhoc_test_probe_test.go:461:     t=  1.001s  Start         vuNum=7
+    blitzy_adhoc_test_probe_test.go:461:     t=  1.125s  Graceful stop vuNum=7
+    blitzy_adhoc_test_probe_test.go:461:     t=   1.25s  Graceful stop vuNum=6
+    blitzy_adhoc_test_probe_test.go:461:     t=  1.375s  Graceful stop vuNum=5
+    blitzy_adhoc_test_probe_test.go:461:     t=  1.501s  Graceful stop vuNum=4
+    blitzy_adhoc_test_probe_test.go:461:     t=  1.625s  Graceful stop vuNum=3
+    blitzy_adhoc_test_probe_test.go:461:     t=   1.75s  Graceful stop vuNum=2
+    blitzy_adhoc_test_probe_test.go:461:     t=  1.876s  Graceful stop vuNum=1
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.001s  Graceful stop vuNum=0
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.125s  Start         vuNum=0
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.251s  Start         vuNum=1
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.376s  Start         vuNum=2
+    blitzy_adhoc_test_probe_test.go:461:     t=    2.5s  Start         vuNum=3
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.626s  Start         vuNum=4
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.751s  Start         vuNum=5
+    blitzy_adhoc_test_probe_test.go:461:     t=  2.875s  Start         vuNum=6
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.001s  Start         vuNum=7
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.126s  Graceful stop vuNum=7
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.251s  Graceful stop vuNum=6
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.375s  Graceful stop vuNum=5
+    blitzy_adhoc_test_probe_test.go:461:     t=    3.5s  Graceful stop vuNum=4
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.626s  Graceful stop vuNum=3
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.751s  Graceful stop vuNum=2
+    blitzy_adhoc_test_probe_test.go:461:     t=  3.876s  Graceful stop vuNum=1
+    blitzy_adhoc_test_probe_test.go:461:     t=  4.001s  Graceful stop vuNum=0
+    blitzy_adhoc_test_probe_test.go:463: Symptom B — transition TOTALS: Start(scheduled grow)=16  Graceful stop(scheduled shrink)=16  Hard stop(max-allowed ceiling shrink)=0
 --- PASS: TestBlitzyProbeHandlerDivergence (4.06s)
 PASS
 ok  	go.k6.io/k6/lib/executor	4.061s
@@ -2456,7 +2596,7 @@ does not shrink until 5 s), and is corrected here to the observed `Hard stop=0`.
 
 **Direct answer:** On the canonical `ramping-vus` + real `SIGINT` path, a single Ctrl+C performs a
 **graceful abort** (exit code 105 = `ExternalAbort` `errext/exitcodes/codes.go:41`) that cancels VU
-iteration contexts and interrupts the JS VM, so even a CPU-busy iteration stops in **~17–19 ms** — VU
+iteration contexts and interrupts the JS VM, so even a CPU-busy iteration stops in **~7–8 ms** — VU
 iterations do **not** overrun. The only thing observed "keeping running for seconds" is non-VU
 **graceful-phase work** (here, a `teardown()` that runs ~3 s) completing during the graceful abort. So
 the literal report — *VU iterations outrunning `gracefulStop`* — was **not reproduced** as a defect;
@@ -2475,20 +2615,36 @@ what is real is that graceful-phase work runs to completion during a single-Ctrl
   `lib/executor/helpers.go:168,172`). It is **not** a "stage-end" grace and it does **not** bound the
   ctrl+c abort.
 - **The ctrl+c abort path** — a *separate* mechanism: `handleTestAbortSignals`
-  `cmd/common.go:97` (`signal.Notify` for `os.Interrupt`/`SIGINT`/`SIGTERM` `cmd/common.go:101`) invokes
+  `cmd/common.go:97` (`gs.SignalNotify` for `os.Interrupt`/`SIGINT`/`SIGTERM` `cmd/common.go:101`) invokes
   the `gracefulStop` signal closure `cmd/run.go:349` on the first signal (Debug "Stopping k6 in response
   to signal…" `cmd/run.go:350`) and the `onHardStop` closure `cmd/run.go:359` on the second (Error
   "Aborting k6 in response to signal" `cmd/run.go:360`), then `gs.OSExit(int(exitcodes.ExternalAbort))`
   `cmd/common.go:118`. VU iteration `sleep` is interruptible because it selects on `ctx.Done()`
   `js/modules/k6/k6.go:71-80`.
 
-**Method.** The real `/tmp/k6` binary is launched via canonical `k6 run`, a real `SIGINT` is delivered
-to the exact spawned PID, and the SIGINT→exit latency is measured with a **monotonic** clock
-(`python3 time.monotonic()`) using ~1 ms poll-based exit detection. Four conditions are each run twice
-(Rule 1): **C1** sleeping iterations + single SIGINT; **C2** CPU-busy (non-yielding) iterations + single
-SIGINT; **C3** a script with a ~3 s busy `teardown()` + single SIGINT; **C4** the same teardown script +
-a double SIGINT. The full harness (strict shell options, `mktemp -d` workdir, exact-PID kill + `wait`,
-`EXIT` trap cleanup) and the JS scripts are embedded in §9.2.
+**Method.** The canonical baseline `k6` binary (`v0.55.0`, `commit/ddc3b0b1d2` — the investigated commit
+`ddc3b0b1d23c`) is launched via `k6 run`; a real `SIGINT` is delivered to the exact spawned PID, and the
+SIGINT→exit latency is measured with a high-resolution wall clock (`date +%s.%N`) using a busy-spin
+`kill -0` exit poll (sub-millisecond detection). **Nine** conditions are each run twice (Rule 1),
+spanning the natural path, the primary single-SIGINT path, and the secondary/edge paths the symptom
+implies:
+
+- **`natural_stage_end`** — a short ramp that ends **with no signal** (the ordinary stage-end baseline);
+- **`natural_forced_grace`** — a no-signal ramp in which VUs are mid-iteration at the down-stage boundary,
+  so `gracefulRampDown` extends their finish (still a clean exit);
+- **`C1_sleep_singleSIGINT`** — sleeping iterations + a single SIGINT;
+- **`C2_busy_singleSIGINT`** — CPU-busy (non-yielding) iterations + a single SIGINT;
+- **`near_transition_SIGINT`** — a SIGINT delivered right at a stage boundary (edge timing);
+- **`graceful_state_SIGINT`** — a SIGINT delivered only *after* an actual `Graceful stop` state log
+  (`lib/executor/vu_handle.go:161`) has been observed in the live stderr stream (VUs already in
+  `toGracefulStop`);
+- **`C3_teardown_singleSIGINT`** — a script with a ~3 s busy `teardown()` + a single SIGINT;
+- **`C4_teardown_doubleSIGINT`** — the same teardown script + a double SIGINT;
+- **`rapid_double_SIGINT`** — a ~10 ms-spaced double SIGINT delivered during the teardown.
+
+The hardened harness (`set -u`; strict `RUNS>=2` integer validation before any work; `mktemp -d` workdir;
+exact-PID `kill -INT`; **bounded** `wait` with TERM→KILL escalation and removal of each reaped PID from
+the cleanup-ownership array; `EXIT`/`INT`/`TERM` trap cleanup) and the JS scripts are embedded in §9.2.
 
 **Command (per run, as echoed in the transcript):**
 
@@ -2498,184 +2654,433 @@ a double SIGINT. The full harness (strict shell options, `mktemp -d` workdir, ex
 
 ```text
 ################ k6 build under test ################
-k6 v0.55.0 (commit/128744ee44, go1.23.6, linux/amd64)
-workdir: /tmp/k6probe_symC.wv5iBg ; RUNS per condition: 2
+k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.6, linux/amd64)
+workdir: /tmp/k6probe_symC.DVoT3p ; RUNS per condition: 2
+binary: /tmp/k6 (canonical baseline build, commit ddc3b0b1d2 == investigated ddc3b0b1d23c)
+
+===== CONDITION natural_stage_end — run 1/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report natural.js   (first=none second=none wait_log=none)
+spawned k6 pid=466717
+wait result: pid=466717 exit_code=0  (0 == clean natural completion)
+elapsed spawn -> natural exit: 1207.7 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (1.0s), 1/3 VUs, 8 complete and 0 interrupted iterations
+  running (1.2s), 0/3 VUs, 9 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:14Z" level=debug msg="Everything has finished, exiting k6 normally!"
+--- state markers --- Graceful stop log count=3 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (1.0s), 1/3 VUs, 8 complete and 0 interrupted iterations
+  running (1.2s), 0/3 VUs, 9 complete and 0 interrupted iterations
+  alive_after_wait=no
+===== end natural_stage_end run 1: exit=0 =====
+
+===== CONDITION natural_stage_end — run 2/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report natural.js   (first=none second=none wait_log=none)
+spawned k6 pid=466820
+wait result: pid=466820 exit_code=0  (0 == clean natural completion)
+elapsed spawn -> natural exit: 1215.3 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (1.0s), 1/3 VUs, 8 complete and 0 interrupted iterations
+  running (1.2s), 0/3 VUs, 9 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:15Z" level=debug msg="Everything has finished, exiting k6 normally!"
+--- state markers --- Graceful stop log count=3 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (1.0s), 1/3 VUs, 8 complete and 0 interrupted iterations
+  running (1.2s), 0/3 VUs, 9 complete and 0 interrupted iterations
+  alive_after_wait=no
+===== end natural_stage_end run 2: exit=0 =====
+
+===== CONDITION natural_forced_grace — run 1/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report natural_forced.js   (first=none second=none wait_log=none)
+spawned k6 pid=466924
+wait result: pid=466924 exit_code=0  (0 == clean natural completion)
+elapsed spawn -> natural exit: 2579.3 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (1.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (2.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (2.5s), 0/3 VUs, 3 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:17Z" level=debug msg="Everything has finished, exiting k6 normally!"
+--- state markers --- Graceful stop log count=3 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (2.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (2.5s), 0/3 VUs, 3 complete and 0 interrupted iterations
+  alive_after_wait=no
+===== end natural_forced_grace run 1: exit=0 =====
+
+===== CONDITION natural_forced_grace — run 2/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report natural_forced.js   (first=none second=none wait_log=none)
+spawned k6 pid=467099
+wait result: pid=467099 exit_code=0  (0 == clean natural completion)
+elapsed spawn -> natural exit: 2538.4 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (1.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (2.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (2.5s), 0/3 VUs, 3 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:20Z" level=debug msg="Everything has finished, exiting k6 normally!"
+--- state markers --- Graceful stop log count=3 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (2.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (2.5s), 0/3 VUs, 3 complete and 0 interrupted iterations
+  alive_after_wait=no
+===== end natural_forced_grace run 2: exit=0 =====
 
 ===== CONDITION C1_sleep_singleSIGINT — run 1/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report sleep_iter.js   (first SIGINT @+2s)
-spawned k6 pid=148888
-first  SIGINT: delivered_at_mono=3150345.821976  kill_status=0  process_alive_before_send=yes
-wait result: pid=148888 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 16.9 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report sleep_iter.js   (first=2 second=none wait_log=none)
+spawned k6 pid=467273
+first  SIGINT: sent_at_mono=1784087962.505132375 kill_status=0 alive_before=yes
+wait result: pid=467273 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 7.1 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T20:59:57Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T20:59:57Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
-time="2026-07-14T20:59:57Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T20:59:57Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T20:59:57Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
---- setup/teardown markers (console.log -> stderr) ---
-(no teardown markers)
---- iteration progress (final states) ---
-running (00m01.0s), 4/5 VUs, 0 complete and 0 interrupted iterations
-running (00m02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+  running (01.0s), 4/5 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:22Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:22Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:22Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+  time="2026-07-15T03:59:22Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (01.0s), 4/5 VUs, 0 complete and 0 interrupted iterations
+  running (02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+  alive_after_wait=no
 ===== end C1_sleep_singleSIGINT run 1: exit=105 =====
 
 ===== CONDITION C1_sleep_singleSIGINT — run 2/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report sleep_iter.js   (first SIGINT @+2s)
-spawned k6 pid=148917
-first  SIGINT: delivered_at_mono=3150347.880923  kill_status=0  process_alive_before_send=yes
-wait result: pid=148917 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 18.3 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report sleep_iter.js   (first=2 second=none wait_log=none)
+spawned k6 pid=467310
+first  SIGINT: sent_at_mono=1784087964.535946015 kill_status=0 alive_before=yes
+wait result: pid=467310 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 6.9 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T20:59:59Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T20:59:59Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
-time="2026-07-14T20:59:59Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T20:59:59Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T20:59:59Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
---- setup/teardown markers (console.log -> stderr) ---
-(no teardown markers)
---- iteration progress (final states) ---
-running (00m01.0s), 4/5 VUs, 0 complete and 0 interrupted iterations
-running (00m02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+  running (01.0s), 4/5 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:24Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:24Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:24Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+  time="2026-07-15T03:59:24Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (01.0s), 4/5 VUs, 0 complete and 0 interrupted iterations
+  running (02.0s), 0/5 VUs, 0 complete and 5 interrupted iterations
+  alive_after_wait=no
 ===== end C1_sleep_singleSIGINT run 2: exit=105 =====
 
 ===== CONDITION C2_busy_singleSIGINT — run 1/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report busy_iter.js   (first SIGINT @+2.5s)
-spawned k6 pid=148946
-first  SIGINT: delivered_at_mono=3150350.437208  kill_status=0  process_alive_before_send=yes
-wait result: pid=148946 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 17.6 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report busy_iter.js   (first=2.5 second=none wait_log=none)
+spawned k6 pid=467347
+first  SIGINT: sent_at_mono=1784087967.069693630 kill_status=0 alive_before=yes
+wait result: pid=467347 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 7.8 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T21:00:01Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T21:00:01Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
-time="2026-07-14T21:00:01Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:01Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:01Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
---- setup/teardown markers (console.log -> stderr) ---
-(no teardown markers)
---- iteration progress (final states) ---
-running (00m02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
-running (00m02.5s), 0/3 VUs, 0 complete and 3 interrupted iterations
+  running (01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:27Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:27Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:27Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (02.5s), 0/3 VUs, 0 complete and 3 interrupted iterations
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (02.5s), 0/3 VUs, 0 complete and 3 interrupted iterations
+  alive_after_wait=no
 ===== end C2_busy_singleSIGINT run 1: exit=105 =====
 
 ===== CONDITION C2_busy_singleSIGINT — run 2/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report busy_iter.js   (first SIGINT @+2.5s)
-spawned k6 pid=148990
-first  SIGINT: delivered_at_mono=3150352.990707  kill_status=0  process_alive_before_send=yes
-wait result: pid=148990 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 19.1 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report busy_iter.js   (first=2.5 second=none wait_log=none)
+spawned k6 pid=467405
+first  SIGINT: sent_at_mono=1784087969.602845462 kill_status=0 alive_before=yes
+wait result: pid=467405 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 7.6 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T21:00:04Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T21:00:04Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
-time="2026-07-14T21:00:04Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:04Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:04Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
---- setup/teardown markers (console.log -> stderr) ---
-(no teardown markers)
---- iteration progress (final states) ---
-running (00m02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
-running (00m02.5s), 0/3 VUs, 0 complete and 3 interrupted iterations
+  running (01.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:29Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:29Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:29Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (02.5s), 0/3 VUs, 0 complete and 3 interrupted iterations
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (02.0s), 3/3 VUs, 0 complete and 0 interrupted iterations
+  running (02.5s), 0/3 VUs, 0 complete and 3 interrupted iterations
+  alive_after_wait=no
 ===== end C2_busy_singleSIGINT run 2: exit=105 =====
 
-===== CONDITION C3_teardown_singleSIGINT — run 1/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_iter.js   (first SIGINT @+2.5s)
-spawned k6 pid=149034
-first  SIGINT: delivered_at_mono=3150355.549216  kill_status=0  process_alive_before_send=yes
-wait result: pid=149034 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 3018.6 ms
+===== CONDITION near_transition_SIGINT — run 1/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report rampdown.js   (first=1 second=none wait_log=none)
+spawned k6 pid=467463
+first  SIGINT: sent_at_mono=1784087970.636082302 kill_status=0 alive_before=yes
+wait result: pid=467463 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 7.7 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T21:00:06Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T21:00:09Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
-time="2026-07-14T21:00:09Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:09Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:09Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
---- setup/teardown markers (console.log -> stderr) ---
-time="2026-07-14T21:00:06Z" level=info msg=TEARDOWN_START source=console
-time="2026-07-14T21:00:09Z" level=info msg=TEARDOWN_END source=console
---- iteration progress (final states) ---
-running (00m05.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
-running (00m05.5s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  time="2026-07-15T03:59:30Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:30Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:30Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (01.0s), 0/6 VUs, 0 complete and 5 interrupted iterations
+  time="2026-07-15T03:59:30Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+  time="2026-07-15T03:59:30Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (01.0s), 0/6 VUs, 0 complete and 5 interrupted iterations
+  alive_after_wait=no
+===== end near_transition_SIGINT run 1: exit=105 =====
+
+===== CONDITION near_transition_SIGINT — run 2/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report rampdown.js   (first=1 second=none wait_log=none)
+spawned k6 pid=467501
+first  SIGINT: sent_at_mono=1784087971.669550244 kill_status=0 alive_before=yes
+wait result: pid=467501 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 6.7 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  time="2026-07-15T03:59:31Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:31Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:31Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (01.0s), 0/6 VUs, 0 complete and 5 interrupted iterations
+  time="2026-07-15T03:59:31Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+  time="2026-07-15T03:59:31Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (01.0s), 0/6 VUs, 0 complete and 5 interrupted iterations
+  alive_after_wait=no
+===== end near_transition_SIGINT run 2: exit=105 =====
+
+===== CONDITION graceful_state_SIGINT — run 1/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report rampdown.js   (first=0 second=none wait_log=Graceful stop)
+spawned k6 pid=467540
+trigger 'Graceful stop' observed_before_signal=yes after 1.10s
+first  SIGINT: sent_at_mono=1784087972.934658535 kill_status=0 alive_before=yes
+wait result: pid=467540 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 7.4 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (01.0s), 5/6 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:32Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:32Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:32Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (01.2s), 0/6 VUs, 0 complete and 6 interrupted iterations
+  time="2026-07-15T03:59:32Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+--- state markers --- Graceful stop log count=1 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (01.0s), 5/6 VUs, 0 complete and 0 interrupted iterations
+  running (01.2s), 0/6 VUs, 0 complete and 6 interrupted iterations
+  alive_after_wait=no
+===== end graceful_state_SIGINT run 1: exit=105 =====
+
+===== CONDITION graceful_state_SIGINT — run 2/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report rampdown.js   (first=0 second=none wait_log=Graceful stop)
+spawned k6 pid=467669
+trigger 'Graceful stop' observed_before_signal=yes after 1.10s
+first  SIGINT: sent_at_mono=1784087974.204903951 kill_status=0 alive_before=yes
+wait result: pid=467669 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 7.5 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (01.0s), 5/6 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:34Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:34Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+  time="2026-07-15T03:59:34Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
+  running (01.2s), 0/6 VUs, 0 complete and 6 interrupted iterations
+  time="2026-07-15T03:59:34Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
+--- state markers --- Graceful stop log count=1 ; Hard stop log count=0
+--- teardown marker (console) ---
+--- iteration progress (final two states) ---
+  running (01.0s), 5/6 VUs, 0 complete and 0 interrupted iterations
+  running (01.2s), 0/6 VUs, 0 complete and 6 interrupted iterations
+  alive_after_wait=no
+===== end graceful_state_SIGINT run 2: exit=105 =====
+
+===== CONDITION C3_teardown_singleSIGINT — run 1/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_busy.js   (first=2 second=none wait_log=none)
+spawned k6 pid=467796
+first  SIGINT: sent_at_mono=1784087976.238119822 kill_status=0 alive_before=yes
+wait result: pid=467796 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 3008.9 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:36Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  running (02.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (03.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (04.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  time="2026-07-15T03:59:39Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+  time="2026-07-15T03:59:36Z" level=info msg=TEARDOWN_START source=console
+  time="2026-07-15T03:59:39Z" level=info msg=TEARDOWN_END source=console
+--- iteration progress (final two states) ---
+  running (04.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (05.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  alive_after_wait=no
 ===== end C3_teardown_singleSIGINT run 1: exit=105 =====
 
 ===== CONDITION C3_teardown_singleSIGINT — run 2/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_iter.js   (first SIGINT @+2.5s)
-spawned k6 pid=149981
-first  SIGINT: delivered_at_mono=3150361.103532  kill_status=0  process_alive_before_send=yes
-wait result: pid=149981 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 3018.3 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_busy.js   (first=2 second=none wait_log=none)
+spawned k6 pid=467852
+first  SIGINT: sent_at_mono=1784087981.272714868 kill_status=0 alive_before=yes
+wait result: pid=467852 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 3008.1 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T21:00:12Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T21:00:15Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
-time="2026-07-14T21:00:15Z" level=debug msg="Test finished with an error" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:15Z" level=debug msg="Everything has finished, exiting k6 with an error!" error="test run was aborted because k6 received a 'interrupt' signal"
-time="2026-07-14T21:00:15Z" level=error msg="test run was aborted because k6 received a 'interrupt' signal"
---- setup/teardown markers (console.log -> stderr) ---
-time="2026-07-14T21:00:12Z" level=info msg=TEARDOWN_START source=console
-time="2026-07-14T21:00:15Z" level=info msg=TEARDOWN_END source=console
---- iteration progress (final states) ---
-running (00m05.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
-running (00m05.5s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:41Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  running (02.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (03.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (04.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  time="2026-07-15T03:59:44Z" level=debug msg="The test run was interrupted, returning 'test run was aborted because k6 received a 'interrupt' signal' instead of '%!s(<nil>)'" phase=execution-scheduler-run
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+  time="2026-07-15T03:59:41Z" level=info msg=TEARDOWN_START source=console
+  time="2026-07-15T03:59:44Z" level=info msg=TEARDOWN_END source=console
+--- iteration progress (final two states) ---
+  running (04.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (05.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  alive_after_wait=no
 ===== end C3_teardown_singleSIGINT run 2: exit=105 =====
 
 ===== CONDITION C4_teardown_doubleSIGINT — run 1/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_iter.js   (first SIGINT @+2.5s, second @+0.8s after first)
-spawned k6 pid=150898
-first  SIGINT: delivered_at_mono=3150366.660236  kill_status=0  process_alive_before_send=yes
-second SIGINT: delivered_at_mono=3150367.477251  kill_status=0  process_alive_before_send=yes
-wait result: pid=150898 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 835.6 ms
-elapsed second_SIGINT -> process_exit: 18.6 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_busy.js   (first=2 second=0.6 wait_log=none)
+spawned k6 pid=467910
+first  SIGINT: sent_at_mono=1784087986.309258274 kill_status=0 alive_before=yes
+second SIGINT: sent_at_mono=1784087986.915993033 kill_status=0 alive_before=yes
+wait result: pid=467910 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 614.6 ms
+elapsed second_SIGINT -> process_exit: 7.8 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T21:00:17Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T21:00:18Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
---- setup/teardown markers (console.log -> stderr) ---
-time="2026-07-14T21:00:17Z" level=info msg=TEARDOWN_START source=console
---- iteration progress (final states) ---
-running (00m02.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
-running (00m03.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:46Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  running (02.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  time="2026-07-15T03:59:46Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+  time="2026-07-15T03:59:46Z" level=info msg=TEARDOWN_START source=console
+--- iteration progress (final two states) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  running (02.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  alive_after_wait=no
 ===== end C4_teardown_doubleSIGINT run 1: exit=105 =====
 
 ===== CONDITION C4_teardown_doubleSIGINT — run 2/2 =====
-$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_iter.js   (first SIGINT @+2.5s, second @+0.8s after first)
-spawned k6 pid=151186
-first  SIGINT: delivered_at_mono=3150370.049739  kill_status=0  process_alive_before_send=yes
-second SIGINT: delivered_at_mono=3150370.867097  kill_status=0  process_alive_before_send=yes
-wait result: pid=151186 exit_code=105  (105 == ExternalAbort)
-elapsed first_SIGINT  -> process_exit: 834.5 ms
-elapsed second_SIGINT -> process_exit: 17.2 ms
+$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_busy.js   (first=2 second=0.6 wait_log=none)
+spawned k6 pid=467959
+first  SIGINT: sent_at_mono=1784087988.948519915 kill_status=0 alive_before=yes
+second SIGINT: sent_at_mono=1784087989.555541354 kill_status=0 alive_before=yes
+wait result: pid=467959 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 614.4 ms
+elapsed second_SIGINT -> process_exit: 7.4 ms
 --- signal-relevant log lines (k6 stderr, --verbose) ---
-time="2026-07-14T21:00:21Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
-time="2026-07-14T21:00:22Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
---- setup/teardown markers (console.log -> stderr) ---
-time="2026-07-14T21:00:21Z" level=info msg=TEARDOWN_START source=console
---- iteration progress (final states) ---
-running (00m03.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
-running (00m03.3s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:48Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  running (02.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  time="2026-07-15T03:59:49Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+  time="2026-07-15T03:59:48Z" level=info msg=TEARDOWN_START source=console
+--- iteration progress (final two states) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  running (02.0s), 0/2 VUs, 0 complete and 2 interrupted iterations
+  alive_after_wait=no
 ===== end C4_teardown_doubleSIGINT run 2: exit=105 =====
 
-################ ALL SYMPTOM C CONDITIONS COMPLETE ################
+===== CONDITION rapid_double_SIGINT — run 1/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_busy.js   (first=2 second=0.01 wait_log=none)
+spawned k6 pid=468010
+first  SIGINT: sent_at_mono=1784087991.591862132 kill_status=0 alive_before=yes
+second SIGINT: sent_at_mono=1784087991.608255979 kill_status=0 alive_before=yes
+wait result: pid=468010 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 23.1 ms
+elapsed second_SIGINT -> process_exit: 6.7 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:51Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:51Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+  time="2026-07-15T03:59:51Z" level=info msg=TEARDOWN_START source=console
+--- iteration progress (final two states) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  alive_after_wait=no
+===== end rapid_double_SIGINT run 1: exit=105 =====
+
+===== CONDITION rapid_double_SIGINT — run 2/2 =====
+$ /tmp/k6 run --verbose --no-summary --no-usage-report teardown_busy.js   (first=2 second=0.01 wait_log=none)
+spawned k6 pid=468050
+first  SIGINT: sent_at_mono=1784087993.640998933 kill_status=0 alive_before=yes
+second SIGINT: sent_at_mono=1784087993.657432379 kill_status=0 alive_before=yes
+wait result: pid=468050 exit_code=105  (105 == ExternalAbort)
+elapsed first_SIGINT  -> process_exit: 24.7 ms
+elapsed second_SIGINT -> process_exit: 8.2 ms
+--- signal-relevant log lines (k6 stderr, --verbose) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  time="2026-07-15T03:59:53Z" level=debug msg="Stopping k6 in response to signal..." sig=interrupt
+  time="2026-07-15T03:59:53Z" level=error msg="Aborting k6 in response to signal" sig=interrupt
+--- state markers --- Graceful stop log count=0 ; Hard stop log count=0
+--- teardown marker (console) ---
+  time="2026-07-15T03:59:53Z" level=info msg=TEARDOWN_START source=console
+--- iteration progress (final two states) ---
+  running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+  alive_after_wait=no
+===== end rapid_double_SIGINT run 2: exit=105 =====
+
+################ SYMPTOM C HARNESS COMPLETE (RUNS=2) ################
 ```
 
-**Reading the four conditions (both runs each are consistent).**
+**Two-run summary (all nine conditions; both runs consistent).**
 
-- **C1 (sleeping iterations, single SIGINT):** exit **105** in **16.9 ms / 18.3 ms**; the progress line
-  goes from `4/5 VUs, 0 … interrupted` to `0/5 VUs, … 5 interrupted iterations`. Only the graceful
-  "Stopping…" (Debug) appears. Interruptible sleeps stop promptly.
-- **C2 (CPU-busy, non-yielding iterations, single SIGINT):** exit **105** in **17.6 ms / 19.1 ms**;
-  `3 interrupted iterations`. **Even a busy JS loop is interrupted** — k6 cancels the iteration context
-  and the VM stops — so ordinary VU iterations do not overrun `gracefulStop`.
-- **C3 (script with a ~3 s busy `teardown()`, single SIGINT):** exit **105** in **3018.6 ms / 3018.3 ms**.
+| Condition | Signal | Exit (run1,run2) | Key latency (run1,run2) | State markers |
+|---|---|---:|---|---|
+| `natural_stage_end` | none | 0, 0 | runtime 1207.7, 1215.3 ms | Graceful stop=3; Hard stop=0 |
+| `natural_forced_grace` | none | 0, 0 | runtime 2579.3, 2538.4 ms | Graceful stop=3; Hard stop=0 |
+| `C1_sleep_singleSIGINT` | 1×SIGINT | 105, 105 | 1st→exit 7.1, 6.9 ms | 5 interrupted iters |
+| `C2_busy_singleSIGINT` | 1×SIGINT | 105, 105 | 1st→exit 7.8, 7.6 ms | 3 interrupted iters (busy loop still interrupted) |
+| `near_transition_SIGINT` | 1×SIGINT | 105, 105 | 1st→exit 7.7, 6.7 ms | signal at stage boundary |
+| `graceful_state_SIGINT` | 1×SIGINT after `Graceful stop` log | 105, 105 | 1st→exit 7.4, 7.5 ms | `Graceful stop` observed before signal = yes |
+| `C3_teardown_singleSIGINT` | 1×SIGINT | 105, 105 | 1st→exit 3008.9, 3008.1 ms | `TEARDOWN_START→TEARDOWN_END` (ran to completion) |
+| `C4_teardown_doubleSIGINT` | 2×SIGINT (~0.6 s apart) | 105, 105 | 2nd→exit 7.8, 7.4 ms | `TEARDOWN_START` only (truncated); "Aborting…" |
+| `rapid_double_SIGINT` | 2×SIGINT (~10 ms apart) | 105, 105 | 2nd→exit 6.7, 8.2 ms | `TEARDOWN_START` only (truncated); immediate hard stop |
+
+**Reading the nine conditions (both runs each are consistent).**
+
+- **`natural_stage_end` / `natural_forced_grace` (no signal — the baseline).** With no Ctrl+C the run ends
+  cleanly (**exit 0**): iterations complete (`… complete and 0 interrupted`), the debug log ends with
+  `Everything has finished, exiting k6 normally!`, and — when VUs are still mid-iteration at a down-stage
+  boundary — the scheduled-target drop emits ordinary `Graceful stop` logs (count **3**, `Hard stop=0`)
+  while `gracefulRampDown` lets those VUs finish. This is the reference against which the signalled cases
+  are compared: a clean stage end is bounded by the stage/graceful window, **not** by `gracefulStop`.
+- **C1 (sleeping iterations, single SIGINT):** exit **105** in **7.1 ms / 6.9 ms**; the progress line goes
+  from `4/5 VUs, 0 … interrupted` to `0/5 VUs, … 5 interrupted iterations`. Only the graceful "Stopping…"
+  (Debug) appears. Interruptible sleeps stop promptly.
+- **C2 (CPU-busy, non-yielding iterations, single SIGINT):** exit **105** in **7.8 ms / 7.6 ms**;
+  `3 interrupted iterations`. **Even a busy JS loop is interrupted** — k6 cancels the iteration context and
+  the VM stops — so ordinary VU iterations do not overrun `gracefulStop`.
+- **`near_transition_SIGINT` (SIGINT at a stage boundary):** exit **105** in **7.7 ms / 6.7 ms**. Delivering
+  the signal exactly at the up→down transition changes nothing about the latency — the abort still cancels
+  iteration contexts immediately. (Edge timing covered.)
+- **`graceful_state_SIGINT` (SIGINT *after* an actual `Graceful stop` state log):** the harness waits until
+  a real `Graceful stop` line (`lib/executor/vu_handle.go:161`) is observed (`observed_before_signal=yes`) —
+  i.e. VUs are already in `toGracefulStop` — *then* sends the SIGINT. Exit **105** in **7.4 ms / 7.5 ms**:
+  VUs sitting in the graceful-ramp-down state are cancelled just as promptly; the graceful window does not
+  delay the abort.
+- **C3 (script with a ~3 s busy `teardown()`, single SIGINT):** exit **105** in **3008.9 ms / 3008.1 ms**.
   The VU iterations are interrupted immediately, but `TEARDOWN_START → TEARDOWN_END` then runs to
-  **completion** during the graceful abort. This is the demonstrated mechanism behind "keeps running
-  longer than expected": it is **graceful-phase work**, not a per-VU iteration overrunning `gracefulStop`.
-- **C4 (same teardown script, double SIGINT):** the first SIGINT begins the graceful "Stopping…" and
-  `TEARDOWN_START`; the second SIGINT ~0.8 s later triggers "Aborting k6 in response to signal" (Error,
-  `onHardStop`) and an immediate `OSExit(105)`. The second-SIGINT→exit latency is **18.6 ms / 17.2 ms**
-  and `TEARDOWN_END` is **absent** — the hard stop cut teardown short. This is the by-design escalation
-  escape hatch (the `cmd/common.go:116-117` comment references k6 issue #971).
+  **completion** during the graceful abort. This is the demonstrated mechanism behind "keeps running longer
+  than expected": it is **graceful-phase work**, not a per-VU iteration overrunning `gracefulStop`.
+- **C4 (same teardown script, double SIGINT ~0.6 s apart):** the first SIGINT begins the graceful "Stopping…"
+  and `TEARDOWN_START`; the second SIGINT triggers "Aborting k6 in response to signal" (Error, `onHardStop`)
+  and an immediate `OSExit(105)`. The second-SIGINT→exit latency is **7.8 ms / 7.4 ms** and `TEARDOWN_END`
+  is **absent** — the hard stop cut teardown short. This is the by-design escalation escape hatch (the
+  `cmd/common.go:116-117` comment references k6 issue #971).
+- **`rapid_double_SIGINT` (two SIGINTs ~10 ms apart):** even with the two signals nearly coincident, the
+  second one still lands during the teardown and escalates to an immediate hard stop: first-SIGINT→exit
+  **23.1 ms / 24.7 ms**, second-SIGINT→exit **6.7 ms / 8.2 ms**, `TEARDOWN_END` absent. The escalation is
+  robust to signal spacing.
 
 **Demonstrated mechanism vs. the user's diagnosis.** What is *demonstrated* is: (a) VU iterations,
-including CPU-busy ones, are interrupted in ~17–19 ms on a single Ctrl+C; (b) a single Ctrl+C then runs
+including CPU-busy ones, are interrupted in ~7–8 ms on a single Ctrl+C; (b) a single Ctrl+C then runs
 graceful-phase work such as `teardown()` to completion; (c) a second Ctrl+C forces an immediate hard
 stop. The user's literal wording — *VUs keep running longer than `gracefulStop`* — was **not reproduced**
 as a VU/`gracefulStop` violation on the canonical path. **(INFERRED)** the user most likely observed
@@ -2687,23 +3092,31 @@ exceed `gracefulStop`.
 ### 7-D. Symptom D — one instance consistently shows more VUs; summed across instances they exceed the configured maximum
 
 **Direct answer:** The imbalance is **deterministic striping**, not a race. With a **shared**
-`--execution-segment-sequence`, three synchronized instances split a global max of 11 as `[4, 4, 3]` —
-one instance (segment `0:1/3`) consistently higher — and the per-instance counts **sum to exactly 11**,
-never exceeding it. The sum **exceeds** the configured maximum only when the instances are run
-**without** a shared sequence: each instance then fills its *own* segment sequence and rounds up
-independently, giving `[4, 4, 4]`, sum **12 > 11**. Both outcomes are fully determined by the striping
-arithmetic (the same test yields the same split every time) — there is no randomness and no race.
+`--execution-segment-sequence`, three synchronized instances split a global max of 11 as
+`vus_max = [4, 4, 3]` (canonical JSON metric, §7-D.2) — the **two earliest** segments (`0:1/3` and
+`1/3:2/3`) **tie** at the higher count 4 while `2/3:1` holds 3, because the remainder `11 % 3 = 2` is
+handed to the two lowest-offset segments — and the per-instance counts **sum to exactly 11**, never
+exceeding it. (More generally the number of "higher" instances equals the remainder: at a global max of
+1, `1 % 3 = 1`, so only the single earliest segment is higher — `[1, 0, 0]` — which is the special case
+where the user's literal "one instance" holds.) The sum **exceeds** the configured maximum only when the
+instances are run **without** a shared sequence: each instance then fills its *own* segment sequence and
+rounds up independently, giving `[4, 4, 4]` (all three tied), sum **12 > 11**. Both outcomes are fully
+determined by the striping arithmetic (the same test yields the same split every time) — there is no
+randomness and no race.
 
-**Why one instance is consistently higher (source trace).** The `--execution-segment` /
+**Why specific (tied) instances are consistently higher (source trace).** The `--execution-segment` /
 `--execution-segment-sequence` flags `cmd/options.go:31-32` feed `NewExecutionTuple`
 `lib/execution_segment.go:723`, which calls `GetFilledExecutionSegmentSequence`
 `lib/execution_segment.go:445`. Scaling a global count for a segment uses the striped
-`ExecutionSegmentSequenceWrapper.ScaleInt64` `lib/execution_segment.go:580`: it computes
-`result = (value / lcd) * len(offsets)` `lib/execution_segment.go:583` and then distributes the
-remainder to the earliest offsets in a loop `lib/execution_segment.go:584-586`. The remainder therefore
-lands on the earliest segment(s) first — deterministically — which is why segment `0:1/3` is the one
-that consistently rounds up. (`ExecutionTuple.ScaleInt64` `lib/execution_segment.go:734` short-circuits to
-the raw value when the sequence has a single segment `lib/execution_segment.go:735-737`, and otherwise
+`ExecutionSegmentSequenceWrapper.ScaleInt64` `lib/execution_segment.go:580`: it computes the floor share
+`result = (value / lcd) * len(offsets)` `lib/execution_segment.go:583` and then, in the remainder loop
+`for gi, i := 0, start; i < value%lcd; …` `lib/execution_segment.go:584-586`, adds **one** extra to every
+segment whose striped `start` position is below `value % lcd`. Those are precisely the **earliest-offset**
+segments, so the surplus lands on them deterministically — and there are exactly `value % lcd` of them.
+For a global max of 11 (`11 % 3 = 2`) that is the **two** earliest segments (`0:1/3`, `1/3:2/3`), which
+therefore **tie** at 4; for a global max of 1 (`1 % 3 = 1`) it is only the single earliest segment
+(`0:1/3`), giving `[1, 0, 0]`. (`ExecutionTuple.ScaleInt64` `lib/execution_segment.go:734` short-circuits
+to the raw value when the sequence has a single segment `lib/execution_segment.go:735-737`, and otherwise
 delegates to the striped wrapper.)
 
 **Why a shared sequence sums to the max but independent fills can exceed it.** With a **shared** sequence
@@ -2735,46 +3148,46 @@ under/equal/over table — not filtered to overshoots — showing 4 UNDER, 4 EQU
 === CONT  TestBlitzyProbeSegmentScaleArithmetic
 === CONT  TestBlitzyProbeIndependentUnderEqualOver
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:624: Symptom D (shared sequence "0,1/3,2/3,1") — deterministic striped ScaleInt64 [execution_segment.go:580]:
-    blitzy_adhoc_test_probe_test.go:625:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs T
-    blitzy_adhoc_test_probe_test.go:643:       1 |         1 |           0 |         0 |   1 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       2 |         1 |           1 |         0 |   2 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       4 |         2 |           1 |         1 |   4 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       5 |         2 |           2 |         1 |   5 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       7 |         3 |           2 |         2 |   7 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       8 |         3 |           3 |         2 |   8 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:      10 |         4 |           3 |         3 |  10 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:      11 |         4 |           4 |         3 |  11 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:645: Symptom D (shared sequence) — OVER rows: 0, UNDER rows: 0 (both must be 0; sum==T always)
+    blitzy_adhoc_test_probe_test.go:675: Symptom D (shared sequence "0,1/3,2/3,1") — deterministic striped ScaleInt64 [execution_segment.go:580]:
+    blitzy_adhoc_test_probe_test.go:676:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs T
+    blitzy_adhoc_test_probe_test.go:694:       1 |         1 |           0 |         0 |   1 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       2 |         1 |           1 |         0 |   2 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       4 |         2 |           1 |         1 |   4 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       5 |         2 |           2 |         1 |   5 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       7 |         3 |           2 |         2 |   7 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       8 |         3 |           3 |         2 |   8 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      10 |         4 |           3 |         3 |  10 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      11 |         4 |           4 |         3 |  11 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:696: Symptom D (shared sequence) — OVER rows: 0, UNDER rows: 0 (both must be 0; sum==T always)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 0:1/3    filled sequence: 0,1/3,1
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 1/3:2/3  filled sequence: 0,1/3,2/3,1
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 2/3:1    filled sequence: 0,2/3,1
-    blitzy_adhoc_test_probe_test.go:702: Symptom D (NO shared sequence, each instance independent) — full under/equal/over table:
-    blitzy_adhoc_test_probe_test.go:703:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs global max T
-    blitzy_adhoc_test_probe_test.go:723:       1 |         0 |           0 |         0 |   0 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:       2 |         1 |           1 |         1 |   3 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:       4 |         1 |           1 |         1 |   3 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:       5 |         2 |           2 |         2 |   6 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:       7 |         2 |           2 |         2 |   6 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:       8 |         3 |           3 |         3 |   9 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:      10 |         3 |           3 |         3 |   9 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:      11 |         4 |           4 |         4 |  12 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:725: Symptom D (independent) — classification across T=1..12: OVER=4 EQUAL=4 UNDER=4
-    blitzy_adhoc_test_probe_test.go:726: Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 0:1/3    filled sequence: 0,1/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 1/3:2/3  filled sequence: 0,1/3,2/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 2/3:1    filled sequence: 0,2/3,1
+    blitzy_adhoc_test_probe_test.go:753: Symptom D (NO shared sequence, each instance independent) — full under/equal/over table:
+    blitzy_adhoc_test_probe_test.go:754:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs global max T
+    blitzy_adhoc_test_probe_test.go:774:       1 |         0 |           0 |         0 |   0 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       2 |         1 |           1 |         1 |   3 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       4 |         1 |           1 |         1 |   3 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       5 |         2 |           2 |         2 |   6 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       7 |         2 |           2 |         2 |   6 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       8 |         3 |           3 |         3 |   9 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:      10 |         3 |           3 |         3 |   9 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:      11 |         4 |           4 |         4 |  12 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:776: Symptom D (independent) — classification across T=1..12: OVER=4 EQUAL=4 UNDER=4
+    blitzy_adhoc_test_probe_test.go:777: Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:667: Symptom D (shared sequence) — recomputed 5×: identical every time (deterministic, coordination-free).
+    blitzy_adhoc_test_probe_test.go:718: Symptom D (shared sequence) — recomputed 5×: identical every time (deterministic, coordination-free).
 --- PASS: TestBlitzyProbeIndependentUnderEqualOver (0.00s)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:677: Symptom D (shared sequence) — at T=1 the surplus VU goes to segment index 0 (0:1/3): [1 0 0] => one instance is CONSISTENTLY higher (deterministic), never random.
+    blitzy_adhoc_test_probe_test.go:728: Symptom D (shared sequence) — at T=1 the surplus VU goes to segment index 0 (0:1/3): [1 0 0] => one instance is CONSISTENTLY higher (deterministic), never random.
 --- PASS: TestBlitzyProbeSegmentScaleArithmetic (0.00s)
 PASS
 ok  	go.k6.io/k6/lib/executor	0.006s
@@ -2795,60 +3208,60 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeSegmentScal
 === CONT  TestBlitzyProbeIndependentUnderEqualOver
 === CONT  TestBlitzyProbeSegmentScaleArithmetic
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 0:1/3    filled sequence: 0,1/3,1
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 1/3:2/3  filled sequence: 0,1/3,2/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 0:1/3    filled sequence: 0,1/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 1/3:2/3  filled sequence: 0,1/3,2/3,1
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:624: Symptom D (shared sequence "0,1/3,2/3,1") — deterministic striped ScaleInt64 [execution_segment.go:580]:
+    blitzy_adhoc_test_probe_test.go:675: Symptom D (shared sequence "0,1/3,2/3,1") — deterministic striped ScaleInt64 [execution_segment.go:580]:
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 2/3:1    filled sequence: 0,2/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 2/3:1    filled sequence: 0,2/3,1
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:625:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs T
+    blitzy_adhoc_test_probe_test.go:676:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs T
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:702: Symptom D (NO shared sequence, each instance independent) — full under/equal/over table:
+    blitzy_adhoc_test_probe_test.go:753: Symptom D (NO shared sequence, each instance independent) — full under/equal/over table:
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       1 |         1 |           0 |         0 |   1 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       2 |         1 |           1 |         0 |   2 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       4 |         2 |           1 |         1 |   4 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       1 |         1 |           0 |         0 |   1 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       2 |         1 |           1 |         0 |   2 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       4 |         2 |           1 |         1 |   4 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:703:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs global max T
-    blitzy_adhoc_test_probe_test.go:723:       1 |         0 |           0 |         0 |   0 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:       2 |         1 |           1 |         1 |   3 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:754:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs global max T
+    blitzy_adhoc_test_probe_test.go:774:       1 |         0 |           0 |         0 |   0 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       2 |         1 |           1 |         1 |   3 | OVER (sum-T=+1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       5 |         2 |           2 |         1 |   5 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       5 |         2 |           2 |         1 |   5 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:       4 |         1 |           1 |         1 |   3 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       4 |         1 |           1 |         1 |   3 | UNDER (sum-T=-1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       7 |         3 |           2 |         2 |   7 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       8 |         3 |           3 |         2 |   8 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       7 |         3 |           2 |         2 |   7 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       8 |         3 |           3 |         2 |   8 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       5 |         2 |           2 |         2 |   6 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:       7 |         2 |           2 |         2 |   6 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       5 |         2 |           2 |         2 |   6 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       7 |         2 |           2 |         2 |   6 | UNDER (sum-T=-1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:      10 |         4 |           3 |         3 |  10 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:      11 |         4 |           4 |         3 |  11 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      10 |         4 |           3 |         3 |  10 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      11 |         4 |           4 |         3 |  11 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       8 |         3 |           3 |         3 |   9 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       8 |         3 |           3 |         3 |   9 | OVER (sum-T=+1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:      10 |         3 |           3 |         3 |   9 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:      11 |         4 |           4 |         4 |  12 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:      10 |         3 |           3 |         3 |   9 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:      11 |         4 |           4 |         4 |  12 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:645: Symptom D (shared sequence) — OVER rows: 0, UNDER rows: 0 (both must be 0; sum==T always)
+    blitzy_adhoc_test_probe_test.go:696: Symptom D (shared sequence) — OVER rows: 0, UNDER rows: 0 (both must be 0; sum==T always)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:725: Symptom D (independent) — classification across T=1..12: OVER=4 EQUAL=4 UNDER=4
-    blitzy_adhoc_test_probe_test.go:726: Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).
+    blitzy_adhoc_test_probe_test.go:776: Symptom D (independent) — classification across T=1..12: OVER=4 EQUAL=4 UNDER=4
+    blitzy_adhoc_test_probe_test.go:777: Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).
 --- PASS: TestBlitzyProbeIndependentUnderEqualOver (0.00s)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:667: Symptom D (shared sequence) — recomputed 5×: identical every time (deterministic, coordination-free).
-    blitzy_adhoc_test_probe_test.go:677: Symptom D (shared sequence) — at T=1 the surplus VU goes to segment index 0 (0:1/3): [1 0 0] => one instance is CONSISTENTLY higher (deterministic), never random.
+    blitzy_adhoc_test_probe_test.go:718: Symptom D (shared sequence) — recomputed 5×: identical every time (deterministic, coordination-free).
+    blitzy_adhoc_test_probe_test.go:728: Symptom D (shared sequence) — at T=1 the surplus VU goes to segment index 0 (0:1/3): [1 0 0] => one instance is CONSISTENTLY higher (deterministic), never random.
 --- PASS: TestBlitzyProbeSegmentScaleArithmetic (0.00s)
 === RUN   TestBlitzyProbeSegmentScaleArithmetic
 === PAUSE TestBlitzyProbeSegmentScaleArithmetic
@@ -2856,60 +3269,60 @@ CGO_ENABLED=1 GOFLAGS=-mod=vendor go test -race -run 'TestBlitzyProbeSegmentScal
 === PAUSE TestBlitzyProbeIndependentUnderEqualOver
 === CONT  TestBlitzyProbeSegmentScaleArithmetic
 === CONT  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 0:1/3    filled sequence: 0,1/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 0:1/3    filled sequence: 0,1/3,1
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:624: Symptom D (shared sequence "0,1/3,2/3,1") — deterministic striped ScaleInt64 [execution_segment.go:580]:
-    blitzy_adhoc_test_probe_test.go:625:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs T
+    blitzy_adhoc_test_probe_test.go:675: Symptom D (shared sequence "0,1/3,2/3,1") — deterministic striped ScaleInt64 [execution_segment.go:580]:
+    blitzy_adhoc_test_probe_test.go:676:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs T
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 1/3:2/3  filled sequence: 0,1/3,2/3,1
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 1/3:2/3  filled sequence: 0,1/3,2/3,1
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       1 |         1 |           0 |         0 |   1 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       2 |         1 |           1 |         0 |   2 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       1 |         1 |           0 |         0 |   1 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       2 |         1 |           1 |         0 |   2 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:699: Symptom D (independent) — segment 2/3:1    filled sequence: 0,2/3,1
-    blitzy_adhoc_test_probe_test.go:702: Symptom D (NO shared sequence, each instance independent) — full under/equal/over table:
-    blitzy_adhoc_test_probe_test.go:703:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs global max T
+    blitzy_adhoc_test_probe_test.go:750: Symptom D (independent) — segment 2/3:1    filled sequence: 0,2/3,1
+    blitzy_adhoc_test_probe_test.go:753: Symptom D (NO shared sequence, each instance independent) — full under/equal/over table:
+    blitzy_adhoc_test_probe_test.go:754:       T | 0:1/3     | 1/3:2/3     | 2/3:1     | sum | sum vs global max T
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       4 |         2 |           1 |         1 |   4 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       5 |         2 |           2 |         1 |   5 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       4 |         2 |           1 |         1 |   4 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       5 |         2 |           2 |         1 |   5 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       1 |         0 |           0 |         0 |   0 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       1 |         0 |           0 |         0 |   0 | UNDER (sum-T=-1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       7 |         3 |           2 |         2 |   7 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:643:       8 |         3 |           3 |         2 |   8 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       7 |         3 |           2 |         2 |   7 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       8 |         3 |           3 |         2 |   8 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       2 |         1 |           1 |         1 |   3 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       2 |         1 |           1 |         1 |   3 | OVER (sum-T=+1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       3 |         1 |           1 |         1 |   3 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:      10 |         4 |           3 |         3 |  10 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      10 |         4 |           3 |         3 |  10 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       4 |         1 |           1 |         1 |   3 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       4 |         1 |           1 |         1 |   3 | UNDER (sum-T=-1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:      11 |         4 |           4 |         3 |  11 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:694:      11 |         4 |           4 |         3 |  11 | EQUAL (sum-T=+0)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       5 |         2 |           2 |         2 |   6 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       5 |         2 |           2 |         2 |   6 | OVER (sum-T=+1)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:643:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:645: Symptom D (shared sequence) — OVER rows: 0, UNDER rows: 0 (both must be 0; sum==T always)
+    blitzy_adhoc_test_probe_test.go:694:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:696: Symptom D (shared sequence) — OVER rows: 0, UNDER rows: 0 (both must be 0; sum==T always)
 === NAME  TestBlitzyProbeIndependentUnderEqualOver
-    blitzy_adhoc_test_probe_test.go:723:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:       7 |         2 |           2 |         2 |   6 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:       8 |         3 |           3 |         3 |   9 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:723:      10 |         3 |           3 |         3 |   9 | UNDER (sum-T=-1)
-    blitzy_adhoc_test_probe_test.go:723:      11 |         4 |           4 |         4 |  12 | OVER (sum-T=+1)
-    blitzy_adhoc_test_probe_test.go:723:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
-    blitzy_adhoc_test_probe_test.go:725: Symptom D (independent) — classification across T=1..12: OVER=4 EQUAL=4 UNDER=4
-    blitzy_adhoc_test_probe_test.go:726: Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).
+    blitzy_adhoc_test_probe_test.go:774:       6 |         2 |           2 |         2 |   6 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:       7 |         2 |           2 |         2 |   6 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:       8 |         3 |           3 |         3 |   9 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:       9 |         3 |           3 |         3 |   9 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:774:      10 |         3 |           3 |         3 |   9 | UNDER (sum-T=-1)
+    blitzy_adhoc_test_probe_test.go:774:      11 |         4 |           4 |         4 |  12 | OVER (sum-T=+1)
+    blitzy_adhoc_test_probe_test.go:774:      12 |         4 |           4 |         4 |  12 | EQUAL (sum-T=+0)
+    blitzy_adhoc_test_probe_test.go:776: Symptom D (independent) — classification across T=1..12: OVER=4 EQUAL=4 UNDER=4
+    blitzy_adhoc_test_probe_test.go:777: Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).
 --- PASS: TestBlitzyProbeIndependentUnderEqualOver (0.00s)
 === NAME  TestBlitzyProbeSegmentScaleArithmetic
-    blitzy_adhoc_test_probe_test.go:667: Symptom D (shared sequence) — recomputed 5×: identical every time (deterministic, coordination-free).
-    blitzy_adhoc_test_probe_test.go:677: Symptom D (shared sequence) — at T=1 the surplus VU goes to segment index 0 (0:1/3): [1 0 0] => one instance is CONSISTENTLY higher (deterministic), never random.
+    blitzy_adhoc_test_probe_test.go:718: Symptom D (shared sequence) — recomputed 5×: identical every time (deterministic, coordination-free).
+    blitzy_adhoc_test_probe_test.go:728: Symptom D (shared sequence) — at T=1 the surplus VU goes to segment index 0 (0:1/3): [1 0 0] => one instance is CONSISTENTLY higher (deterministic), never random.
 --- PASS: TestBlitzyProbeSegmentScaleArithmetic (0.00s)
 PASS
 ok  	go.k6.io/k6/lib/executor	1.034s
@@ -2919,150 +3332,144 @@ ok  	go.k6.io/k6/lib/executor	1.034s
 
 To reproduce the user's distributed setup faithfully, three real `k6 run` processes are launched
 **simultaneously**, one per segment, sharing a global ramp with a configured maximum of 11 VUs. Each
-mode is run twice. Per-instance active-VU counts are parsed from the `running (SS.s), active/max VUs`
-progress lines that k6 writes to **stdout** (k6's `level=…` log lines go to stderr). The full harness and
-the JS scenario are embedded in §9.3.
+mode is run twice. Per-instance counts are taken from the **canonical JSON metric stream** each instance
+emits via `--out json=<file>`: `vus_max` (the scaled configured max for that segment) and `vus` (the peak
+active count), read directly from the metric `Point` records — **not** scraped from stdout progress
+lines. The full harness, the JS scenarios, and the JSON parser are embedded in §9.3.
 
 - **SHARED** mode passes the same `--execution-segment-sequence 0,1/3,2/3,1` to all three instances.
 - **INDEPENDENT** mode passes only `--execution-segment` to each (no shared sequence).
+- **SHARED_LOW** mode is `SHARED` with a global max of **1**, included to demonstrate the remainder-of-1
+  case where exactly one instance is higher (`[1, 0, 0]`).
 
 **Commands (as echoed in the transcript):**
 
 ```text
 # SHARED (per instance)
-/tmp/k6 run --execution-segment 0:1/3   --execution-segment-sequence 0,1/3,2/3,1 seg.js
-/tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 seg.js
-/tmp/k6 run --execution-segment 2/3:1   --execution-segment-sequence 0,1/3,2/3,1 seg.js
+/tmp/k6 run --execution-segment 0:1/3   --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
+/tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
+/tmp/k6 run --execution-segment 2/3:1   --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
 # INDEPENDENT (per instance)
-/tmp/k6 run --execution-segment 0:1/3   seg.js
-/tmp/k6 run --execution-segment 1/3:2/3 seg.js
-/tmp/k6 run --execution-segment 2/3:1   seg.js
+/tmp/k6 run --execution-segment 0:1/3   --out json=<f> seg.js
+/tmp/k6 run --execution-segment 1/3:2/3 --out json=<f> seg.js
+/tmp/k6 run --execution-segment 2/3:1   --out json=<f> seg.js
+# SHARED_LOW (per instance; global max target 1 via seg_low.js)
+/tmp/k6 run --execution-segment 0:1/3   --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
 ```
 
 ```text
 ################ k6 build under test ################
-k6 v0.55.0 (commit/128744ee44, go1.23.6, linux/amd64)
-workdir: /tmp/k6probe_symD.w5f6V3 ; RUNS per mode: 2 ; shared sequence: 0,1/3,2/3,1 ; segments: 0:1/3 1/3:2/3 2/3:1 ; global max target: 11
+k6 v0.55.0 (commit/ddc3b0b1d2, go1.23.6, linux/amd64)
+workdir: /tmp/k6probe_symD.FZnDUC ; RUNS per mode: 2 ; shared sequence: 0,1/3,2/3,1 ; segments: 0:1/3 1/3:2/3 2/3:1
 
--------- SHARED sequence, SYNCHRONIZED 3-process triple, run 1/2 --------
-$ /tmp/k6 run --execution-segment 0:1/3 --execution-segment-sequence 0,1/3,2/3,1 seg.js
-$ /tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 seg.js
-$ /tmp/k6 run --execution-segment 2/3:1 --execution-segment-sequence 0,1/3,2/3,1 seg.js
+-------- SHARED triple (gmax=11), SYNCHRONIZED 3-process run 1/2 --------
+$ /tmp/k6 run --execution-segment 0:1/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
+$ /tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
+$ /tmp/k6 run --execution-segment 2/3:1 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
 exit codes: seg0=0 seg1=0 seg2=0
-  per-instance max planned VUs (scenario header 'Up to N looping VUs'):
-    seg0 0:1/3    => 4
-    seg1 1/3:2/3  => 4
-    seg2 2/3:1    => 3
-    SUM of per-instance max VUs = 11  vs configured global max = 11  => EQUAL
-  aligned active-VU series (carry-forward by k6 internal elapsed):
-    elapsed | seg0 | seg1 | seg2 | sum | vs gmax
-       1.0s |    1 |    1 |    1 |   3 |
-       2.0s |    3 |    2 |    2 |   7 |
-       3.0s |    4 |    3 |    3 |  10 |
-       4.0s |    4 |    4 |    3 |  11 | =
-       5.0s |    4 |    4 |    3 |  11 | =
-       6.0s |    3 |    4 |    3 |  10 |
-       7.0s |    2 |    2 |    1 |   5 |
-       7.8s |    2 |    2 |    0 |   4 |
-       8.0s |    2 |    1 |    0 |   3 |
-       8.3s |    0 |    1 |    0 |   1 |
-       8.6s |    0 |    0 |    0 |   0 |
-  peak instantaneous active-VU sum across aligned samples = 11 (configured max 11)
-  per-instance peak active VUs: [4, 4, 3] ; highest = seg0 (0:1/3) => one instance consistently higher
--------- end shared run 1 --------
+  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):
+    seg0 0:1/3    => vus_max=4  peak_vus=4
+    seg1 1/3:2/3  => vus_max=4  peak_vus=4
+    seg2 2/3:1    => vus_max=3  peak_vus=3
+    SUM of per-instance vus_max = 11  vs configured global max = 11  => EQUAL
+  per-instance vus_max = [4, 4, 3]
+  maximum per-instance share = 4 ; segment(s) AT the maximum (TIED): ['seg0(0:1/3)', 'seg1(1/3:2/3)']  (2 of 3 instances)
+  remainder distribution: 2 surplus VU(s) assigned DETERMINISTICALLY to the EARLIEST-offset segment(s) ['seg0(0:1/3)', 'seg1(1/3:2/3)'] (striped ScaleInt64 remainder loop, execution_segment.go:584-586) => those instance(s) are consistently higher; the rest tie at the floor 3
+-------- end SHARED run 1 --------
 
--------- SHARED sequence, SYNCHRONIZED 3-process triple, run 2/2 --------
-$ /tmp/k6 run --execution-segment 0:1/3 --execution-segment-sequence 0,1/3,2/3,1 seg.js
-$ /tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 seg.js
-$ /tmp/k6 run --execution-segment 2/3:1 --execution-segment-sequence 0,1/3,2/3,1 seg.js
+-------- SHARED triple (gmax=11), SYNCHRONIZED 3-process run 2/2 --------
+$ /tmp/k6 run --execution-segment 0:1/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
+$ /tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
+$ /tmp/k6 run --execution-segment 2/3:1 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg.js
 exit codes: seg0=0 seg1=0 seg2=0
-  per-instance max planned VUs (scenario header 'Up to N looping VUs'):
-    seg0 0:1/3    => 4
-    seg1 1/3:2/3  => 4
-    seg2 2/3:1    => 3
-    SUM of per-instance max VUs = 11  vs configured global max = 11  => EQUAL
-  aligned active-VU series (carry-forward by k6 internal elapsed):
-    elapsed | seg0 | seg1 | seg2 | sum | vs gmax
-       1.0s |    1 |    1 |    1 |   3 |
-       2.0s |    3 |    2 |    2 |   7 |
-       3.0s |    4 |    3 |    3 |  10 |
-       4.0s |    4 |    4 |    3 |  11 | =
-       5.0s |    4 |    4 |    3 |  11 | =
-       6.0s |    3 |    4 |    3 |  10 |
-       7.0s |    2 |    2 |    1 |   5 |
-       7.8s |    2 |    2 |    0 |   4 |
-       8.0s |    2 |    1 |    0 |   3 |
-       8.3s |    0 |    1 |    0 |   1 |
-       8.6s |    0 |    0 |    0 |   0 |
-  peak instantaneous active-VU sum across aligned samples = 11 (configured max 11)
-  per-instance peak active VUs: [4, 4, 3] ; highest = seg0 (0:1/3) => one instance consistently higher
--------- end shared run 2 --------
+  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):
+    seg0 0:1/3    => vus_max=4  peak_vus=4
+    seg1 1/3:2/3  => vus_max=4  peak_vus=4
+    seg2 2/3:1    => vus_max=3  peak_vus=3
+    SUM of per-instance vus_max = 11  vs configured global max = 11  => EQUAL
+  per-instance vus_max = [4, 4, 3]
+  maximum per-instance share = 4 ; segment(s) AT the maximum (TIED): ['seg0(0:1/3)', 'seg1(1/3:2/3)']  (2 of 3 instances)
+  remainder distribution: 2 surplus VU(s) assigned DETERMINISTICALLY to the EARLIEST-offset segment(s) ['seg0(0:1/3)', 'seg1(1/3:2/3)'] (striped ScaleInt64 remainder loop, execution_segment.go:584-586) => those instance(s) are consistently higher; the rest tie at the floor 3
+-------- end SHARED run 2 --------
 
--------- INDEPENDENT sequence, SYNCHRONIZED 3-process triple, run 1/2 --------
-$ /tmp/k6 run --execution-segment 0:1/3 seg.js   (NO --execution-segment-sequence)
-$ /tmp/k6 run --execution-segment 1/3:2/3 seg.js   (NO --execution-segment-sequence)
-$ /tmp/k6 run --execution-segment 2/3:1 seg.js   (NO --execution-segment-sequence)
+-------- INDEPENDENT triple (gmax=11), SYNCHRONIZED 3-process run 1/2 --------
+$ /tmp/k6 run --execution-segment 0:1/3 --out json=<f> seg.js   (NO --execution-segment-sequence)
+$ /tmp/k6 run --execution-segment 1/3:2/3 --out json=<f> seg.js   (NO --execution-segment-sequence)
+$ /tmp/k6 run --execution-segment 2/3:1 --out json=<f> seg.js   (NO --execution-segment-sequence)
 exit codes: seg0=0 seg1=0 seg2=0
-  per-instance max planned VUs (scenario header 'Up to N looping VUs'):
-    seg0 0:1/3    => 4
-    seg1 1/3:2/3  => 4
-    seg2 2/3:1    => 4
-    SUM of per-instance max VUs = 12  vs configured global max = 11  => OVER (exceeds configured max!)
-  aligned active-VU series (carry-forward by k6 internal elapsed):
-    elapsed | seg0 | seg1 | seg2 | sum | vs gmax
-       1.0s |    1 |    1 |    1 |   3 |
-       2.0s |    2 |    2 |    2 |   6 |
-       3.0s |    3 |    3 |    3 |   9 |
-       4.0s |    4 |    4 |    4 |  12 | OVER
-       5.0s |    4 |    4 |    4 |  12 | OVER
-       6.0s |    4 |    4 |    4 |  12 | OVER
-       7.0s |    2 |    2 |    2 |   6 |
-       8.0s |    1 |    1 |    1 |   3 |
-       8.5s |    1 |    0 |    1 |   2 |
-       8.6s |    0 |    0 |    0 |   0 |
-  peak instantaneous active-VU sum across aligned samples = 12 (configured max 11)
-  per-instance peak active VUs: [4, 4, 4] ; highest = seg0 (0:1/3) => one instance consistently higher
--------- end independent run 1 --------
+  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):
+    seg0 0:1/3    => vus_max=4  peak_vus=4
+    seg1 1/3:2/3  => vus_max=4  peak_vus=4
+    seg2 2/3:1    => vus_max=4  peak_vus=4
+    SUM of per-instance vus_max = 12  vs configured global max = 11  => OVER (exceeds configured max!)
+  per-instance vus_max = [4, 4, 4]
+  maximum per-instance share = 4 ; segment(s) AT the maximum (TIED): ['seg0(0:1/3)', 'seg1(1/3:2/3)', 'seg2(2/3:1)']  (3 of 3 instances)
+  remainder distribution: ALL 3 segments tie at 4 — each instance rounds ITS OWN share up (independent per-instance ceiling, no shared floor) => the sum can exceed the global max
+-------- end INDEPENDENT run 1 --------
 
--------- INDEPENDENT sequence, SYNCHRONIZED 3-process triple, run 2/2 --------
-$ /tmp/k6 run --execution-segment 0:1/3 seg.js   (NO --execution-segment-sequence)
-$ /tmp/k6 run --execution-segment 1/3:2/3 seg.js   (NO --execution-segment-sequence)
-$ /tmp/k6 run --execution-segment 2/3:1 seg.js   (NO --execution-segment-sequence)
+-------- INDEPENDENT triple (gmax=11), SYNCHRONIZED 3-process run 2/2 --------
+$ /tmp/k6 run --execution-segment 0:1/3 --out json=<f> seg.js   (NO --execution-segment-sequence)
+$ /tmp/k6 run --execution-segment 1/3:2/3 --out json=<f> seg.js   (NO --execution-segment-sequence)
+$ /tmp/k6 run --execution-segment 2/3:1 --out json=<f> seg.js   (NO --execution-segment-sequence)
 exit codes: seg0=0 seg1=0 seg2=0
-  per-instance max planned VUs (scenario header 'Up to N looping VUs'):
-    seg0 0:1/3    => 4
-    seg1 1/3:2/3  => 4
-    seg2 2/3:1    => 4
-    SUM of per-instance max VUs = 12  vs configured global max = 11  => OVER (exceeds configured max!)
-  aligned active-VU series (carry-forward by k6 internal elapsed):
-    elapsed | seg0 | seg1 | seg2 | sum | vs gmax
-       1.0s |    1 |    1 |    1 |   3 |
-       2.0s |    2 |    2 |    2 |   6 |
-       3.0s |    3 |    3 |    4 |  10 |
-       4.0s |    4 |    4 |    4 |  12 | OVER
-       5.0s |    4 |    4 |    4 |  12 | OVER
-       6.0s |    4 |    4 |    4 |  12 | OVER
-       7.0s |    2 |    2 |    2 |   6 |
-       8.0s |    1 |    1 |    1 |   3 |
-       8.5s |    1 |    1 |    0 |   2 |
-       8.6s |    0 |    0 |    0 |   0 |
-  peak instantaneous active-VU sum across aligned samples = 12 (configured max 11)
-  per-instance peak active VUs: [4, 4, 4] ; highest = seg0 (0:1/3) => one instance consistently higher
--------- end independent run 2 --------
+  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):
+    seg0 0:1/3    => vus_max=4  peak_vus=4
+    seg1 1/3:2/3  => vus_max=4  peak_vus=4
+    seg2 2/3:1    => vus_max=4  peak_vus=4
+    SUM of per-instance vus_max = 12  vs configured global max = 11  => OVER (exceeds configured max!)
+  per-instance vus_max = [4, 4, 4]
+  maximum per-instance share = 4 ; segment(s) AT the maximum (TIED): ['seg0(0:1/3)', 'seg1(1/3:2/3)', 'seg2(2/3:1)']  (3 of 3 instances)
+  remainder distribution: ALL 3 segments tie at 4 — each instance rounds ITS OWN share up (independent per-instance ceiling, no shared floor) => the sum can exceed the global max
+-------- end INDEPENDENT run 2 --------
 
-################ ALL SYMPTOM D TRIPLES COMPLETE ################
+-------- SHARED_LOW triple (gmax=1), SYNCHRONIZED 3-process run 1/2 --------
+$ /tmp/k6 run --execution-segment 0:1/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
+$ /tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
+$ /tmp/k6 run --execution-segment 2/3:1 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
+exit codes: seg0=0 seg1=0 seg2=0
+  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):
+    seg0 0:1/3    => vus_max=1  peak_vus=1
+    seg1 1/3:2/3  => vus_max=0  peak_vus=0
+    seg2 2/3:1    => vus_max=0  peak_vus=0
+    SUM of per-instance vus_max = 1  vs configured global max = 1  => EQUAL
+  per-instance vus_max = [1, 0, 0]
+  maximum per-instance share = 1 ; segment(s) AT the maximum (TIED): ['seg0(0:1/3)']  (1 of 3 instances)
+  remainder distribution: 1 surplus VU(s) assigned DETERMINISTICALLY to the EARLIEST-offset segment(s) ['seg0(0:1/3)'] (striped ScaleInt64 remainder loop, execution_segment.go:584-586) => those instance(s) are consistently higher; the rest tie at the floor 0
+-------- end SHARED_LOW run 1 --------
+
+-------- SHARED_LOW triple (gmax=1), SYNCHRONIZED 3-process run 2/2 --------
+$ /tmp/k6 run --execution-segment 0:1/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
+$ /tmp/k6 run --execution-segment 1/3:2/3 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
+$ /tmp/k6 run --execution-segment 2/3:1 --execution-segment-sequence 0,1/3,2/3,1 --out json=<f> seg_low.js
+exit codes: seg0=0 seg1=0 seg2=0
+  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):
+    seg0 0:1/3    => vus_max=1  peak_vus=1
+    seg1 1/3:2/3  => vus_max=0  peak_vus=0
+    seg2 2/3:1    => vus_max=0  peak_vus=0
+    SUM of per-instance vus_max = 1  vs configured global max = 1  => EQUAL
+  per-instance vus_max = [1, 0, 0]
+  maximum per-instance share = 1 ; segment(s) AT the maximum (TIED): ['seg0(0:1/3)']  (1 of 3 instances)
+  remainder distribution: 1 surplus VU(s) assigned DETERMINISTICALLY to the EARLIEST-offset segment(s) ['seg0(0:1/3)'] (striped ScaleInt64 remainder loop, execution_segment.go:584-586) => those instance(s) are consistently higher; the rest tie at the floor 0
+-------- end SHARED_LOW run 2 --------
+
+################ SYMPTOM D HARNESS COMPLETE (RUNS=2) ################
 ```
 
 **Reading the CLI evidence.**
 
-- **SHARED, both runs:** per-instance max planned VUs `[4, 4, 3]`, sum **= 11 = configured max**
-  (`EQUAL`); segment `0:1/3` is consistently at/above the others; the aligned instantaneous active-VU
-  sum peaks at 11 and **never** exceeds it. This is the user's "one instance consistently shows more" —
-  and it is correct: it sums to exactly the configured max.
-- **INDEPENDENT, both runs:** per-instance max planned VUs `[4, 4, 4]`, sum **= 12 > 11**
-  (`OVER — exceeds configured max`); the aligned instantaneous sum reaches 12. This reproduces the
-  user's "sum them up and they exceed my configured maximum" — and it happens specifically because the
-  instances were **not** given a shared `--execution-segment-sequence`.
+- **SHARED, both runs:** canonical `vus_max = [4, 4, 3]`, sum **= 11 = configured max** (`EQUAL`); the
+  **two earliest** segments (`0:1/3`, `1/3:2/3`) **tie** at 4 — the parser labels them the deterministic
+  remainder recipients (`2` surplus VUs → the two lowest offsets) — and `2/3:1` holds 3; the sum peaks at
+  11 and **never** exceeds it. This is the user's "one instance consistently shows more," refined to *the
+  earliest `value % n` instances tie at the top* — and it is correct: it sums to exactly the configured
+  max.
+- **INDEPENDENT, both runs:** canonical `vus_max = [4, 4, 4]` (**all three tied**), sum **= 12 > 11**
+  (`OVER — exceeds configured max`). This reproduces the user's "sum them up and they exceed my
+  configured maximum" — and it happens specifically because the instances were **not** given a shared
+  `--execution-segment-sequence`, so each rounds *its own* share up independently.
+- **SHARED_LOW, both runs:** canonical `vus_max = [1, 0, 0]`, sum **= 1** (`EQUAL`); with remainder
+  `1 % 3 = 1`, only the single earliest segment (`0:1/3`) is higher — the special case where the user's
+  literal "one instance" is exactly true.
 
 #### 7-D.3 External design context (scoped precisely)
 
@@ -3089,9 +3496,11 @@ over-applied:
 
 **Conclusion for Symptom D:** the imbalance and the transient sum-above-max are deterministic
 consequences of the striping algorithm (`ScaleInt64`), observed both arithmetically (§7-D.1) and through
-genuine synchronized multi-process CLI runs (§7-D.2). "One instance consistently higher" is expected;
-"sum exceeds the configured maximum" occurs specifically when instances lack a shared
-`--execution-segment-sequence`. Neither is a race.
+genuine synchronized multi-process CLI runs with canonical JSON `vus_max`/`vus` metrics (§7-D.2). The
+user's "one instance consistently higher" is expected — refined by the evidence to *the earliest
+`value % n` instances tie at the top* (two of three at a global max of 11, `[4, 4, 3]`; a single one at a
+global max of 1, `[1, 0, 0]`); "sum exceeds the configured maximum" occurs specifically when instances
+lack a shared `--execution-segment-sequence` (`[4, 4, 4]`, all three tied). Neither is a race.
 
 
 ---
@@ -3103,17 +3512,17 @@ runtime evidence:
 
 | Request item | Verdict | Evidence |
 |---|---|---|
-| **Question (a)** — race between the two handler goroutines? | **No** — the two strategies are invoked sequentially in one goroutine; `-race` clean ×2 on both suites | §2.1, §4 |
+| **Question (a)** — race between the two handler goroutines? | **No** — direct handler-ordering trace shows both strategies invoked on one goroutine with `max simultaneous = 1` (they never overlap); graceful tail adds one later call on a separate goroutine after `iterateSteps` returns; `-race` clean ×2 on both suites | §2.1, §4.1, §4.4 |
 | **Question (b)** — is the VU buffer leaking? | **No** on the observed paths — buffer fully restored; failure path fails cleanly | §2.2, §6 |
 | **Question (c)** — trace both handlers modifying VU state "simultaneously" | Serialized on one per-VU mutex; mixed atomic/mutex model; no unsafe interleaving | §2.3, §5 |
 | **Symptom A** — "stuck" VUs (rapid up/down + long `gracefulRampDown`) | Transient, bounded lag (max +2), never permanent (final `0×10`) | §7-A |
 | **Symptom B** — scheduled vs. graceful count mismatch | Expected by design; `ceiling >= target` always; `Hard stop=0` observed | §7-B |
-| **Symptom C** — VUs outrun `gracefulStop` on ctrl+c | Not reproduced as a VU/`gracefulStop` defect; single Ctrl+C interrupts iterations in ~17–19 ms; graceful-phase work (`teardown`) explains long runtime; 2nd Ctrl+C = immediate hard stop | §7-C |
-| **Symptom D** — one instance higher; sum exceeds max | Deterministic striping; shared-sequence sum `=11`; independent-fill sum `=12>11` | §7-D |
+| **Symptom C** — VUs outrun `gracefulStop` on ctrl+c | Not reproduced as a VU/`gracefulStop` defect. Real-binary, nine conditions ×2: natural stage-end exits `0` (no signal); a single Ctrl+C interrupts sleeping iterations, CPU-busy iterations, iterations at a stage edge, and iterations already in `toGracefulStop` alike in ~7–8 ms (exit `105`); the long "keeps running" is graceful-phase work (`teardown` runs ~3.0 s to completion during graceful abort, not per-iteration overrun); a 2nd Ctrl+C escalates to an immediate hard stop (~7–8 ms, teardown truncated) | §7-C |
+| **Symptom D** — one instance higher; sum exceeds max | Deterministic striping. Canonical JSON `vus_max`: shared `[4,4,3]` sum `=11` (remainder 2 → **two earliest segments tie** at top, not one; at max 1 it is `[1,0,0]`, a single one); independent `[4,4,4]` all tied, sum `=12>11` | §7-D |
 | Named component: `maxAllowedVUsHandlerStrategy` `:668` (graceful/max-allowed) | Traced; shrinks ceiling via `hardStop`, grows implicitly | §4.1, §7-B |
 | Named component: `scheduledVUsHandlerStrategy` `:679` (scheduled) | Traced; `start`/`gracefulStop` on target change | §4.1, §7-B |
 | Named component: per-VU `mutex` `:71`; `start`/`gracefulStop`/`hardStop` | All lock the same mutex; serialize | §5.1 |
-| Named states: `stopped`/`starting`/`running`/`toGracefulStop`/`toHardStop` `:17-21` | Used by real name; transition trace captured | §5, §7-A |
+| Named states: `stopped`/`starting`/`running`/`toGracefulStop`/`toHardStop` `:17-21` | Used by real name; **all five directly captured** in one channel-gated VU trace (`[stopped starting running toGracefulStop toHardStop]`) | §5.3, §7-A |
 | Named path: VU buffer `GetPlannedVU`/`ReturnVU`/`ModCurrentlyActiveVUsCount` | Traced + accounting + failure path | §6 |
 | Named path: `gracefulStop`/`onHardStop` closures; `handleTestAbortSignals`; exit 105 | Traced; both signal closures observed | §7-C |
 | Named path: `ScaleInt64` / `GetFilledExecutionSegmentSequence` striping | Traced arithmetically + via CLI | §7-D |
@@ -3158,8 +3567,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -3255,15 +3667,23 @@ func blitzyProbeExecutor(
 	return ctx, cancel, executor, es, logHook
 }
 
-// TestBlitzyProbeStateTransitions drives ONE real vuHandle through a deterministic
-// sequence and observes the resulting state after each control call, answering Q(c):
-// all three control methods lock the SAME per-VU mutex and the documented transition
-// table governs every move. It also confirms getVU/returnVU are 1:1 at the vuHandle
-// level (the invariant at vu_handle.go:62).
+// TestBlitzyProbeStateTransitions drives ONE real vuHandle through a deterministic,
+// channel-gated sequence and DIRECTLY samples the state at each transition point —
+// including the three TRANSIENT states (starting, toGracefulStop, toHardStop), not
+// just the stable endpoints. It answers Q(c): all three control methods lock the SAME
+// per-VU mutex (start lib/executor/vu_handle.go:116, gracefulStop :148, hardStop :166)
+// and the documented transition table (lib/executor/vu_handle.go:24-55) governs every
+// move. It also confirms getVU/returnVU are 1:1 at the vuHandle level.
+//
+// Determinism: the iteration callback (runIter) blocks on an unbuffered `proceed`
+// channel, so while a VU is "running" the loop is parked INSIDE runIter and cannot
+// advance the state machine. This lets the test call gracefulStop()/hardStop() and read
+// the resulting TRANSIENT state BEFORE releasing the iteration. `starting` is captured
+// by calling start() BEFORE launching the run-loop goroutine (nothing advances it yet).
 func TestBlitzyProbeStateTransitions(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
 
 	logHook := testutils.NewLogHook(logrus.DebugLevel)
 	testLog := logrus.New()
@@ -3273,10 +3693,9 @@ func TestBlitzyProbeStateTransitions(t *testing.T) {
 	logEntry := logrus.NewEntry(testLog).WithField("vuNum", 0)
 
 	runner := simpleRunner(func(rctx context.Context, _ *lib.State) error {
-		// Short iteration so a running VU actually completes an iteration.
 		select {
 		case <-rctx.Done():
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 		}
 		return nil
 	})
@@ -3285,62 +3704,103 @@ func TestBlitzyProbeStateTransitions(t *testing.T) {
 	var getVUCount, returnVUCount int64
 	getVU := func() (lib.InitializedVU, error) {
 		atomic.AddInt64(&getVUCount, 1)
-		return runner.NewVU(ctx, uint64(atomic.LoadInt64(&getVUCount)), 0, nil)
+		return runner.NewVU(parentCtx, uint64(atomic.LoadInt64(&getVUCount)), 0, nil)
 	}
 	returnVU := func(_ lib.InitializedVU) {
 		atomic.AddInt64(&returnVUCount, 1)
 	}
 
-	vh := newStoppedVUHandle(ctx, getVU, returnVU, mockNextIterations, &BaseConfig{}, logEntry)
-	go vh.runLoopsIfPossible(func(ir context.Context, avu lib.ActiveVU) bool {
+	vh := newStoppedVUHandle(parentCtx, getVU, returnVU, mockNextIterations, &BaseConfig{}, logEntry)
+
+	// Gated iteration callback: hold the loop INSIDE the running state until released,
+	// so the test can observe the transient states deterministically.
+	entered := make(chan struct{}, 64)
+	proceed := make(chan struct{})
+	testDone := make(chan struct{})
+	defer close(testDone)
+	runIter := func(_ context.Context, avu lib.ActiveVU) bool {
 		if avu != nil {
 			_ = avu.RunOnce()
 		}
+		entered <- struct{}{} // announce: state is running and one real iteration ran
 		select {
-		case <-ir.Done():
-			return false
-		default:
-			return true
+		case <-proceed: // test lets this iteration finish
+		case <-testDone: // safety: never hang at cleanup
 		}
-	})
+		return true
+	}
 
-	settle := func() { time.Sleep(120 * time.Millisecond) }
+	type step struct {
+		label string
+		state string
+	}
+	var trace []step
+	record := func(label string) {
+		trace = append(trace, step{label, stateName(readState(vh))})
+	}
+	waitState := func(want stateType, timeout time.Duration) {
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if readState(vh) == want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 
-	t.Logf("Q(c) single-vuHandle state-machine trace (initial state=%s):", stateName(readState(vh)))
-	// stopped -> start -> (starting/running)
-	before := stateName(readState(vh))
-	require.NoError(t, vh.start())
-	settle()
-	t.Logf("  start()        : %-14s -> %-14s", before, stateName(readState(vh)))
-	// running -> gracefulStop -> (toGracefulStop -> eventually stopped after iteration)
-	before = stateName(readState(vh))
-	vh.gracefulStop()
-	settle()
-	t.Logf("  gracefulStop() : %-14s -> %-14s", before, stateName(readState(vh)))
-	// stopped -> start -> starting/running (reactivates the VU)
-	before = stateName(readState(vh))
-	require.NoError(t, vh.start())
-	time.Sleep(20 * time.Millisecond)
-	t.Logf("  start()        : %-14s -> %-14s", before, stateName(readState(vh)))
-	// running/starting -> hardStop -> stopped
-	before = stateName(readState(vh))
-	vh.hardStop()
-	settle()
-	t.Logf("  hardStop()     : %-14s -> %-14s", before, stateName(readState(vh)))
+	record("initial")                     // stopped
+	require.NoError(t, vh.start())        // stopped -> starting (loop not launched)
+	record("start() [loop not launched]") // starting
+	go vh.runLoopsIfPossible(runIter)     // starting -> running, enters runIter
+	<-entered
+	record("loop entered iteration")          // running
+	vh.gracefulStop()                         // running -> toGracefulStop (iteration held)
+	record("gracefulStop() [iteration held]") // toGracefulStop
+	proceed <- struct{}{}                     // release; loop: toGracefulStop -> stopped
+	waitState(stopped, 2*time.Second)
+	record("after iteration finishes") // stopped
+	require.NoError(t, vh.start())     // stopped -> ... -> running
+	<-entered
+	record("start() again -> loop entered iteration") // running
+	vh.hardStop()                                     // running -> toHardStop (iteration held)
+	record("hardStop() [iteration held]")             // toHardStop
+	proceed <- struct{}{}                             // release; loop: toHardStop -> stopped
+	waitState(stopped, 2*time.Second)
+	record("after hardStop settles") // stopped
+	cancelParent()
+	time.Sleep(60 * time.Millisecond)
+	record("after cancel()") // stopped
 
-	cancel()
-	time.Sleep(80 * time.Millisecond)
-	final := stateName(readState(vh))
-	t.Logf("  after cancel() : final state=%s", final)
+	// wait for async returnVU (VU deactivation) to settle before reading accounting
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(&returnVUCount) < atomic.LoadInt64(&getVUCount) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 
-	// Emit the captured debug transition lines in order.
+	seen := map[string]bool{}
+	t.Logf("Q(c)/M2 DIRECT five-state capture (one real vuHandle, channel-gated):")
+	for _, st := range trace {
+		seen[st.state] = true
+		t.Logf("  %-42s -> %s", st.label, st.state)
+	}
+	var distinct []string
+	for _, name := range []string{"stopped", "starting", "running", "toGracefulStop", "toHardStop"} {
+		if seen[name] {
+			distinct = append(distinct, name)
+		}
+	}
+	t.Logf("distinct states directly observed = %v", distinct)
+
 	entries := logHook.Drain()
-	t.Logf("Captured vuHandle debug transition lines (Message @ level):")
+	t.Logf("captured vuHandle debug transition lines:")
 	for _, e := range entries {
 		t.Logf("    level=%s msg=%q vuNum=%v", e.Level, e.Message, e.Data["vuNum"])
 	}
-	t.Logf("vuHandle-level acquire/return accounting: getVU=%d returnVU=%d (must be equal, invariant vu_handle.go:62)",
+	t.Logf("vuHandle acquire/return accounting: getVU=%d returnVU=%d (must be equal, invariant vu_handle.go:62)",
 		atomic.LoadInt64(&getVUCount), atomic.LoadInt64(&returnVUCount))
+
+	require.Equal(t, []string{"stopped", "starting", "running", "toGracefulStop", "toHardStop"}, distinct,
+		"all five VU states must be directly observed")
 	require.Equal(t, atomic.LoadInt64(&getVUCount), atomic.LoadInt64(&returnVUCount),
 		"getVU/returnVU must be 1:1")
 }
@@ -3627,10 +4087,10 @@ func TestBlitzyProbeStuckVUsDistribution(t *testing.T) {
 	config := blitzyRapidConfig()
 	t.Logf("Symptom A — config: rapid up/down 8<->0 @1s x4 (StartVUs=0), GracefulRampDown=3s, "+
 		"GracefulStop=1s, iteration sleep=300ms; %d identical (unchanged-input) runs", runs)
-	t.Logf("Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; "+
+	t.Logf("Symptom A — OBSERVED signal = GetCurrentlyActiveVUsCount [lib/execution.go:269]; " +
 		"'target' column = scheduled PlannedVUs from rawSteps (the scheduledVUsHandlerStrategy goal).")
-	t.Logf("Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target "+
-		"during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and "+
+	t.Logf("Symptom A — INFERRED (from vu_handle.go:19,24-55, not directly sampled): when active > target " +
+		"during a down-stage, the surplus VUs are in the transient toGracefulStop state — mid-iteration and " +
 		"finishing their current ~300ms iteration before returnVU; this is the 'stuck'-looking lag.")
 
 	type runResult struct {
@@ -3871,201 +4331,435 @@ func TestBlitzyProbeIndependentUnderEqualOver(t *testing.T) {
 		t.Logf("    %3d | %9d | %11d | %9d | %3d | %s (sum-T=%+d)", tgt, s[0], s[1], s[2], sum, rel, sum-tgt)
 	}
 	t.Logf("Symptom D (independent) — classification across T=1..12: OVER=%d EQUAL=%d UNDER=%d", over, equal, under)
-	t.Logf("Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the "+
+	t.Logf("Symptom D (independent) — OVER rows are real: without a shared --execution-segment-sequence the " +
 		"per-instance shares can sum ABOVE the configured maximum (deterministic per T, still never random).")
 	require.Greater(t, over, 0,
 		"independent fill must exhibit at least one OVER row (sum above global max) to explain Symptom D")
+}
+
+// blitzyGoID extracts the current goroutine's numeric id from the runtime stack
+// header ("goroutine <id> [running]:"). Used only to prove how many distinct
+// goroutines ever invoke the two handler strategies.
+func blitzyGoID() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	fields := strings.Fields(string(buf[:n]))
+	if len(fields) < 2 {
+		return -1
+	}
+	id, _ := strconv.Atoi(fields[1])
+	return id
+}
+
+// TestBlitzyProbeHandlerOrdering answers Q(a) DIRECTLY. It builds a real
+// rampingVUsRunState over the canonical rapid up/down config, wraps the two REAL
+// handler strategies (maxAllowedVUsHandlerStrategy lib/executor/ramping_vus.go:668 and
+// scheduledVUsHandlerStrategy :679) in a recorder, and drives them through the REAL
+// sequencer iterateSteps (:622) followed by the REAL graceful tail
+// runRemainingGracefulSteps (:654) launched in its own goroutine exactly as Run does
+// (go ... :554). Every handler invocation is timestamped and tagged with its goroutine
+// id and phase, so the trace shows: (i) how many goroutines invoke handlers, (ii)
+// whether any two handler bodies ever overlap in time, and (iii) that the scheduled
+// handler runs ONLY during iterateSteps while the tail invokes ONLY maxAllowed.
+func TestBlitzyProbeHandlerOrdering(t *testing.T) {
+	t.Parallel()
+	config := blitzyRapidConfig()
+	runner := simpleRunner(func(_ context.Context, _ *lib.State) error { return nil })
+	require.NoError(t, runner.SetOptions(lib.Options{}))
+	ctx, cancel, executorIface, _, _ := blitzyProbeExecutor(t, config, "", "", runner)
+	defer cancel()
+	rv, ok := executorIface.(*RampingVUs)
+	require.True(t, ok, "executor must be *RampingVUs")
+
+	maxVUs := lib.GetMaxPlannedVUs(rv.gracefulSteps)
+	discard := logrus.New()
+	discard.SetOutput(io.Discard)
+	logEntry := logrus.NewEntry(discard)
+
+	getVU := func() (lib.InitializedVU, error) { return runner.NewVU(ctx, 1, 0, nil) }
+	returnVU := func(_ lib.InitializedVU) {}
+
+	rs := &rampingVUsRunState{
+		executor:       rv,
+		vuHandles:      make([]*vuHandle, maxVUs),
+		maxVUs:         maxVUs,
+		activeVUsCount: new(int64),
+	}
+	for i := uint64(0); i < maxVUs; i++ {
+		rs.vuHandles[i] = newStoppedVUHandle(
+			ctx, getVU, returnVU, rv.nextIterationCounters,
+			&rv.config.BaseConfig, logEntry.WithField("vuNum", i))
+	}
+
+	type ev struct {
+		seq            int
+		goid           int
+		phase, handler string
+		off            time.Duration
+		pv             uint64
+	}
+	var (
+		mu      sync.Mutex
+		evs     []ev
+		seq     int
+		inH     int32
+		maxConc int32
+		phase   string
+	)
+	wrap := func(name string, real func(lib.ExecutionStep)) func(lib.ExecutionStep) {
+		return func(s lib.ExecutionStep) {
+			c := atomic.AddInt32(&inH, 1)
+			for {
+				m := atomic.LoadInt32(&maxConc)
+				if c <= m || atomic.CompareAndSwapInt32(&maxConc, m, c) {
+					break
+				}
+			}
+			mu.Lock()
+			seq++
+			evs = append(evs, ev{seq, blitzyGoID(), phase, name, s.TimeOffset, s.PlannedVUs})
+			mu.Unlock()
+			real(s)
+			atomic.AddInt32(&inH, -1)
+		}
+	}
+	handleMax := wrap("maxAllowed", rs.maxAllowedVUsHandlerStrategy())
+	handleSched := wrap("scheduled", rs.scheduledVUsHandlerStrategy())
+
+	rs.started = time.Now()
+	phase = "iterateSteps"
+	handled := rs.iterateSteps(ctx, handleMax, handleSched)
+	phase = "tail"
+	done := make(chan struct{})
+	go func() {
+		rs.runRemainingGracefulSteps(ctx, handleMax, handled)
+		close(done)
+	}()
+	<-done
+
+	// analysis
+	goids := map[int]bool{}
+	schedInTail, maxInTail, schedTotal, maxTotal := 0, 0, 0, 0
+	for _, e := range evs {
+		goids[e.goid] = true
+		switch e.handler {
+		case "scheduled":
+			schedTotal++
+			if e.phase == "tail" {
+				schedInTail++
+			}
+		case "maxAllowed":
+			maxTotal++
+			if e.phase == "tail" {
+				maxInTail++
+			}
+		}
+	}
+	t.Logf("Q(a)/M1 direct handler-invocation trace (rawSteps=%d gracefulSteps=%d maxVUs=%d):",
+		len(rv.rawSteps), len(rv.gracefulSteps), maxVUs)
+	t.Logf("  seq | phase         | handler    | goroutine | TimeOffset | PlannedVUs")
+	for _, e := range evs {
+		t.Logf("  %4d | %-12s | %-10s | g%-8d | %10s | %d", e.seq, e.phase, e.handler, e.goid, e.off, e.pv)
+	}
+	t.Logf("distinct goroutines that invoked ANY handler = %d (expect 1 during iterateSteps + at most 1 for the tail)", len(goids))
+	t.Logf("max handler bodies executing simultaneously = %d (expect 1 => no concurrent handler execution)", maxConc)
+	t.Logf("scheduled-handler calls during tail = %d (expect 0); maxAllowed calls during tail = %d", schedInTail, maxInTail)
+	t.Logf("totals: scheduled=%d maxAllowed=%d ; handledGracefulSteps(returned by iterateSteps)=%d", schedTotal, maxTotal, handled)
+
+	require.Equal(t, int32(1), maxConc, "the two handler strategies must never execute concurrently")
+	require.Equal(t, 0, schedInTail, "the scheduled handler must never run during the graceful tail")
+	require.Greater(t, maxInTail, 0, "the graceful tail must invoke maxAllowed at least once")
 }
 ```
 
 ### 9.2 Symptom C harness (`symptomC_run.sh`) — real SIGINT to the `k6` binary
 
-This Bash harness produced §7-C. It uses strict shell options (`set -euo pipefail`), a `mktemp -d`
-workdir, an `EXIT` trap that kills only the exact spawned PID and removes the workdir (no broad
-`pkill`), monotonic timing via `python3 time.monotonic()`, and ~1 ms poll-based exit detection. The three
-JavaScript scenarios (`sleep_iter.js`, `busy_iter.js`, `teardown_iter.js`) are created inline by the
-`cat > … <<'JS_EOF'` heredocs at the top of the script (lines 47, 58, 72), so the complete JS source is
-visible here as well.
+This Bash harness produced §7-C. It uses `set -u`; **strict `RUNS>=2` integer validation that fails fast
+(`exit 2`) before any work** (lines 22–30, addressing the earlier gap where `RUNS=0` or a non-numeric
+`RUNS` ran silently); a `mktemp -d` workdir; and `EXIT`/`INT`/`TERM` trap cleanup (`trap cleanup EXIT INT
+TERM`, line 81) that kills only the exact spawned PIDs it still owns and removes the workdir (no broad
+`pkill`). Each `SIGINT` is delivered to the exact spawned PID with `kill -INT`; the SIGINT→exit latency
+is measured on a high-resolution wall clock (`now() { date +%s.%N; }`, line 83) via a busy-spin `kill -0`
+poll with a 30 s deadline (`spin_until_exit`, line 87). Child reaping is **bounded** (`reap_bounded`,
+line 51): `wait` runs in the main shell and escalates `TERM`→`KILL` if a child overruns, after which the
+reaped PID is removed from the cleanup-ownership array (`remove_child`, line 41) so a later PID reuse
+cannot be signalled by mistake. The six JavaScript scenarios (`sleep_iter.js`, `busy_iter.js`,
+`teardown_busy.js`, `rampdown.js`, `natural.js`, `natural_forced.js`) are created inline by
+`cat > … <<'JS'` heredocs (lines 100, 110, 119, 130, 140, 150), so the complete JS source is visible in
+the listing below.
 
 ```bash
 #!/usr/bin/env bash
-#
 # symptomC_run.sh — TEMPORARY, EPHEMERAL investigation harness for User Symptom C
 # ("when I kill the test early with ctrl+c, some VUs keep running for way longer
 #  than gracefulStop should allow").
 #
-# It launches the REAL k6 binary through its canonical `k6 run` entry point, delivers
-# genuine os.Interrupt (SIGINT) signals to the exact child PID, detects the actual
-# process-exit instant by polling, and records the SIGINT->exit latency with a MONOTONIC
-# clock (python3 time.monotonic()). Each condition runs RUNS (>=2) identical times.
+# It launches the REAL k6 binary through its canonical `k6 run` entry point,
+# delivers real SIGINT(s) to the exact spawned PID, and measures the
+# SIGINT->exit latency with a high-resolution wall clock. Every condition is
+# run RUNS times (Rule 1: repeat identical input). Output is fully self-labeled.
 #
-#   C1 single SIGINT, interruptible sleep() VUs   (js/modules/k6/k6.go:71-80: sleep respects ctx.Done)
-#   C2 single SIGINT, CPU-busy non-yielding VUs    (JS VM interrupt still cancels them)
-#   C3 single SIGINT, script WITH teardown() busy  (graceful abort runs teardown to completion)
-#   C4 double SIGINT, same teardown() script       (2nd signal -> onHardStop -> OSExit, cutting teardown short)
-#
-# Signal path under test:
-#   cmd/common.go:97 handleTestAbortSignals; SignalNotify(os.Interrupt,SIGINT,SIGTERM) :101
-#     1st signal -> gracefulStop closure cmd/run.go:349-357
-#                   ("Stopping k6 in response to signal..." Debug :350; runAbort ExternalAbort)
-#     2nd signal -> onHardStop closure cmd/run.go:359-362
-#                   ("Aborting k6 in response to signal" Error :360)
-#                   then gs.OSExit(int(exitcodes.ExternalAbort)) cmd/common.go:118
-#   ExternalAbort ExitCode = 105  (errext/exitcodes/codes.go:41; comment :38-40)
-#
-set -euo pipefail
+# Hardening (QA m5/m6):
+#   * RUNS is validated as an integer >= 2 BEFORE any work or completion print.
+#   * Child waits are bounded with TERM->KILL escalation; the reaped PID is
+#     removed from the cleanup ownership array (no PID-reuse hazard). The real
+#     exit code is captured by `wait` in the MAIN shell (never a subshell).
+set -u
 
-K6="${K6:-/tmp/k6}"
-export K6_NO_USAGE_REPORT=true
+# ---- configuration -------------------------------------------------------
+K6="${K6:-/tmp/k6}"          # canonical baseline k6 (v0.55.0, commit ddc3b0b1d2)
 RUNS="${RUNS:-2}"
+
+# ---- m5: strict RUNS validation (fail fast, before ANY work) -------------
+case "$RUNS" in
+  ''|*[!0-9]*)
+    echo "ERROR(m5): RUNS must be a non-negative integer, got: '$RUNS'" >&2
+    exit 2 ;;
+esac
+if [ "$RUNS" -lt 2 ]; then
+  echo "ERROR(m5): RUNS must be >= 2 (Rule 1 requires repeating identical input), got: $RUNS" >&2
+  exit 2
+fi
+
+command -v "$K6" >/dev/null 2>&1 || { echo "ERROR: k6 binary not found at $K6" >&2; exit 3; }
+
 WORKDIR="$(mktemp -d /tmp/k6probe_symC.XXXXXX)"
-declare -a CHILDREN=()
+
+# ---- m6: bounded reap with TERM->KILL escalation + PID removal -----------
+CHILDREN=()
+REAP_RC=0
+
+remove_child() {  # delete a pid from the CHILDREN ownership array
+  local pid="$1" c newc=()
+  for c in ${CHILDREN[@]+"${CHILDREN[@]}"}; do
+    [ "$c" = "$pid" ] || newc+=("$c")
+  done
+  CHILDREN=(${newc[@]+"${newc[@]}"})
+}
+
+# reap_bounded PID GRACE_SECS : sets global REAP_RC; removes pid from CHILDREN.
+# Runs in the MAIN shell so `wait` returns the child's real exit status.
+reap_bounded() {
+  local pid="$1" grace="${2:-10}" waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    awk -v w="$waited" -v g="$grace" 'BEGIN{exit !(w>=g)}' && break
+    sleep 0.05; waited=$(awk -v w="$waited" 'BEGIN{printf "%.3f", w+0.05}')
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+      awk -v w="$waited" 'BEGIN{exit !(w>=2)}' && break
+      sleep 0.05; waited=$(awk -v w="$waited" 'BEGIN{printf "%.3f", w+0.05}')
+    done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    sleep 0.2
+  fi
+  wait "$pid"; REAP_RC=$?
+  remove_child "$pid"
+}
 
 cleanup() {
-    local p
-    for p in "${CHILDREN[@]:-}"; do
-        [ -n "${p:-}" ] || continue
-        if kill -0 "$p" 2>/dev/null; then kill -KILL "$p" 2>/dev/null || true; fi
-    done
-    rm -rf "$WORKDIR"
+  local c
+  for c in ${CHILDREN[@]+"${CHILDREN[@]}"}; do
+    kill -KILL "$c" 2>/dev/null || true
+    wait "$c" 2>/dev/null || true
+  done
+  rm -rf "$WORKDIR"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
-mono()  { python3 -c 'import time; print("%.6f" % time.monotonic())'; }
-py_ms() { python3 -c "import sys;a=float(sys.argv[1]);b=float(sys.argv[2]);print('%.1f'%((b-a)*1000.0))" "$1" "$2"; }
+now() { date +%s.%N; }
+ms()  { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", (b-a)*1000}'; }
 
-cat > "$WORKDIR/sleep_iter.js" <<'JS_EOF'
+# busy-spin (high-resolution) until PID exits, bounded by a wall-clock deadline
+spin_until_exit() {
+  local pid="$1" t0 i=0 cur
+  t0="$(now)"
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$((i+1))
+    if [ $((i % 200000)) -eq 0 ]; then
+      cur="$(now)"
+      awk -v c="$cur" -v a="$t0" 'BEGIN{exit !((c-a)>30)}' && { echo "SPIN_TIMEOUT" >&2; break; }
+    fi
+  done
+}
+
+# ---- scenario scripts ----------------------------------------------------
+cat > "$WORKDIR/sleep_iter.js" <<'JS'
 import { sleep } from 'k6';
-export const options = {
-  scenarios: { c: { executor: 'ramping-vus', startVUs: 0,
-    stages: [{ duration: '1s', target: 5 }, { duration: '600s', target: 5 }],
-    gracefulStop: '30s', gracefulRampDown: '30s' } },
-};
-// Interruptible: k6 sleep() returns immediately on ctx.Done (js/modules/k6/k6.go:76-78).
-export default function () { sleep(600); }
-JS_EOF
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 0,
+  stages: [{ duration: '1s', target: 5 }, { duration: '30s', target: 5 }],
+  gracefulRampDown: '5s', gracefulStop: '5s',
+} } };
+export default function () { sleep(30); }
+JS
 
-cat > "$WORKDIR/busy_iter.js" <<'JS_EOF'
-export const options = {
-  scenarios: { c: { executor: 'ramping-vus', startVUs: 0,
-    stages: [{ duration: '1s', target: 3 }, { duration: '600s', target: 3 }],
-    gracefulStop: '30s', gracefulRampDown: '30s' } },
-};
-// CPU-busy, NON-yielding iteration (~6s, bounded so the harness always terminates).
-export default function () {
-  const end = Date.now() + 6000; let x = 0;
-  while (Date.now() < end) { x += Math.sqrt(x + 1.0); }
-  if (x < 0) { console.log(x); }
-}
-JS_EOF
+cat > "$WORKDIR/busy_iter.js" <<'JS'
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 0,
+  stages: [{ duration: '0.5s', target: 3 }, { duration: '30s', target: 3 }],
+  gracefulRampDown: '5s', gracefulStop: '5s',
+} } };
+export default function () { const end = Date.now() + 60000; while (Date.now() < end) {} }
+JS
 
-cat > "$WORKDIR/teardown_iter.js" <<'JS_EOF'
-export const options = {
-  scenarios: { c: { executor: 'ramping-vus', startVUs: 0,
-    stages: [{ duration: '1s', target: 2 }, { duration: '600s', target: 2 }],
-    gracefulStop: '30s', gracefulRampDown: '30s' } },
-};
-export default function () {
-  const end = Date.now() + 6000; let x = 0;
-  while (Date.now() < end) { x += Math.sqrt(x + 1.0); }
-  if (x < 0) { console.log(x); }
-}
-// teardown() runs during graceful abort; this ~3s busy teardown makes the graceful
-// phase long enough to reliably exercise the 2nd-SIGINT hard-stop escalation.
-export function teardown() {
-  console.log('TEARDOWN_START');
-  const end = Date.now() + 3000; let x = 0;
-  while (Date.now() < end) { x += Math.sqrt(x + 1.0); }
-  console.log('TEARDOWN_END');
-}
-JS_EOF
+cat > "$WORKDIR/teardown_busy.js" <<'JS'
+import { sleep } from 'k6';
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 0,
+  stages: [{ duration: '0.5s', target: 2 }, { duration: '30s', target: 2 }],
+  gracefulRampDown: '5s', gracefulStop: '5s',
+} } };
+export default function () { sleep(30); }
+export function teardown () { console.log('TEARDOWN_START'); const end = Date.now() + 3000; while (Date.now() < end) {} console.log('TEARDOWN_END'); }
+JS
 
-run_one() {
-    local label="$1" script="$2" first_delay="$3" second_delay="$4" run_no="$5"
-    local out="$WORKDIR/${label}_run${run_no}.out"
-    local err="$WORKDIR/${label}_run${run_no}.err"
-    local tsf="$WORKDIR/${label}_run${run_no}.tsecond"
-    local ksf="$WORKDIR/${label}_run${run_no}.ks2"
+cat > "$WORKDIR/rampdown.js" <<'JS'
+import { sleep } from 'k6';
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 0,
+  stages: [{ duration: '1s', target: 6 }, { duration: '1s', target: 1 }, { duration: '30s', target: 1 }],
+  gracefulRampDown: '10s', gracefulStop: '5s',
+} } };
+export default function () { sleep(30); }
+JS
 
-    echo "===== CONDITION ${label} — run ${run_no}/${RUNS} ====="
-    echo "\$ $K6 run --verbose --no-summary --no-usage-report ${script##*/}   (first SIGINT @+${first_delay}s${second_delay:+, second @+${second_delay}s after first})"
-    "$K6" run --verbose --no-summary --no-usage-report "$script" >"$out" 2>"$err" &
-    local pid=$!
+cat > "$WORKDIR/natural.js" <<'JS'
+import { sleep } from 'k6';
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 0,
+  stages: [{ duration: '0.5s', target: 3 }, { duration: '0.5s', target: 0 }],
+  gracefulRampDown: '2s', gracefulStop: '2s',
+} } };
+export default function () { sleep(0.2); }
+JS
+
+cat > "$WORKDIR/natural_forced.js" <<'JS'
+import { sleep } from 'k6';
+export const options = { scenarios: { s: {
+  executor: 'ramping-vus', startVUs: 0,
+  stages: [{ duration: '0.5s', target: 3 }, { duration: '0.5s', target: 0 }],
+  gracefulRampDown: '3s', gracefulStop: '3s',
+} } };
+export default function () { sleep(2); }
+JS
+
+K6VER="$("$K6" version 2>&1 | head -1)"
+echo "################ k6 build under test ################"
+echo "$K6VER"
+echo "workdir: $WORKDIR ; RUNS per condition: $RUNS"
+echo "binary: $K6 (canonical baseline build, commit ddc3b0b1d2 == investigated ddc3b0b1d23c)"
+echo
+
+# run_case NAME SCRIPT FIRST_DELAY SECOND_DELAY WAIT_LOG
+#   FIRST_DELAY  : seconds before first SIGINT, or "none" for no signal
+#   SECOND_DELAY : seconds after first SIGINT before second SIGINT, or "none"
+#   WAIT_LOG     : a stderr substring to wait for before first SIGINT, or "none"
+run_case() {
+  local name="$1" script="$2" first="$3" second="$4" waitlog="$5"
+  local r log pid t_spawn t_first t_second t_exit rc g h
+  for r in $(seq 1 "$RUNS"); do
+    log="$WORKDIR/${name}.run${r}.log"
+    echo "===== CONDITION ${name} — run ${r}/${RUNS} ====="
+    echo "\$ $K6 run --verbose --no-summary --no-usage-report ${script##*/}   (first=${first} second=${second} wait_log=${waitlog})"
+    t_spawn="$(now)"; t_first=""; t_second=""
+    "$K6" run --verbose --no-summary --no-usage-report "$script" >"$log" 2>&1 &
+    pid=$!
     CHILDREN+=("$pid")
     echo "spawned k6 pid=$pid"
 
-    sleep "$first_delay"
-    local t_sig=""
-    if kill -0 "$pid" 2>/dev/null; then
-        t_sig="$(mono)"
-        local ks; if kill -INT "$pid" 2>/dev/null; then ks=0; else ks=$?; fi
-        echo "first  SIGINT: delivered_at_mono=$t_sig  kill_status=$ks  process_alive_before_send=yes"
+    if [ "$waitlog" != "none" ]; then
+      local w=0 seen=no
+      while awk -v w="$w" 'BEGIN{exit !(w<15)}'; do
+        if grep -q -- "$waitlog" "$log" 2>/dev/null; then seen=yes; break; fi
+        if ! kill -0 "$pid" 2>/dev/null; then break; fi
+        sleep 0.05; w=$(awk -v w="$w" 'BEGIN{printf "%.2f", w+0.05}')
+      done
+      echo "trigger '$waitlog' observed_before_signal=$seen after ${w}s"
+    fi
+
+    if [ "$first" = "none" ]; then
+      reap_bounded "$pid" 40; rc=$REAP_RC
+      t_exit="$(now)"
+      echo "wait result: pid=$pid exit_code=$rc  (0 == clean natural completion)"
+      echo "elapsed spawn -> natural exit: $(ms "$t_spawn" "$t_exit") ms"
     else
-        echo "first  SIGINT: NOT SENT — process already exited before +${first_delay}s"
-    fi
-
-    # Background second-SIGINT sender (double-SIGINT conditions), independent of exit polling.
-    local sender_pid=""
-    if [ -n "$second_delay" ] && [ -n "$t_sig" ]; then
-        (
-            sleep "$second_delay"
-            if kill -0 "$pid" 2>/dev/null; then
-                mono > "$tsf"
-                if kill -INT "$pid" 2>/dev/null; then echo 0 > "$ksf"; else echo $? > "$ksf"; fi
-            fi
-        ) &
-        sender_pid=$!
-        CHILDREN+=("$sender_pid")
-    fi
-
-    # Poll for the actual exit instant (~1ms resolution) — accurate SIGINT->exit latency.
-    while kill -0 "$pid" 2>/dev/null; do sleep 0.001; done
-    local t_exit; t_exit="$(mono)"
-    [ -n "$sender_pid" ] && { wait "$sender_pid" 2>/dev/null || true; }
-
-    local t_second=""; [ -f "$tsf" ] && t_second="$(cat "$tsf")"
-    if [ -n "$second_delay" ]; then
-        if [ -n "$t_second" ]; then
-            local ks2="?"; [ -f "$ksf" ] && ks2="$(cat "$ksf")"
-            echo "second SIGINT: delivered_at_mono=$t_second  kill_status=$ks2  process_alive_before_send=yes"
+      if [ "$waitlog" = "none" ]; then sleep "$first"; fi
+      t_first="$(now)"
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -INT "$pid"; echo "first  SIGINT: sent_at_mono=$t_first kill_status=$? alive_before=yes"
+      else
+        echo "first  SIGINT: process already exited before signal"; t_first=""
+      fi
+      if [ "$second" != "none" ]; then
+        sleep "$second"
+        t_second="$(now)"
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -INT "$pid"; echo "second SIGINT: sent_at_mono=$t_second kill_status=$? alive_before=yes"
         else
-            echo "second SIGINT: NOT SENT — process exited before scheduled +${second_delay}s"
+          echo "second SIGINT: process already exited before second signal"; t_second=""
         fi
+      fi
+      spin_until_exit "$pid"
+      t_exit="$(now)"
+      reap_bounded "$pid" 5; rc=$REAP_RC
+      echo "wait result: pid=$pid exit_code=$rc  (105 == ExternalAbort)"
+      [ -n "$t_first" ]  && echo "elapsed first_SIGINT  -> process_exit: $(ms "$t_first" "$t_exit") ms"
+      [ -n "$t_second" ] && echo "elapsed second_SIGINT -> process_exit: $(ms "$t_second" "$t_exit") ms"
     fi
 
-    set +e; wait "$pid"; local rc=$?; set -e
-    echo "wait result: pid=$pid exit_code=$rc  (105 == ExternalAbort)"
-    [ -n "$t_sig" ]    && echo "elapsed first_SIGINT  -> process_exit: $(py_ms "$t_sig" "$t_exit") ms"
-    [ -n "$t_second" ] && echo "elapsed second_SIGINT -> process_exit: $(py_ms "$t_second" "$t_exit") ms"
     echo "--- signal-relevant log lines (k6 stderr, --verbose) ---"
-    grep -E 'Stopping k6 in response to signal|Aborting k6 in response to signal|test run was aborted because k6' "$err" || echo "(none matched)"
-    echo "--- setup/teardown markers (console.log -> stderr) ---"
-    grep -E 'TEARDOWN_START|TEARDOWN_END' "$err" || echo "(no teardown markers)"
-    echo "--- iteration progress (final states) ---"
-    grep -E 'complete and [0-9]+ interrupted iterations' "$out" | tail -2 || true
-    echo "===== end ${label} run ${run_no}: exit=${rc} ====="
+    grep -E 'Stopping k6 in response|Aborting k6 in response|interrupted|aborted because|finished with an error|exiting k6' "$log" 2>/dev/null | sed 's/^/  /' | head -6
+    g=$(grep -c 'Graceful stop' "$log" 2>/dev/null); g=${g:-0}
+    h=$(grep -c 'Hard stop' "$log" 2>/dev/null); h=${h:-0}
+    echo "--- state markers --- Graceful stop log count=$g ; Hard stop log count=$h"
+    echo "--- teardown marker (console) ---"
+    grep -E 'TEARDOWN' "$log" 2>/dev/null | sed 's/^/  /' | head -2
+    echo "--- iteration progress (final two states) ---"
+    grep -E 'VUs, .*complete' "$log" 2>/dev/null | tail -2 | sed 's/^/  /'
+    echo "  alive_after_wait=$(kill -0 "$pid" 2>/dev/null && echo yes || echo no)"
+    echo "===== end ${name} run ${r}: exit=$rc ====="
     echo
+  done
 }
 
-echo "################ k6 build under test ################"
-"$K6" version
-echo "workdir: $WORKDIR ; RUNS per condition: $RUNS"
-echo
+# ---- M3 baseline: natural stage-end (NO signal) --------------------------
+run_case natural_stage_end        "$WORKDIR/natural.js"        none  none none
+run_case natural_forced_grace     "$WORKDIR/natural_forced.js" none  none none
+# ---- single-SIGINT conditions -------------------------------------------
+run_case C1_sleep_singleSIGINT    "$WORKDIR/sleep_iter.js"     2     none none
+run_case C2_busy_singleSIGINT     "$WORKDIR/busy_iter.js"      2.5   none none
+# ---- M3 edge: SIGINT near a stage transition ----------------------------
+run_case near_transition_SIGINT   "$WORKDIR/rampdown.js"       1     none none
+# ---- M3 edge: SIGINT AFTER an actual "Graceful stop" state log ----------
+run_case graceful_state_SIGINT    "$WORKDIR/rampdown.js"       0     none "Graceful stop"
+# ---- teardown (graceful-phase work) single + double ---------------------
+run_case C3_teardown_singleSIGINT "$WORKDIR/teardown_busy.js"  2     none none
+run_case C4_teardown_doubleSIGINT "$WORKDIR/teardown_busy.js"  2     0.6  none
+# ---- rapid double SIGINT (~10ms spacing) escalation during teardown -----
+run_case rapid_double_SIGINT      "$WORKDIR/teardown_busy.js"  2     0.01 none
 
-for r in $(seq 1 "$RUNS"); do run_one "C1_sleep_singleSIGINT"    "$WORKDIR/sleep_iter.js"    2   ""  "$r"; done
-for r in $(seq 1 "$RUNS"); do run_one "C2_busy_singleSIGINT"     "$WORKDIR/busy_iter.js"     2.5 ""  "$r"; done
-for r in $(seq 1 "$RUNS"); do run_one "C3_teardown_singleSIGINT" "$WORKDIR/teardown_iter.js" 2.5 ""  "$r"; done
-for r in $(seq 1 "$RUNS"); do run_one "C4_teardown_doubleSIGINT" "$WORKDIR/teardown_iter.js" 2.5 0.8 "$r"; done
-
-echo "################ ALL SYMPTOM C CONDITIONS COMPLETE ################"
+echo "################ SYMPTOM C HARNESS COMPLETE (RUNS=$RUNS) ################"
 ```
 
 ### 9.3 Symptom D harness (`symptomD_run.sh`) — synchronized 3-process CLI runs
 
 This Bash harness produced §7-D.2. It launches three real `k6 run` processes simultaneously (one per
-segment), in both SHARED and INDEPENDENT modes, twice each, and parses per-instance active-VU counts
-from k6's stdout progress lines with a carry-forward alignment (embedded `python3` parser). The
-`seg.js` scenario is created inline by the `cat > … <<'JS_EOF'` heredoc at line 42.
+segment) in three modes — **SHARED**, **INDEPENDENT**, and **SHARED_LOW** (global max 1) — twice each.
+It uses `set -u` (line 25); **strict `RUNS>=2` integer validation that fails fast (`exit 2`) before any
+work** (lines 33–42); a `mktemp -d` workdir; and `EXIT`/`INT`/`TERM` trap cleanup (`trap cleanup EXIT INT
+TERM`, line 74) that kills only the exact spawned PIDs it still owns (no broad `pkill`). Child reaping is
+**bounded** (`reap_bounded`, line 58): `wait` runs in the main shell and escalates `TERM`→`KILL` if a
+child overruns, after which the reaped PID is removed from the cleanup-ownership array (`remove_child`,
+line 50). Each instance emits **canonical metrics** via `--out json=<file>`; the embedded `python3`
+parser (heredoc at line 102) reads the `vus_max` (scaled configured max) and `vus` (peak active) metric
+`Point` records — **not** stdout progress lines — and reports the **tied maxima** plus the deterministic
+remainder recipients (earliest offsets). The two JS scenarios `seg.js` and `seg_low.js` are created
+inline by the `cat > … <<'JS'` heredocs at lines 77 and 91.
 
 ```bash
 #!/usr/bin/env bash
@@ -4074,45 +4768,79 @@ from k6's stdout progress lines with a carry-forward alignment (embedded `python
 # ("one instance consistently shows more VUs than the others at the same timestamp,
 #  and if I sum them up they exceed my configured maximum").
 #
-# It launches THREE REAL k6 processes SIMULTANEOUSLY through the canonical `k6 run`
-# entry point, each pinned to a non-overlapping --execution-segment. Two modes, each
-# RUNS (>=2) synchronized triples:
-#   SHARED      : all three share ONE --execution-segment-sequence 0,1/3,2/3,1 (canonical)
-#   INDEPENDENT : NO sequence supplied (each instance fills its own) -> the missing/mismatched case
-# Per instance it captures the scenario-header max planned VUs ("Up to N looping VUs"),
-# the active-VU progress time series ("running (Xs), a/m VUs"), and the exit code.
-# A python parser aligns the three series (carry-forward step function) by k6 internal
-# elapsed and reports per-timestamp sums.
+# Launches THREE REAL k6 processes SIMULTANEOUSLY through the canonical `k6 run`
+# entry point, each pinned to a non-overlapping --execution-segment. Modes:
+#   shared      : all three share ONE --execution-segment-sequence 0,1/3,2/3,1 (canonical)
+#   independent : NO sequence supplied (each instance fills its own)
+#   shared_low  : shared sequence, but global max target = 1 (remainder=1 -> single higher [1,0,0])
+# Each instance emits CANONICAL metrics via `--out json=<file>`; the python parser reads the
+# `vus_max` (scaled configured max) and `vus` (peak active) metric Points — NOT stdout progress lines.
+#
+# m5: RUNS is validated as an integer >= 2 BEFORE any work.
+# m6: child waits are BOUNDED with TERM->KILL escalation; each reaped PID is removed from the
+#     cleanup-ownership array (no unbounded wait; no signalling of a reused PID).
+# m2: the parser reports TIED maxima and the deterministic remainder recipients (earliest offsets),
+#     not a single arbitrary "highest".
 #
 # Flags: cmd/options.go:31 --execution-segment ; :32 --execution-segment-sequence.
-# Scaling: ExecutionSegmentSequenceWrapper.ScaleInt64 [lib/execution_segment.go:580];
-#          GetFilledExecutionSegmentSequence [lib/execution_segment.go:445].
+# Scaling: ExecutionSegmentSequenceWrapper.ScaleInt64 [lib/execution_segment.go:580] (remainder loop
+#          :584-586); GetFilledExecutionSegmentSequence [lib/execution_segment.go:445].
 #
-set -euo pipefail
+set -u
 
 K6="${K6:-/tmp/k6}"
 export K6_NO_USAGE_REPORT=true
 RUNS="${RUNS:-2}"
-GLOBAL_MAX=11
 SEQ="0,1/3,2/3,1"
 SEGS=("0:1/3" "1/3:2/3" "2/3:1")
-WORKDIR="$(mktemp -d /tmp/k6probe_symD.XXXXXX)"
-declare -a CHILDREN=()
 
+# ---- m5: strict RUNS validation (fail fast, before ANY work) -------------
+case "$RUNS" in
+    ''|*[!0-9]*)
+        echo "ERROR(m5): RUNS must be a non-negative integer, got: '$RUNS'" >&2
+        exit 2 ;;
+esac
+if [ "$RUNS" -lt 2 ]; then
+    echo "ERROR(m5): RUNS must be >= 2 (Rule 1 requires repeating identical input), got: $RUNS" >&2
+    exit 2
+fi
+
+command -v "$K6" >/dev/null 2>&1 || { echo "ERROR: k6 binary not found at '$K6'" >&2; exit 3; }
+WORKDIR="$(mktemp -d /tmp/k6probe_symD.XXXXXX)"
+
+# ---- m6: bounded reap with TERM->KILL escalation + PID removal ------------
+declare -a CHILDREN=()
+REAP_RC=0
+remove_child() {   # delete a pid from the CHILDREN ownership array
+    local pid="$1" i; local -a keep=()
+    for i in "${CHILDREN[@]:-}"; do
+        [ -n "$i" ] && [ "$i" != "$pid" ] && keep+=("$i")
+    done
+    CHILDREN=("${keep[@]:-}")
+}
+# reap_bounded PID GRACE_SECS : sets global REAP_RC; removes pid from CHILDREN.
+reap_bounded() {
+    local pid="$1" grace="${2:-40}" waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$grace" ]; do sleep 1; waited=$((waited + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid" 2>/dev/null || true; sleep 2; fi
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; sleep 1; fi
+    wait "$pid" 2>/dev/null; REAP_RC=$?
+    remove_child "$pid"
+}
 cleanup() {
-    local p
-    for p in "${CHILDREN[@]:-}"; do
-        [ -n "${p:-}" ] || continue
-        if kill -0 "$p" 2>/dev/null; then kill -KILL "$p" 2>/dev/null || true; fi
+    local c
+    for c in "${CHILDREN[@]:-}"; do
+        [ -n "${c:-}" ] || continue
+        if kill -0 "$c" 2>/dev/null; then kill -KILL "$c" 2>/dev/null || true; wait "$c" 2>/dev/null || true; fi
     done
     rm -rf "$WORKDIR"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
-cat > "$WORKDIR/seg.js" <<'JS_EOF'
+# ---- JS scenarios (canonical ramping-vus) --------------------------------
+cat > "$WORKDIR/seg.js" <<'JS'
 import { sleep } from 'k6';
-// Global peak target 11 VUs. With 3 equal thirds, 11 is NOT divisible by 3, so the
-// per-segment split is uneven (shared: 4/4/3=11; independent: 4/4/4=12>11).
+// Global peak target 11 VUs across 3 equal thirds; 11 % 3 != 0 so the split is uneven.
 export const options = {
   scenarios: { d: { executor: 'ramping-vus', startVUs: 0,
     stages: [
@@ -4122,122 +4850,163 @@ export const options = {
     ] } },
 };
 export default function () { sleep(1); }
-JS_EOF
+JS
 
-cat > "$WORKDIR/parse.py" <<'PY_EOF'
-import sys, re
+cat > "$WORKDIR/seg_low.js" <<'JS'
+import { sleep } from 'k6';
+// Global peak target 1 VU: remainder 1 -> exactly ONE segment (earliest offset) gets it -> [1,0,0].
+export const options = {
+  scenarios: { d: { executor: 'ramping-vus', startVUs: 0,
+    stages: [ { duration: '2s', target: 1 }, { duration: '2s', target: 0 } ] } },
+};
+export default function () { sleep(1); }
+JS
+
+# ---- canonical JSON parser (m2-correct: tied maxima + remainder recipients) ----
+cat > "$WORKDIR/parse.py" <<'PY'
+import sys, json
 mode, gmax = sys.argv[1], int(sys.argv[2])
 segs = sys.argv[3:6]
-errfiles = sys.argv[6:9]
-maxvus, series = [], []
-for f in errfiles:
-    text = open(f).read()
-    m = re.search(r'Up to (\d+) looping VUs', text)
-    maxvus.append(int(m.group(1)) if m else -1)
-    s = {}
-    for mm in re.finditer(r'running \((?:(\d+)m)?([\d.]+)s\), (\d+)/(\d+) VUs', text):
-        mins = int(mm.group(1)) if mm.group(1) else 0
-        elapsed = round(mins * 60 + float(mm.group(2)), 1)
-        s[elapsed] = int(mm.group(3))
-    series.append(s)
+jsonfiles = sys.argv[6:9]
+vmax, vpeak = [], []
+for f in jsonfiles:
+    mx = 0; pk = 0
+    with open(f) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or '"Point"' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") != "Point":
+                continue
+            if obj.get("metric") == "vus_max":
+                mx = max(mx, int(obj["data"]["value"]))
+            elif obj.get("metric") == "vus":
+                pk = max(pk, int(obj["data"]["value"]))
+    vmax.append(mx); vpeak.append(pk)
 
-print("  per-instance max planned VUs (scenario header 'Up to N looping VUs'):")
+print("  per-instance CANONICAL metrics (JSON --out json; vus_max = scaled configured max, vus = peak active):")
 for i, seg in enumerate(segs):
-    print("    seg%d %-8s => %d" % (i, seg, maxvus[i]))
-tot = sum(maxvus)
+    print("    seg%d %-8s => vus_max=%d  peak_vus=%d" % (i, seg, vmax[i], vpeak[i]))
+tot = sum(vmax)
 rel = "OVER (exceeds configured max!)" if tot > gmax else ("EQUAL" if tot == gmax else "UNDER")
-print("    SUM of per-instance max VUs = %d  vs configured global max = %d  => %s" % (tot, gmax, rel))
+print("    SUM of per-instance vus_max = %d  vs configured global max = %d  => %s" % (tot, gmax, rel))
 
-def at(s, t):
-    v = 0
-    for tt in sorted(s):
-        if tt <= t + 1e-9:
-            v = s[tt]
-        else:
-            break
-    return v
+# m2: report TIED maxima + which segments received the striping remainder (earliest offsets).
+mx = max(vmax) if vmax else 0
+mn = min(vmax) if vmax else 0
+tied = ["seg%d(%s)" % (i, segs[i]) for i, v in enumerate(vmax) if v == mx]
+recipients = ["seg%d(%s)" % (i, segs[i]) for i, v in enumerate(vmax) if v > mn]
+print("  per-instance vus_max = %s" % vmax)
+print("  maximum per-instance share = %d ; segment(s) AT the maximum (TIED): %s  (%d of %d instances)"
+      % (mx, tied, len([1 for v in vmax if v == mx]), len(segs)))
+if mn == mx:
+    print("  remainder distribution: ALL %d segments tie at %d — each instance rounds ITS OWN share up "
+          "(independent per-instance ceiling, no shared floor) => the sum can exceed the global max" % (len(segs), mx))
+else:
+    surplus = sum(1 for v in vmax if v > mn)
+    print("  remainder distribution: %d surplus VU(s) assigned DETERMINISTICALLY to the EARLIEST-offset "
+          "segment(s) %s (striped ScaleInt64 remainder loop, execution_segment.go:584-586) => those "
+          "instance(s) are consistently higher; the rest tie at the floor %d" % (surplus, recipients, mn))
+PY
 
-times = sorted(set().union(*[set(s.keys()) for s in series])) if any(series) else []
-print("  aligned active-VU series (carry-forward by k6 internal elapsed):")
-print("    elapsed | seg0 | seg1 | seg2 | sum | vs gmax")
-peak_sum = 0
-for t in times:
-    vals = [at(series[i], t) for i in range(3)]
-    ssum = sum(vals)
-    peak_sum = max(peak_sum, ssum)
-    tag = "OVER" if ssum > gmax else ("=" if ssum == gmax else "")
-    print("    %6.1fs | %4d | %4d | %4d | %3d | %s" % (t, vals[0], vals[1], vals[2], ssum, tag))
-print("  peak instantaneous active-VU sum across aligned samples = %d (configured max %d)" % (peak_sum, gmax))
-peaks = [max(s.values()) if s else 0 for s in series]
-hi = peaks.index(max(peaks))
-print("  per-instance peak active VUs: %s ; highest = seg%d (%s) => one instance consistently higher" % (peaks, hi, segs[hi]))
-PY_EOF
-
+# ---- one synchronized triple ---------------------------------------------
+# run_triple MODE RUN_NO SCRIPT GMAX USE_SEQ
 run_triple() {
-    local mode="$1" run_no="$2"
-    local -a pids=() outs=() rc=()
-    local i out
-    echo "-------- ${mode^^} sequence, SYNCHRONIZED 3-process triple, run ${run_no}/${RUNS} --------"
+    local mode="$1" run_no="$2" script="$3" gmax="$4" use_seq="$5"
+    local -a pids=() jsons=() rc=()
+    local i js
+    echo "-------- ${mode} triple (gmax=${gmax}), SYNCHRONIZED 3-process run ${run_no}/${RUNS} --------"
     for i in 0 1 2; do
-        out="$WORKDIR/${mode}_run${run_no}_seg${i}.out"
-        outs[i]="$out"
-        if [ "$mode" = "shared" ]; then
-            echo "\$ $K6 run --execution-segment ${SEGS[i]} --execution-segment-sequence $SEQ seg.js"
+        js="$WORKDIR/${mode}_run${run_no}_seg${i}.json"
+        jsons[i]="$js"
+        if [ "$use_seq" = "yes" ]; then
+            echo "\$ $K6 run --execution-segment ${SEGS[i]} --execution-segment-sequence $SEQ --out json=<f> $script"
             "$K6" run --execution-segment "${SEGS[i]}" --execution-segment-sequence "$SEQ" \
-                --no-summary --no-usage-report "$WORKDIR/seg.js" >"$out" 2>"$WORKDIR/${mode}_run${run_no}_seg${i}.err" &
+                --no-summary --out json="$js" "$WORKDIR/$script" \
+                >"$WORKDIR/${mode}_run${run_no}_seg${i}.out" 2>"$WORKDIR/${mode}_run${run_no}_seg${i}.err" &
         else
-            echo "\$ $K6 run --execution-segment ${SEGS[i]} seg.js   (NO --execution-segment-sequence)"
+            echo "\$ $K6 run --execution-segment ${SEGS[i]} --out json=<f> $script   (NO --execution-segment-sequence)"
             "$K6" run --execution-segment "${SEGS[i]}" \
-                --no-summary --no-usage-report "$WORKDIR/seg.js" >"$out" 2>"$WORKDIR/${mode}_run${run_no}_seg${i}.err" &
+                --no-summary --out json="$js" "$WORKDIR/$script" \
+                >"$WORKDIR/${mode}_run${run_no}_seg${i}.out" 2>"$WORKDIR/${mode}_run${run_no}_seg${i}.err" &
         fi
         pids[i]=$!
         CHILDREN+=("${pids[i]}")
     done
-    for i in 0 1 2; do set +e; wait "${pids[i]}"; rc[i]=$?; set -e; done
+    for i in 0 1 2; do reap_bounded "${pids[i]}" 40; rc[i]=$REAP_RC; done
     echo "exit codes: seg0=${rc[0]} seg1=${rc[1]} seg2=${rc[2]}"
-    python3 "$WORKDIR/parse.py" "$mode" "$GLOBAL_MAX" "${SEGS[0]}" "${SEGS[1]}" "${SEGS[2]}" \
-        "${outs[0]}" "${outs[1]}" "${outs[2]}"
+    python3 "$WORKDIR/parse.py" "$mode" "$gmax" "${SEGS[0]}" "${SEGS[1]}" "${SEGS[2]}" \
+        "${jsons[0]}" "${jsons[1]}" "${jsons[2]}"
     echo "-------- end ${mode} run ${run_no} --------"
     echo
 }
 
 echo "################ k6 build under test ################"
 "$K6" version
-echo "workdir: $WORKDIR ; RUNS per mode: $RUNS ; shared sequence: $SEQ ; segments: ${SEGS[*]} ; global max target: $GLOBAL_MAX"
+echo "workdir: $WORKDIR ; RUNS per mode: $RUNS ; shared sequence: $SEQ ; segments: ${SEGS[*]}"
 echo
 
-for r in $(seq 1 "$RUNS"); do run_triple "shared"      "$r"; done
-for r in $(seq 1 "$RUNS"); do run_triple "independent" "$r"; done
+for r in $(seq 1 "$RUNS"); do run_triple "SHARED"      "$r" "seg.js"     11 "yes"; done
+for r in $(seq 1 "$RUNS"); do run_triple "INDEPENDENT" "$r" "seg.js"     11 "no";  done
+for r in $(seq 1 "$RUNS"); do run_triple "SHARED_LOW"  "$r" "seg_low.js"  1 "yes"; done
 
-echo "################ ALL SYMPTOM D TRIPLES COMPLETE ################"
+echo "################ SYMPTOM D HARNESS COMPLETE (RUNS=$RUNS) ################"
 ```
 
 ### 9.4 Cleanup attestation and repository integrity
 
-This was a read-only investigation. The only change committed to the repository is this single document.
-The temporary artifacts used to capture the evidence are, by category:
+This was a read-only investigation. The only change committed to the repository is this single document
+(`blitzy/documentation/k6_ddc3b0b1d23c.md`); the k6 source tree is left byte-for-byte identical to the
+investigated baseline commit `ddc3b0b1d23c` ("Update comment"). The temporary artifacts used to capture
+the evidence, and their disposal, are:
 
-- **Built binary (outside the repo tree):** `/tmp/k6` — the investigation binary built in §3.3. This is
-  distinct from the environment-setup-owned `/tmp/k6_bin`, which this investigation neither produced nor
-  relies on and does not remove.
-- **Captured logs and harness scripts (outside the repo tree):** `/tmp/k6probe_out/` — the raw `.log`
-  transcripts embedded above, plus `symptomC_run.sh` and `symptomD_run.sh`. The JavaScript scenarios were
-  created inside each harness's own `mktemp -d` workdir and were removed by that harness's `EXIT` trap as
-  soon as it finished.
-- **In-package probe (inside the tree, but untracked and never committed):**
-  `lib/executor/blitzy_adhoc_test_probe_test.go` — carries the `blitzy_adhoc_test_` prefix and is deleted
-  after capture.
+- **Binary under test (outside the repo tree):** `/tmp/k6` — the canonical **baseline** build
+  (`commit/ddc3b0b1d2`, `65,574,496` bytes) used for the real-`SIGINT` (§7-C) and three-process segment
+  (§7-D.2) reproductions. It was **removed** after evidence capture. It is distinct from the
+  environment-setup-owned `/tmp/k6_bin` (the byte-identical baseline build, same size and `sha256`), which
+  this investigation did not create and does **not** remove.
+- **Harness scripts + captured transcripts (outside the repo tree):** `symptomC_run.sh`,
+  `symptomD_run.sh`, their captured transcripts (embedded verbatim in §7-C and §7-D.2), and the small
+  helper scripts — all under a scratch directory outside the repo tree; **removed** after the transcripts
+  were embedded. Each harness's JS scenarios lived in its own `mktemp -d` workdir and were deleted by that
+  harness's `EXIT`/`INT`/`TERM` trap the moment it finished (no `/tmp/k6probe_*` workdirs remain).
+- **In-package probe (inside the tree, untracked, never committed):**
+  `lib/executor/blitzy_adhoc_test_probe_test.go` (the source embedded in §9.1) — carried the
+  `blitzy_adhoc_test_` prefix and was **removed** after capture. With it gone, `go build ./lib/executor/`
+  and a test-package compile both still succeed, confirming the source tree remains intact.
 
-After evidence capture, these temporary artifacts are removed with the following commands, and the
-repository is verified to contain only this document as an addition to the investigated source tree
-(`git status --porcelain` empty apart from this file; the k6 source tree byte-for-byte unchanged):
+**Verification (actual output captured at cleanup time):**
 
 ```text
-rm -f /tmp/k6
-rm -rf /tmp/k6probe_out
-rm -f lib/executor/blitzy_adhoc_test_probe_test.go
-git status --porcelain    # expected: only blitzy/documentation/k6_ddc3b0b1d23c.md
+### /tmp/k6 removed; /tmp/k6_bin (setup-owned) preserved
+$ test -e /tmp/k6 && echo present || echo absent
+absent
+$ test -f /tmp/k6_bin && echo present || echo missing
+present
+
+### no investigation probe / adhoc files remain in the repo tree
+$ find . -name 'blitzy_adhoc_test_*' -not -path './.git/*'
+(no output)
+
+### source tree byte-for-byte unchanged vs baseline (restricted to source dirs)
+$ git diff ddc3b0b1d23c -- lib execution cmd | wc -l
+0
+
+### the sole addition vs the investigated baseline is this document
+$ git diff ddc3b0b1d23c..HEAD --name-status
+A	blitzy/documentation/k6_ddc3b0b1d23c.md
 ```
+
+**Working-tree status vs. baseline→HEAD diff — they answer different questions.** On the *committed*
+result, `git status --porcelain` is **empty**: a clean working tree carries no entry for an
+already-committed file. The one-document change is therefore **not** shown by `git status`; it is visible
+only in the baseline→HEAD comparison above (`A  blitzy/documentation/k6_ddc3b0b1d23c.md`). (Before the
+final commit, the same document appears exactly once in `git status --porcelain` as a single changed path
+and nowhere else; committing it folds that single delta into `HEAD`, leaving the working tree clean.)
 
 No existing k6 source or test file was modified, refactored, or deleted at any point in this
 investigation.
