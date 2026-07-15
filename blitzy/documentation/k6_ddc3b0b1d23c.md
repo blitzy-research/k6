@@ -857,7 +857,7 @@ are emitted. A custom metric's `.add()` method builds a `metrics.Sample` and **i
 via `metrics.PushIfNotDone(m.vu.Context(), state.Samples, sample)` on every call
 (`js/modules/k6/metrics/metrics.go:L77`, push at `L127`) **(source-verified)** — there is no
 `isFullIteration && isDefault` gate on that path. The official Grafana k6 documentation describes custom
-metrics as being collected from VU threads "at the end of each VU iteration." That is a **higher-level
+metrics as being collected from VU threads "at the end of a VU iteration." That is a **higher-level
 simplification** — it does **not** match the per-`Sample` runtime timing in the v0.55.0 source. The
 `Sample` is enqueued onto the samples channel **the moment `.add()` runs** (`L127`), so the same two
 50 ms flushers traced in Q3 (`output.Manager` and the engine's `OutputIngester`) observe and output it
