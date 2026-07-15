@@ -638,8 +638,14 @@ grpc_streams_msgs_received...: 98     19.697647/s
   `0/2 VUs, 0 complete and 2 interrupted iterations` — mirroring Q1, the two in-flight streaming
   iterations were terminated, not completed.
 - **Stability across ≥2 runs (primary value).** `grpc_streams_msgs_received` was **98** in all three
-  5 s runs (rates `19.697647`, `19.692874`, `19.698584`/s), because the `sleep 5` interrupt timing is
-  deterministic; evidence in `/tmp/q_evidence/q2_run1.out`…`q2_run3.out`.
+  5 s runs (rates `19.697647`, `19.692874`, `19.698584`/s), and **98** again in four additional 5 s
+  re-verification runs (rates `19.699182`, `19.706554`, `19.696320`, `19.701417`/s). The `sleep 5`
+  interrupt *instant* is fixed, but the count is read **at** that instant, so it carries an inherent
+  **±1-message-per-stream** timing jitter: with each of the 2 streams having received ~49–50 of its 100
+  messages (delivered ~100 ms apart), **98** is the modal, reproducible value, and a larger sample can
+  occasionally land on **100** (one extra message on a single stream). This is exactly why the count is
+  reported as the value *observed at a 5 s interrupt* rather than a fixed property of the RPC (see the
+  scaling table above). Evidence in `/tmp/q_evidence/q2_run1.out`…`q2_run3.out`.
 - **Server lifecycle proven (read-only discipline).** Readiness was confirmed by a TCP-connect probe
   before any client run; the launcher PID was retained; after the runs the server was terminated by
   PID and port `10000` was confirmed released (a subsequent TCP connect is refused); and the main
@@ -925,9 +931,13 @@ The summary reports **`dropped_iterations...: 990`** (≈990 = 1000 scheduled �
 `maxDuration`). Note this run exits **0** — reaching `maxDuration` is *normal completion* for
 `shared-iterations`, not an abort.
 
-**Is Mechanism B's value live-observable via the REST API?** No — and this was verified with a **real**
-polling loop (not an illustrative snippet). While k6 was alive, `/v1/metrics` was queried every ~30 ms
-and each response was checked for `dropped_iterations`:
+**Is Mechanism B's value observable via the REST API?** Not by a poll taken *while the scenario is
+still running* — but, unlike Mechanism A, the value **does** enter `MetricsEngine.ObservedMetrics` the
+moment the executor pushes it, and it **is** then served by `GET /v1/metrics`. This was verified two
+ways: (1) a **real** during-run polling loop (not an illustrative snippet) showing `dropped_iterations`
+ABSENT for the whole run, and (2) a post-run `--linger` query showing it **present** with `count=990`.
+First, the during-run loop — while k6 was alive, `/v1/metrics` was queried every ~30 ms and each
+response was checked for `dropped_iterations`:
 
 ```bash
 /tmp/k6_base/k6 run --verbose /tmp/q3_si.js > /tmp/q3_si.out 2>&1 &
@@ -972,13 +982,72 @@ non-`ABSENT` line):
 ```
 
 Every one of the 79 lines is `<timestamp> dropped_iterations: ABSENT` (78 of them; the first is the
-pre-bind poll) — `dropped_iterations` never appeared in the live API. The reason is structural: the
-`DroppedIterations` sample is
-pushed **once, from a deferred function at executor end** when `maxDuration` is hit
-(`shared_iterations.go:L217-L229`), after which k6 proceeds to the summary and tears down; it never
-enters the `MetricsEngine.ObservedMetrics` set that the live API serves. This is exactly why
-**Mechanism A (arrival-rate) is used as the primary Rule-3 REST-API evidence** (its drops are pushed
-continuously and are live-observable), while Mechanism B's value is read from the summary.
+pre-bind poll) — `dropped_iterations` did not appear in the API **during the run**. The reason is
+**push cadence**, not set membership. For `shared-iterations` the `DroppedIterations` sample is pushed
+**once, from a deferred function at executor end** when `maxDuration` is hit (`shared_iterations.go:L217-L229`,
+`PushIfNotDone` at `:L220`), whereas an arrival-rate executor pushes a dropped sample **continuously**
+throughout the run. Without `--linger`, k6 proceeds from that single end-of-run push straight to the
+end-of-test summary and tears the REST API server down almost immediately, so a *during-run* poll has
+effectively no window in which to observe the value.
+
+Crucially, the value is **not** excluded from what the API serves. Every pushed sample — this deferred
+one included — is drained by the internal metrics ingester on its periodic flush
+(`collectRate = 50 ms`, `metrics/engine/ingester.go:L12,L43`) and passed to `markObserved`
+(`ingester.go:L89` → `metrics/engine/engine.go:L108-L111`), which sets `metric.Observed = true` and adds
+the metric to `me.ObservedMetrics` — the very map `GET /v1/metrics` serves
+(`api/v1/metric_routes.go:L16`). So the shared-iterations `dropped_iterations` sample **does** enter
+`MetricsEngine.ObservedMetrics`; it is simply emitted a single time, at executor end. This was proven
+directly by keeping the API server alive past test end with the `--linger` flag
+(`-l, --linger  keep the API server alive past test end`, `cmd/config.go:L32`; the post-test wait loop
+is in `cmd/run.go:L373-L388`):
+
+```bash
+# shared-iterations WITH --linger: the REST API stays bound after the single end-of-run push,
+# giving a window to query the value the during-run poll could not catch.
+/tmp/k6_base/k6 run --linger --verbose /tmp/q3_si.js > /tmp/q3_si_linger.out 2>&1 &
+K6PID=$!
+# Wait until the executor has finished and k6 has entered the linger wait (API still bound).
+until grep -q 'waiting for Ctrl+C' /tmp/q3_si_linger.out; do sleep 0.1; done
+curl -sS -D /tmp/q3_si_linger_hdr.txt -o /tmp/q3_si_linger_api.json \
+     -w 'HTTP_STATUS=%{http_code}\n' http://localhost:6565/v1/metrics
+python3 -c "import json;d=json.load(open('/tmp/q3_si_linger_api.json'));\
+print(json.dumps([x for x in d['data'] if x['id']=='dropped_iterations'],indent=2))"
+kill -INT "$K6PID"; wait "$K6PID"   # release the linger wait; k6 exits normally (code 0)
+```
+
+Complete, unedited output of the post-run query (run 1):
+
+```text
+time="2026-07-15T00:48:46Z" level=debug msg="The test is done, but --linger was enabled, so k6 is waiting for Ctrl+C to continue..."
+HTTP_STATUS=200
+[
+  {
+    "type": "metrics",
+    "id": "dropped_iterations",
+    "attributes": {
+      "type": "counter",
+      "contains": "default",
+      "tainted": null,
+      "sample": {
+        "count": 990,
+        "rate": 197.82860331593884
+      }
+    }
+  }
+]
+```
+
+The query returns HTTP `200` with `dropped_iterations` **present** — `count=990`
+(= 1000 scheduled − 10 completed), `type=counter` — reproduced across both `--linger` runs
+(rates `197.82860331593884` / `197.87662372722946`; the count is deterministically `990`). Note the API
+served this value **before** the end-of-test summary was generated (with `--linger` the summary prints
+only after Ctrl+C releases the wait), which proves the sample reaches `ObservedMetrics` through the
+ingester, not through the summary path. The correct distinction between the two mechanisms is therefore
+**push cadence** — arrival-rate drops are pushed *continuously* and are live-observable by a during-run
+poll (**Mechanism A**, retained as the primary Rule-3 REST-API evidence because it needs no `--linger`),
+while iteration-executor drops are pushed *once at executor end* and are observable via the REST API only
+if the server is kept alive with `--linger` (**Mechanism B**) — it is **not** a matter of "enters vs.
+never-enters `ObservedMetrics`."
 
 ### Explanation & root cause (file:line)
 
@@ -1003,20 +1072,22 @@ continuously and are live-observable), while Mechanism B's value is read from th
 
 ### Secondary / edge conditions & stability
 
-- **Both drop mechanisms covered (Rule 2):** arrival-rate no-free-VU (live API = **2018** @~10 s) and
-  shared-iterations `maxDuration` (summary = **990**, live API = absent).
+- **Both drop mechanisms covered (Rule 2):** arrival-rate no-free-VU (live API = **2018** @~10 s,
+  observable by a during-run poll) and shared-iterations `maxDuration` (summary = **990**; ABSENT from a
+  during-run poll, but served by the REST API **post-run with `--linger`** = **990**, HTTP `200`).
 - **Run-to-run variance (stated explicitly).** The absolute counter value varies with sampling time
   and scheduling jitter; the drop **rate** is stable. Observed values:
 
-  | Run | Mechanism A — API @~10 s | Mechanism A — summary @30 s | Mechanism B — summary |
-  |-----|--------------------------|-----------------------------|-----------------------|
-  | 1   | count=2018, rate=196.88721060509081 | 5940, 197.042316/s | 990, 197.903481/s |
-  | 2   | count=2008, rate=196.08320585539013 | 5941, 197.068234/s | 990, 197.882437/s |
+  | Run | Mechanism A — API @~10 s | Mechanism A — summary @30 s | Mechanism B — summary | Mechanism B — API (`--linger`, post-run) |
+  |-----|--------------------------|-----------------------------|-----------------------|------------------------------------------|
+  | 1   | count=2018, rate=196.88721060509081 | 5940, 197.042316/s | 990, 197.903481/s | count=990, rate=197.82860331593884 (HTTP 200) |
+  | 2   | count=2008, rate=196.08320585539013 | 5941, 197.068234/s | 990, 197.882437/s | count=990, rate=197.87662372722946 (HTTP 200) |
 
-  The Mechanism-A drop **rate is stable at ≈197/s** and Mechanism B is **990** in both runs; the
+  The Mechanism-A drop **rate is stable at ≈197/s** and Mechanism B is **990** in both runs — including
+  the **post-run `--linger` REST-API reads** (`count=990` at HTTP `200` in both `--linger` runs); the
   fixed, reproducible element (per Rule 3) is the **methodology** — the value is read from the REST-API
   JSON:API payload. Evidence: `/tmp/q_evidence/q3_car_api1.json`, `q3_car_api2.json`,
-  `q3_si_poll1.log`, `q3_si_poll2.log`, `q3_si_clean.out`.
+  `q3_si_poll1.log`, `q3_si_poll2.log`, `q3_si_clean.out`, `q3_si_linger1.json`, `q3_si_linger2.json`.
 
 ---
 
@@ -1708,12 +1779,15 @@ version exit status: 0
   single-SIGINT runs — stable. The two-SIGINT **hard stop** (`Aborting k6 in response to signal`,
   `sig=interrupt`, exit `105`) was likewise reproduced in both hard-stop runs — stable.
 - **Q2 received count:** `grpc_streams_msgs_received = 98` in all three 5 s runs (rates `19.697647`,
-  `19.692874`, `19.698584`/s) — stable.
+  `19.692874`, `19.698584`/s), reconfirmed **98** across four further 5 s runs — stable. The count is
+  read at the fixed interrupt instant and carries an inherent ±1-message-per-stream jitter, so **98** is
+  the modal value (a larger sample can occasionally show **100**).
 - **Q3 dropped count:** *legitimately varies with sampling time* (cumulative counter), so the fixed,
   reproducible elements are the REST-API methodology (Rule 3, value read from the JSON:API payload) and
   the drop **rate ≈197/s** — not the absolute count. Mechanism A REST-API count @~10 s = `2018` / `2008`
   (run 1 / run 2; rates `196.887` / `196.083`/s); summary @30 s = `5940` / `5941`. Mechanism B summary
-  = `990` in both runs.
+  = `990` in both runs, and its **post-run `--linger` REST-API read = `990`** (HTTP `200`) in both
+  `--linger` runs — deterministic (= 1000 − 10 completed).
 - **Q4 memory peaks:** `SharedArray` `~347-369 MiB` (flat) and per-VU copy `~395-410 MiB` (1 VU) /
   `~1.9-2.0 GiB` (10 VUs) / `~8.3-8.9 GiB` (50 VUs) across both runs — stable in shape; absolute
   values are machine-dependent.
@@ -1764,7 +1838,8 @@ distinct reasons in different executors: with `shared-iterations` / `per-vu-iter
 when the scenario reaches its `maxDuration` before all iterations finish; with `constant-arrival-rate` /
 `ramping-arrival-rate`, iterations drop when there are no free VUs. This is precisely the two-mechanism
 split exercised at runtime — Mechanism A (no free VU, arrival-rate, live-observable via the REST API)
-and Mechanism B (`maxDuration` reached, shared-iterations, end-of-run). The k6 v0.27.0 release notes
+and Mechanism B (`maxDuration` reached, shared-iterations, single end-of-run push — observable via the
+REST API post-run with `--linger`). The k6 v0.27.0 release notes
 independently corroborate that `dropped_iterations` is emitted by exactly these four executors.
 *Source:* Grafana k6 documentation, "Dropped iterations"
 (`https://grafana.com/docs/k6/latest/using-k6/scenarios/concepts/dropped-iterations/`).
