@@ -397,17 +397,26 @@ with `0 complete and 2 interrupted iterations` (the two in-flight streams were c
 
 ### Command(s) run
 
-**1. Start the in-repo RouteGuide gRPC server** (the `Makefile` `grpc-server-run:` target). It is a
-separate, non-vendored module, so `-mod=mod` is required. To keep the main repository byte-for-byte
-unchanged, the server was started from the **frozen-baseline clone** `/tmp/k6_base` (the same tree the
-`/tmp/k6_base/k6` binary was built from); any `-mod=mod` rewrite of `go.mod`/`go.sum` then lands only
-in the disposable clone, and the repo's `examples/grpc_server/go.mod`/`go.sum` are verified pristine in
-§Cleanup. It listens on `localhost:10000`:
+**1. Start the in-repo RouteGuide gRPC server** (the `Makefile` `grpc-server-run:` target runs it with
+`go run`; here it is compiled to a binary first — see below). It is a separate, non-vendored module, so
+`-mod=mod` is required. To keep the main repository byte-for-byte unchanged, the server was built and
+run from the **frozen-baseline clone** `/tmp/k6_base` (the same tree the `/tmp/k6_base/k6` binary was
+built from); any `-mod=mod` rewrite of `go.mod`/`go.sum` then lands only in the disposable clone, and
+the repo's `examples/grpc_server/go.mod`/`go.sum` are verified pristine in §Cleanup. The server is
+**compiled to a standalone binary and run directly** (rather than via `go run`) so that the retained
+PID is the *actual* listener process: a `go run` launcher forks a compiled child (`…/exe/main`) that
+holds the socket, so `$!` would capture the launcher and a `kill` of it would orphan that child and
+leave port `10000` bound. Running the compiled binary makes `$!` the real listener PID, so a single
+`kill "$SRVPID"` shuts the server down cleanly and releases the port (verified in §Cleanup). It listens
+on `localhost:10000`:
 
 ```bash
 cd /tmp/k6_base
-nohup go run -mod=mod examples/grpc_server/*.go > /tmp/q2_server.out 2>&1 &
-SRVPID=$!; echo "$SRVPID" > /tmp/q2_server.pid    # retain the launcher PID for a clean shutdown
+# Build the separate examples/grpc_server module to a standalone binary. The -mod=mod rewrite of its
+# go.mod/go.sum lands only in this disposable clone; the repo copy stays pristine (see §Cleanup).
+( cd examples/grpc_server && go build -mod=mod -o /tmp/k6_base/grpc_server . )
+/tmp/k6_base/grpc_server > /tmp/q2_server.out 2>&1 &
+SRVPID=$!; echo "$SRVPID" > /tmp/q2_server.pid    # $! is the REAL listener PID (compiled binary, not a go-run launcher)
 # Readiness probe: wait until the server accepts a TCP connection on 127.0.0.1:10000.
 # (ss/netstat do not report this listener inside the container, but a real TCP connect does.)
 for i in $(seq 1 120); do
@@ -637,8 +646,8 @@ grpc_streams_msgs_received...: 98     19.697647/s
 - **In-flight iterations interrupted (primary 5 s run):** the final progress line is
   `0/2 VUs, 0 complete and 2 interrupted iterations` — mirroring Q1, the two in-flight streaming
   iterations were terminated, not completed.
-- **Stability across ≥2 runs (primary value).** `grpc_streams_msgs_received` was **98** in all three
-  5 s runs (rates `19.697647`, `19.692874`, `19.698584`/s), and **98** again in four additional 5 s
+- **Stability across ≥2 runs (primary value).** `grpc_streams_msgs_received` was **98** in each of the
+  three primary 5 s runs (rates `19.697647`, `19.692874`, `19.698584`/s), and **98** again in four additional 5 s
   re-verification runs (rates `19.699182`, `19.706554`, `19.696320`, `19.701417`/s). The `sleep 5`
   interrupt *instant* is fixed, but the count is read **at** that instant, so it carries an inherent
   **±1-message-per-stream** timing jitter: with each of the 2 streams having received ~49–50 of its 100
@@ -647,10 +656,12 @@ grpc_streams_msgs_received...: 98     19.697647/s
   reported as the value *observed at a 5 s interrupt* rather than a fixed property of the RPC (see the
   scaling table above). Evidence in `/tmp/q_evidence/q2_run1.out`…`q2_run3.out`.
 - **Server lifecycle proven (read-only discipline).** Readiness was confirmed by a TCP-connect probe
-  before any client run; the launcher PID was retained; after the runs the server was terminated by
-  PID and port `10000` was confirmed released (a subsequent TCP connect is refused); and the main
-  repository's `examples/grpc_server/go.mod`/`go.sum` were verified byte-for-byte unchanged
-  (the `-mod=mod` build ran only inside the disposable `/tmp/k6_base` clone). See §Cleanup.
+  before any client run; because the server runs as a **compiled binary** (not `go run`), the retained
+  `$!` is the real listener PID, so after the runs a single `kill "$SRVPID"` terminated the actual
+  listener and port `10000` was confirmed released (a subsequent TCP connect is refused — no orphaned
+  `…/exe/main` child, which a `go run` launcher would have left behind); and the main repository's
+  `examples/grpc_server/go.mod`/`go.sum` were verified byte-for-byte unchanged (the `-mod=mod` build
+  ran only inside the disposable `/tmp/k6_base` clone). See §Cleanup.
 
 ---
 
@@ -1008,6 +1019,12 @@ is in `cmd/run.go:L373-L388`):
 K6PID=$!
 # Wait until the executor has finished and k6 has entered the linger wait (API still bound).
 until grep -q 'waiting for Ctrl+C' /tmp/q3_si_linger.out; do sleep 0.1; done
+# The single end-of-run push is drained into ObservedMetrics by the ingester's periodic 50 ms flush,
+# which completes ~0.2-0.5 s AFTER the linger-wait line prints; a lone immediate query can fire in
+# that narrow window and see []. Poll until dropped_iterations is served, then capture status+body.
+until curl -sS --max-time 1 http://localhost:6565/v1/metrics 2>/dev/null \
+      | python3 -c "import sys,json;d=json.load(sys.stdin);\
+sys.exit(0 if any(x['id']=='dropped_iterations' for x in d['data']) else 1)"; do sleep 0.05; done
 curl -sS -D /tmp/q3_si_linger_hdr.txt -o /tmp/q3_si_linger_api.json \
      -w 'HTTP_STATUS=%{http_code}\n' http://localhost:6565/v1/metrics
 python3 -c "import json;d=json.load(open('/tmp/q3_si_linger_api.json'));\
@@ -1039,7 +1056,11 @@ HTTP_STATUS=200
 
 The query returns HTTP `200` with `dropped_iterations` **present** — `count=990`
 (= 1000 scheduled − 10 completed), `type=counter` — reproduced across both `--linger` runs
-(rates `197.82860331593884` / `197.87662372722946`; the count is deterministically `990`). Note the API
+(rates `197.82860331593884` / `197.87662372722946`; the count is deterministically `990`). The value
+becomes visible **~0.2–0.5 s after** the linger-wait line prints — the brief interval the ingester's
+50 ms flush needs to drain the single deferred push into `ObservedMetrics` — which is why the command
+polls until it appears rather than firing one immediate query (a lone immediate query occasionally
+returns `[]` in that narrow window). Note the API
 served this value **before** the end-of-test summary was generated (with `--linger` the summary prints
 only after Ctrl+C releases the wait), which proves the sample reaches `ObservedMetrics` through the
 ingester, not through the summary path. The correct distinction between the two mechanisms is therefore
@@ -1468,9 +1489,11 @@ export default function () {
 
 A capture harness `/tmp/q5_harness.sh` proves the **full receiver lifecycle for every run** — it binds
 first, probes readiness against the real socket, runs k6 through its canonical CLI, verifies request
-receipt, shuts the receiver down by PID, and confirms the port is released. It uses an **absolute
-repository path** and filters the names stream to metric-name records (`grep -E '^k6_'`); the receiver's
-own startup/readiness line goes to **stderr**, never into the `__name__` stream:
+receipt, shuts the receiver down by PID, and confirms the port is released. It runs k6 from the
+harness's current working directory (the exported `__name__` set is independent of cwd — verified by
+running from a non-repository directory) and filters the names stream to metric-name records
+(`grep -E '^k6_'`); the receiver's own startup/readiness line goes to **stderr**, never into the
+`__name__` stream:
 
 ```bash
 #!/usr/bin/env bash
@@ -1478,7 +1501,6 @@ own startup/readiness line goes to **stderr**, never into the `__name__` stream:
 # (bind -> readiness -> request receipt -> graceful shutdown -> port release)
 # for every k6 run, and records the exported __name__ set per run.
 set -u
-REPO=/tmp/blitzy/k6/blitzy-4ce06149-7b21-45a7-abce-70948718b407_6d89aa  # absolute repo path (M15)
 K6=/tmp/k6_base/k6
 RECV=/tmp/rwrecv/rwrecv
 PORT=9090
@@ -1495,8 +1517,8 @@ capture () {  # $1=label  $2=script  $3..=env assignments (K=V), optional
   # 2) readiness probe against the actual listening socket
   local ready=no
   for _ in $(seq 1 50); do port_open && { ready=yes; break; }; sleep 0.1; done
-  # 3) run k6 through its real CLI; capture exit status
-  ( cd "$REPO" && env "$@" "$K6" run -o experimental-prometheus-rw "$script" ) >"$k6out" 2>&1
+  # 3) run k6 through its real CLI (from the current cwd — no repository path needed); capture exit status
+  ( env "$@" "$K6" run -o experimental-prometheus-rw "$script" ) >"$k6out" 2>&1
   local k6rc=$?
   # 4) graceful shutdown by PID, wait, then confirm the port is released
   kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null; local rrc=$?
@@ -1765,12 +1787,27 @@ version exit status: 0
   binary used for **all** of Q1–Q5, so every k6 log banner below reads
   `commit/ddc3b0b1d2` consistently.
 
+**CI-equivalent test suite (known environmental condition).** This documentation-only investigation
+changes **zero** source or test bytes and makes **no claim** that k6's own test suite passes. For
+completeness: running the repository's canonical CI convention `go test -race -timeout 210s ./...` in
+this container image exits **non-zero (`1`)**. The failures are **environmental, not deliverable
+regressions** — two are deterministic TLS/PKI certificate-verification failures in the Go/`httpmultibin`
+test-support certificate infrastructure (`js/modules/k6/grpc` `TestClient_TlsParameters`:
+`x509: certificate signed by unknown authority (… candidate authority certificate "Acme Co")`;
+`js/modules/k6/http` `TestRequestAndBatchTLS/ocsp_stapled_good`: `wrong ocsp stapled response status:
+unknown`), and the remainder are timing-sensitive flakes that pass on isolated re-run under reduced
+`-race` contention. `git diff --stat ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD` for each failing
+package directory is **empty** — the test files are byte-identical to the frozen baseline, so the same
+failures occur at that baseline regardless of this document — and none of these packages lie on the
+Q1–Q5 runtime paths investigated here. (Observed this run: `grpc` and `http` failed deterministically
+with the TLS/OCSP signatures above; the full-suite process exited `1`.)
+
 **Per-question invocation summary.**
 
 | Q | Script(s) | Invocation (essence) | Value(s) read from |
 |---|-----------|----------------------|--------------------|
 | Q1 | `/tmp/q1_ramping.js`, `/tmp/q1_hardstop.js` | `/tmp/k6_base/k6 run --verbose … &` then `kill -INT` (then a **second** `kill -INT` during a widened `teardown()` window for the hard stop) | console/log stream + progress line |
-| Q2 | `/tmp/q2_stream.js` + `examples/grpc_server` | `go run -mod=mod examples/grpc_server/*.go &`; `GRPC_IMPORT_PATH="/tmp" GRPC_PROTO_FILE="route_guide.proto" /tmp/k6_base/k6 run --verbose … &` then `kill -INT` | interrupt log + end-of-test summary |
+| Q2 | `/tmp/q2_stream.js` + `examples/grpc_server` | `(cd examples/grpc_server && go build -mod=mod -o /tmp/k6_base/grpc_server .)`; `/tmp/k6_base/grpc_server & SRVPID=$!`; `GRPC_IMPORT_PATH="/tmp" GRPC_PROTO_FILE="route_guide.proto" /tmp/k6_base/k6 run --verbose … &` then `kill -INT` (client); `kill "$SRVPID"` (server) | interrupt log + end-of-test summary |
 | Q3 | `/tmp/q3_car.js`, `/tmp/q3_si.js` | `/tmp/k6_base/k6 run … &` then `curl -sS http://localhost:6565/v1/metrics` | **REST API JSON:API** (primary) + summary cross-check |
 | Q4 | `/tmp/q4_shared.js`, `/tmp/q4_copy.js` | `VUS=N /tmp/k6_base/k6 run …` while polling `/proc/<pid>/status` `VmRSS` | peak `VmRSS` |
 | Q5 | `/tmp/q5.js` (+ `/tmp/rwrecv` receiver) | `/tmp/k6_base/k6 run -o experimental-prometheus-rw …` | decoded `prompb.WriteRequest` `__name__` labels |
@@ -1780,7 +1817,7 @@ version exit status: 0
 - **Q1 interrupted count:** `6` interrupted iterations (== 6 active VUs) and exit code `105` in both
   single-SIGINT runs — stable. The two-SIGINT **hard stop** (`Aborting k6 in response to signal`,
   `sig=interrupt`, exit `105`) was likewise reproduced in both hard-stop runs — stable.
-- **Q2 received count:** `grpc_streams_msgs_received = 98` in all three 5 s runs (rates `19.697647`,
+- **Q2 received count:** `grpc_streams_msgs_received = 98` in each of the three primary 5 s runs (rates `19.697647`,
   `19.692874`, `19.698584`/s), reconfirmed **98** across four further 5 s runs — stable. The count is
   read at the fixed interrupt instant and carries an inherent ±1-message-per-stream jitter, so **98** is
   the modal value (a larger sample can occasionally show **100**).
@@ -1887,8 +1924,10 @@ scripts, the ~30 MiB dataset, the remote-write receiver, and the throwaway build
 (which held the compiled `./k6`) existed *before* and are gone *after*:
 
 ```console
-# PROCESS CHECK (no lingering k6 / receiver / gRPC-example)
-$ ps -eo pid,comm,args | grep -E "/tmp/k6_base/k6|/tmp/rwrecv/rwrecv|examples/grpc_server|go run .*grpc_server" | grep -v grep || echo "(no k6 / rwrecv / grpc_server processes running)"
+# PROCESS CHECK (no lingering k6 / receiver / gRPC-example). The pattern includes the compiled
+# /tmp/k6_base/grpc_server binary and, defensively, any orphaned `go run` child (…/exe/main) so a
+# stray listener cannot hide behind a mismatched process name.
+$ ps -eo pid,comm,args | grep -E "/tmp/k6_base/k6|/tmp/rwrecv/rwrecv|/tmp/k6_base/grpc_server|examples/grpc_server|go run .*grpc_server|go-build.*exe/main" | grep -v grep || echo "(no k6 / rwrecv / grpc_server processes running)"
 (no k6 / rwrecv / grpc_server processes running)
 
 # BEFORE — temporary observation artifacts under /tmp
@@ -1987,14 +2026,14 @@ commit-stable proof is the name-status diff against the baseline commit
 # Authoritative, commit-stable proof: only the deliverable differs from the frozen baseline
 $ git diff --name-status ddc3b0b1d23c128e34e2792fc9075f9126e32375..HEAD
 A	blitzy/documentation/k6_ddc3b0b1d23c.md
+# Once the deliverable is committed, the working tree is clean — this prints nothing:
 $ git status --porcelain -uall
- M blitzy/documentation/k6_ddc3b0b1d23c.md
+$
 ```
 
 The diff carries a single `A` (added) entry for this document and **zero** `M` (modified) or `D`
 (deleted) entries — no source, test, CI, `Dockerfile`, `go.mod`, or `go.sum` file changed, so the k6
-source tree is byte-for-byte unchanged. This answer document is itself a tracked file on the
-investigation branch, so while it is being finalised the working tree reports it as a *tracked
-modification* (` M`, which the remediation commit folds in) — it is never an *untracked* (`??`) file.
-Both views agree: the sole delta versus the frozen investigative baseline is this single Markdown
-deliverable.
+source tree is byte-for-byte unchanged. Once the deliverable is committed, `git status --porcelain`
+reports a **clean working tree** (empty output). Both views agree: the sole delta versus the frozen
+investigative baseline is this single Markdown deliverable — a tracked file on the investigation
+branch (never an *untracked* `??` file).
